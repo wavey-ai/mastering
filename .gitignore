@@ -1,0 +1,15 @@
+/target/
+/deploy/aws/lambda/target/
+/build/
+/wasm/pkg/
+/wasm/target/
+/local/
+.DS_Store
+__pycache__/
+*.wav
+*.aiff
+*.flac
+*.mp3
+.env*
+/public/target/
+/target-mastering-copy/

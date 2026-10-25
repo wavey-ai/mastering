@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Your masters</title>
+<style>
+:root{color-scheme:dark;font:16px/1.5 system-ui,sans-serif;background:#101010;color:#eee}
+*{box-sizing:border-box}body{margin:0}main{max-width:1000px;margin:auto;padding:40px 24px 70px}
+h1{font-size:clamp(28px,5vw,44px);letter-spacing:-.04em;line-height:1.15;margin:8px 0 18px}
+p{max-width:75ch;color:#bbb}.eyebrow{letter-spacing:.14em;text-transform:uppercase;font-size:12px;color:#9fbdac}
+button,select,a{font:inherit}button,select{background:#202020;color:#eee;border:1px solid #555;border-radius:6px;padding:10px 14px}
+button{cursor:pointer}button:hover{border-color:#ddd}button[aria-pressed=true]{background:#cee3d6;color:#15241b;border-color:#cee3d6}
+button:disabled{opacity:.45;cursor:wait}a{color:#bddbc9;text-underline-offset:3px}a:focus-visible,button:focus-visible,select:focus-visible,input:focus-visible{outline:3px solid #cddcff;outline-offset:3px}
+.deck{background:#171717;border:1px solid #3d3d3d;padding:20px;border-radius:8px;margin:26px 0}
+.controls{display:flex;align-items:center;gap:14px;flex-wrap:wrap}.controls label{display:flex;gap:10px;align-items:center}
+#seek{width:100%;margin:22px 0 6px;accent-color:#bddbc9}#time{font-variant-numeric:tabular-nums;color:#aaa;font-size:14px}
+#now{font-weight:650;margin-top:14px}#status{min-height:24px;color:#bbb}#status[data-error=true]{color:#ffb7a9}
+.version{border-top:1px solid #383838;padding:22px 0;display:grid;grid-template-columns:minmax(0,1fr) auto;gap:18px}
+.version h2{font-size:20px;margin:0 0 8px}.version p{margin:0 0 12px;font-size:15px}.actions{display:flex;align-items:start;gap:8px}
+.downloads{display:flex;gap:20px;font-size:14px}.measure{font-size:13px;color:#999}.foot{font-size:14px;border-top:1px solid #383838;padding-top:22px}
+@media(max-width:650px){main{padding:26px 16px}.version{grid-template-columns:1fr}.actions{order:2}.controls{gap:10px}.controls label{flex-wrap:wrap}select{max-width:100%}}
+</style>
+<main>
+<div class="eyebrow">Your masters</div>
+<h1>Your music leads.<br>You choose by listening.</h1>
+<p>Hear the interpretations of this recording. Switch versions at the same position, compare at matched loudness, and keep the ones you prefer.</p>
+<section class="deck" aria-label="Listening controls">
+<div class="controls"><button id="play" disabled>Play</button><label>Playback <select id="mode"><option value="matched">Matched loudness</option><option value="delivered">Delivered level</option></select></label></div>
+<div id="now">Loading your masters…</div>
+<input id="seek" type="range" min="0" max="1" step="0.01" value="0" aria-label="Playback position" disabled>
+<div id="time">0:00 / 0:00</div><div id="status" role="status" aria-live="polite"></div>
+</section>
+<section id="versions" aria-label="Versions"></section>
+<p class="foot">Matched playback changes listening gain only. Downloads keep their delivered levels. Your original is preserved. <a href="analysis-and-trials.json" download>Measurements and treatment evidence</a></p>
+</main>
+<script>
+'use strict';
+const $=id=>document.getElementById(id);
+let manifest,rows=[],selected=null,buffer=null,context=null,node=null,gainNode=null;
+let playing=false,offset=0,started=0,loading=false,generation=0,fetchController=null;
+let matchTarget=-18,mode='matched',gain=1,kept=new Set(),choiceKey='';
+const seconds=n=>`${Math.floor(n/60)}:${String(Math.floor(n%60)).padStart(2,'0')}`;
+const position=()=>Math.min(buffer?.duration||0,offset+(playing?context.currentTime-started:0));
+function audioContext(){
+  if(!context){context=new AudioContext();gainNode=context.createGain();gainNode.connect(context.destination);}
+  return context;
+}
+function stop(){offset=position();if(node){node.onended=null;node.stop();node.disconnect();node=null;}playing=false;$('play').textContent='Play';}
+function setGain(){const row=rows.find(r=>r.id===selected);gain=mode==='matched'&&row?10**((matchTarget-row.lufs)/20):1;if(gainNode)gainNode.gain.value=gain;}
+function start(){
+  if(!buffer)return;
+  if(offset>=buffer.duration)offset=0;
+  node=context.createBufferSource();node.buffer=buffer;node.connect(gainNode);started=context.currentTime;playing=true;
+  node.onended=()=>{offset=buffer.duration;playing=false;node.disconnect();node=null;$('play').textContent='Play';};
+  node.start(0,offset);$('play').textContent='Pause';
+}
+function status(message,error=false){$('status').textContent=message;$('status').dataset.error=String(error);}
+function paintSelection(){
+  document.querySelectorAll('[data-version]').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.version===selected)));
+  $('now').textContent=rows.find(r=>r.id===selected)?.label||'Choose a version';
+}
+async function select(id){
+  const ticket=++generation,row=rows.find(r=>r.id===id);if(!row)return;
+  fetchController?.abort();fetchController=new AbortController();loading=true;$('play').disabled=true;$('seek').disabled=true;
+  status(`Loading ${row.label}…`);
+  try{
+    const response=await fetch(encodeURIComponent(row.wav),{signal:fetchController.signal});
+    if(!response.ok)throw new Error(`Audio could not be loaded (${response.status}).`);
+    const decoded=await audioContext().decodeAudioData(await response.arrayBuffer());
+    if(ticket!==generation)return;
+    const resume=playing,where=position();stop();buffer=decoded;offset=Math.min(where,buffer.duration);selected=id;setGain();paintSelection();
+    $('seek').max=String(buffer.duration);$('seek').value=String(offset);
+    if(resume&&offset<buffer.duration)start();
+    status(mode==='matched'?'Loudness matched for comparison.':'Playing the delivered level.');
+  }catch(error){if(ticket===generation&&error.name!=='AbortError')status(error.message,true);}
+  finally{if(ticket===generation){loading=false;$('play').disabled=!buffer;$('seek').disabled=!buffer;}}
+}
+function renderRows(){
+  for(const row of rows){
+    const article=document.createElement('article');article.className='version';
+    const content=document.createElement('div'),heading=document.createElement('h2'),description=document.createElement('p');
+    heading.textContent=row.label;description.textContent=row.description;content.append(heading,description);
+    const downloads=document.createElement('div');downloads.className='downloads';
+    const wav=document.createElement('a');wav.href=encodeURIComponent(row.wav);wav.download=row.wav;wav.textContent='Download WAV';downloads.append(wav);
+    if(row.report){const report=document.createElement('a');report.href=encodeURIComponent(row.report);report.download=row.report;report.textContent='Measurements';downloads.append(report);}
+    content.append(downloads);
+    const actions=document.createElement('div');actions.className='actions';
+    const listen=document.createElement('button');listen.textContent='Listen';listen.dataset.version=row.id;listen.setAttribute('aria-label',`Listen to ${row.label}`);listen.setAttribute('aria-pressed','false');listen.onclick=()=>select(row.id);actions.append(listen);
+    if(row.id!=='original'){
+      const keep=document.createElement('button');keep.textContent=kept.has(row.id)?'Kept':'Keep';keep.dataset.keep=row.id;keep.setAttribute('aria-pressed',String(kept.has(row.id)));
+      keep.onclick=()=>{if(kept.has(row.id))kept.delete(row.id);else kept.add(row.id);keep.textContent=kept.has(row.id)?'Kept':'Keep';keep.setAttribute('aria-pressed',String(kept.has(row.id)));try{localStorage.setItem(choiceKey,JSON.stringify([...kept]));}catch{status('This browser cannot save your choices locally.',true);}};
+      actions.append(keep);
+    }
+    article.append(content,actions);$('versions').append(article);
+  }
+}
+$('play').onclick=async()=>{if(loading)return;if(playing)stop();else{await audioContext().resume();start();}};
+$('mode').onchange=()=>{mode=$('mode').value;setGain();status(mode==='matched'?'Loudness matched for comparison.':'Playing the delivered level.');};
+$('seek').oninput=()=>{const resume=playing;stop();offset=Number($('seek').value);if(resume)start();};
+function tick(){if(buffer){const p=position();$('seek').value=String(p);$('time').textContent=`${seconds(p)} / ${seconds(buffer.duration)}`;}requestAnimationFrame(tick);}tick();
+window.setReviewState=()=>({selected,playing,loading,position:position(),gain,mode,duration:buffer?.duration||0,kept:[...kept]});
+(async()=>{
+  try{
+    const response=await fetch('set.json');if(!response.ok)throw new Error('The completed set could not be loaded.');manifest=await response.json();
+    if(manifest.schema!=='mastering.native-set-delivery.2'||manifest.status!=='complete')throw new Error('This mastering job has not completed.');
+    rows=manifest.versions.map(v=>({...v,lufs:v.delivery.integrated_lufs}));
+    rows.push({...manifest.original,lufs:manifest.original.integrated_lufs,description:'The original recording, preserved byte for byte.'});
+    matchTarget=Math.min(-18,...rows.map(r=>r.lufs));
+    choiceKey='masters:'+manifest.versions.map(v=>v.output_sha256).join(':');
+    try{kept=new Set(JSON.parse(localStorage.getItem(choiceKey)||'[]'));}catch{}
+    renderRows();await select(rows[0].id);
+  }catch(error){status(`${error.message} Serve this folder with a local web server to listen.`,true);}
+})();
+</script>
+</html>

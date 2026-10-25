@@ -1,0 +1,226 @@
+{
+ "phase_alignment": null,
+ "finishing": {
+  "rule": "set.unchanged.v2",
+  "validation_status": "provisional",
+  "active": false,
+  "dc_filter_hz": null,
+  "bands": [],
+  "section_gain": [],
+  "color_amount": 0.0,
+  "clipping_budget_db": 0.0
+ },
+ "tone": {
+  "stereo": [
+   {
+    "kind": "HighShelf",
+    "hz": 8000.0,
+    "q": 0.7071067811865476,
+    "gain_db": 1.9747254667563539
+   }
+  ],
+  "mid": [
+   {
+    "kind": "Peak",
+    "hz": 3200.0,
+    "q": 0.7,
+    "gain_db": 2.0
+   },
+   {
+    "kind": "Peak",
+    "hz": 679.6026687186676,
+    "q": 0.5994186276744284,
+    "gain_db": 4.662495424997771
+   }
+  ],
+  "side": []
+ },
+ "focus_envelopes": [],
+ "side_highpass_hz": null,
+ "side_gain": {
+  "bands_db": [
+   0.0,
+   1.5332567456960589,
+   1.5332567456960589,
+   1.5332567456960589,
+   1.5332567456960589,
+   1.5332567456960589
+  ],
+  "decorrelated_db": [
+   null,
+   null,
+   null,
+   null,
+   null,
+   null
+  ]
+ },
+ "deesser": {
+  "rule": "set.deesser.v4",
+  "keyed": [
+   {
+    "frame": 514,
+    "vocal_share": 0.9,
+    "other_power": 0.001
+   },
+   {
+    "frame": 515,
+    "vocal_share": 0.9,
+    "other_power": 0.001
+   },
+   {
+    "frame": 516,
+    "vocal_share": 0.9,
+    "other_power": 0.001
+   },
+   {
+    "frame": 517,
+    "vocal_share": 0.9,
+    "other_power": 0.001
+   },
+   {
+    "frame": 518,
+    "vocal_share": 0.9,
+    "other_power": 0.001
+   },
+   {
+    "frame": 635,
+    "vocal_share": 0.9,
+    "other_power": 0.001
+   },
+   {
+    "frame": 636,
+    "vocal_share": 0.9,
+    "other_power": 0.001
+   },
+   {
+    "frame": 660,
+    "vocal_share": 0.9,
+    "other_power": 0.001
+   },
+   {
+    "frame": 679,
+    "vocal_share": 0.9,
+    "other_power": 0.001
+   },
+   {
+    "frame": 680,
+    "vocal_share": 0.9,
+    "other_power": 0.001
+   },
+   {
+    "frame": 681,
+    "vocal_share": 0.9,
+    "other_power": 0.001
+   },
+   {
+    "frame": 682,
+    "vocal_share": 0.9,
+    "other_power": 0.001
+   },
+   {
+    "frame": 683,
+    "vocal_share": 0.9,
+    "other_power": 0.001
+   },
+   {
+    "frame": 684,
+    "vocal_share": 0.9,
+    "other_power": 0.001
+   },
+   {
+    "frame": 710,
+    "vocal_share": 0.9,
+    "other_power": 0.001
+   },
+   {
+    "frame": 711,
+    "vocal_share": 0.9,
+    "other_power": 0.001
+   },
+   {
+    "frame": 712,
+    "vocal_share": 0.9,
+    "other_power": 0.001
+   },
+   {
+    "frame": 713,
+    "vocal_share": 0.9,
+    "other_power": 0.001
+   },
+   {
+    "frame": 714,
+    "vocal_share": 0.9,
+    "other_power": 0.001
+   },
+   {
+    "frame": 715,
+    "vocal_share": 0.9,
+    "other_power": 0.001
+   },
+   {
+    "frame": 716,
+    "vocal_share": 0.9,
+    "other_power": 0.001
+   },
+   {
+    "frame": 717,
+    "vocal_share": 0.9,
+    "other_power": 0.001
+   },
+   {
+    "frame": 718,
+    "vocal_share": 0.9,
+    "other_power": 0.001
+   },
+   {
+    "frame": 719,
+    "vocal_share": 0.9,
+    "other_power": 0.001
+   },
+   {
+    "frame": 749,
+    "vocal_share": 0.9,
+    "other_power": 0.001
+   }
+  ],
+  "other_band_power": 2.0,
+  "maximum_cut_db": 3.0
+ },
+ "low_mid": null,
+ "low_end_hold": null,
+ "dynamic_after_eq": [],
+ "compressor": {
+  "threshold_dbfs": -2.19,
+  "ratio": 2.0,
+  "knee_db": 6.0,
+  "attack_ms": 30.0,
+  "release_ms": 170.0,
+  "detector_rms_ms": 10.0,
+  "sidechain_highpass_hz": 56.12310241546865,
+  "maximum_reduction_db": 6.0,
+  "section_ms": 4000.0
+ },
+ "limiter": {
+  "release_ms": 10.0,
+  "pre_attack_ms": 1.0,
+  "hold_ms": 12.0,
+  "slow_release_ms": 0.0,
+  "attack_ms": 3.0
+ },
+ "clipper_db": 1.5,
+ "ceiling_dbtp": -0.5,
+ "true_peak": "local",
+ "initial_drive_db": 5.468107988583921,
+ "target_lufs": -10.900446430100907,
+ "fixed_drive_db": null,
+ "restore_peak_tone": true,
+ "restoration_db": [
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0,
+  0.0
+ ]
+}

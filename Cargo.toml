@@ -1,0 +1,30 @@
+[package]
+name = "mastering-engine"
+version = "1.14.0"
+edition = "2021"
+publish = false
+license = "MIT"
+description = "Deterministic offline stereo mastering with explicit preservation constraints"
+
+[[bin]]
+name = "master"
+path = "src/main.rs"
+
+[dependencies]
+soundkit = { git = "https://github.com/wavey-ai/soundkit.git", rev = "a1416ab81bfe4d1b74af9fc2fbec70bfeebd95da", default-features = false }
+rustfft = "6.2"
+realfft = "3.5"
+mel_spec = { git = "https://github.com/wavey-ai/mel-spec.git", rev = "ee5532033431a42955cf38bc1b246c5b49e5dab0", default-features = false }
+serde = { version = "1", features = ["derive"] }
+# The median of a delivered render returns from the text of its report
+# bit for bit (`deesser::Plan::delivered`, `set.deesser.v4`).
+serde_json = { version = "1", features = ["float_roundtrip"] }
+sha2 = { version = "0.10", features = ["asm"] }
+
+[features]
+# The counting allocator of `alloc_stats`, for memory measurements. Release
+# builds do not enable it.
+alloc-stats = []
+
+[profile.release]
+opt-level = 3
