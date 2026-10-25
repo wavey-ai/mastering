@@ -4448,3 +4448,14 @@ The following records the earlier prototype; the v2 native contract replaces it.
 
 - YYYY-MM-DD: Evidence, correction, or status change; reason and links.
 ```
+
+## D210: Wavey Artist Source Licence for the engine
+
+- Recorded: 2026-10-25.
+- Origin: Owner decision of 2026-10-25. The engine takes the licence of the bitneedle record-authoring crates, with its terms unchanged.
+- Basis: Owner decision.
+- Status: Accepted. Implemented in `LICENSE`, `Cargo.toml` (`license-file`) and the public export list. Replaces the MIT licence of 2026-10-25, which the public repo carried for one commit.
+- Decision: The Wavey Artist Source Licence (version 0.1) applies to the repository and to the public repo `wavey-ai/mastering`. Artists and Artist Entities can use the engine to master and sell their own music. Any person can study, run and modify the engine for personal experimentation, education, evaluation or non-commercial research. A label, platform, service provider or other commercial user needs a separate licence from licence@yl.vin.
+- Reason: The engine is for the artist who masters their own music. A commercial mastering service or a label workflow needs a written licence.
+- Alternatives and tradeoffs: The MIT licence allows any commercial use, including a hosted mastering service built on the engine.
+- Limits: The licence text names Bitneedle in its contractor and trademark sections; the terms apply to the engine as written.

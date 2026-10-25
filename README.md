@@ -646,6 +646,13 @@ host. Without a host, it uses memory.
   noncausal limiter envelope. Phone and real-time use need separate
   engineering.
 
-## License
+## Licensing
 
-The engine is licensed under the MIT license ([`LICENSE-MIT`](LICENSE-MIT)).
+The Wavey Artist Source Licence applies to this repository. Refer to `LICENSE`.
+
+- Qualifying Artists and Artist Entities can use the engine to master and sell
+  their own music.
+- Any person can study, run and modify the engine for personal experimentation,
+  education, evaluation or non-commercial research.
+- A label, platform, service provider or other commercial user must get a
+  separate licence from licence@yl.vin.
