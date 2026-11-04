@@ -256,7 +256,12 @@ impl Pcm {
         let mut bytes = vec![0u8; audio.len().min(PIECE) * 8];
         for piece in audio.chunks(PIECE) {
             let bytes = &mut bytes[..piece.len() * 8];
-            for (target, x) in bytes.chunks_exact_mut(4).zip(piece.as_flattened()) {
+            for (target, x) in bytes
+                .as_chunks_mut::<4>()
+                .0
+                .iter_mut()
+                .zip(piece.as_flattened())
+            {
                 target.copy_from_slice(&x.to_le_bytes());
             }
             self.io.write_all(bytes)?;

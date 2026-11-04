@@ -805,7 +805,7 @@ impl Oversampler {
                 dot_pairs_two(&self.bank_pairs[2], &self.bank_pairs[3], samples),
                 peak,
             );
-            for two in self.between_pairs.chunks_exact(2) {
+            for two in self.between_pairs.as_chunks::<2>().0 {
                 peak = largest(dot_pairs_two(&two[0], &two[1], samples), peak);
             }
             return peak;

@@ -483,7 +483,7 @@ pub(crate) fn focus_change_db_read(
     let mut read = Vec::new();
     for start in (0..frames).step_by(span) {
         let part = input.window(start, span.min(frames - start), &mut read)?;
-        for block in part.chunks_exact(CHANGE_BLOCK) {
+        for block in part.as_chunks::<CHANGE_BLOCK>().0 {
             for (&frame, pair) in block.iter().zip(&mut pairs) {
                 let dry = channel(frame);
                 *pair = [dry as f32, filter.tick(dry) as f32];

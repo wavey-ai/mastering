@@ -854,7 +854,7 @@ fn base_frames(
     );
     for start in range.clone().step_by(BLOCK) {
         input.read(start, BLOCK.min(range.end - start), &mut samples)?;
-        for group in samples.chunks_exact(4) {
+        for group in samples.as_chunks::<4>().0 {
             if group.iter().flatten().any(|x| !x.is_finite()) {
                 return Err("Nonfinite prefix sample".into());
             }
@@ -1545,9 +1545,9 @@ fn render_with_block_trace(
                     run = bins[trace_bin];
                 }
                 run.mean += reduction;
-                // The maximum starts at 0.0 and a reduction is not NaN, so a
-                // comparison gives the value of `max` (D333).
-                run.maximum = dsp::larger(run.maximum, reduction);
+                // An unreduced frame returns -0.0. Keep `max` to preserve
+                // the signed-zero trace statistic of the per-frame rule (D333).
+                run.maximum = run.maximum.max(reduction);
                 run.input_peak = dsp::larger(
                     run.input_peak,
                     dsp::larger(driven[0].abs(), driven[1].abs()) as f64,
@@ -1964,6 +1964,109 @@ mod tests {
         );
     }
 
+    /// D333 preserves each statistic of the per-frame definition, including
+    /// signed zero, skipped bins, measure offsets and block boundaries.
+    #[test]
+    fn trace_statistics_match_the_per_frame_definition_including_zero() {
+        let bits = |bin: &TraceAccumulator| {
+            [
+                bin.mean.to_bits(),
+                bin.maximum.to_bits(),
+                bin.input_peak.to_bits(),
+                bin.output_peak.to_bits(),
+                bin.clip.to_bits(),
+                bin.clipped as u64,
+                bin.count as u64,
+            ]
+        };
+        for (len, silent) in [(388, true), (48_000, true), (48_000, false)] {
+            let input: Vec<Stereo> = (0..len)
+                .map(|i| {
+                    if silent {
+                        [0.0, -0.0]
+                    } else {
+                        let level = if i % 9_000 < 1_000 { 1.4 } else { 0.05 };
+                        let x = (level * (i as f64 * 0.013).sin()) as f32;
+                        [x, -0.6 * x]
+                    }
+                })
+                .collect();
+            let (drive_db, clipper_db, ceiling) = (3.0, 1.5, 0.8);
+            let settings = LimiterSettings::default();
+            let gain = dsp::gain(drive_db) as f32;
+            let driven: Vec<Stereo> = input.iter().map(|f| f.map(|x| x * gain)).collect();
+            let mut limiter = Limiter::new(ceiling * dsp::gain(clipper_db), settings, 48_000);
+            let mut gains: Vec<f32> = driven
+                .iter()
+                .filter_map(|f| limiter.push(dsp::larger(f[0].abs(), f[1].abs()) as f64))
+                .collect();
+            gains.extend(limiter.flush(len));
+            assert_eq!(gains.len(), len);
+            let clipper = dsp::SoftClip::new(ceiling, clipper_db).unwrap();
+            let measured = 13..len - 17;
+            let (offset, total) = (len + 47, 3 * len + 101);
+            let mut expected = vec![TraceAccumulator::default(); TRACE_BINS];
+            let mut acc = LimiterStatsAccumulator::default();
+            for (i, (&g, &driven)) in gains.iter().zip(&driven).enumerate() {
+                if !measured.contains(&i) {
+                    continue;
+                }
+                let reduction = acc.push(g);
+                let mut frame = driven.map(|x| x * g);
+                let (mut clip, mut affected) = (0.0, false);
+                for x in &mut frame {
+                    let (shaped, reduction) = clipper.shape(*x as f64);
+                    clip = dsp::larger(clip, reduction);
+                    affected |= reduction > 0.0;
+                    *x = shaped as f32;
+                }
+                let position = offset + i - measured.start;
+                let bin = &mut expected[crate::waveform::bin_of(position, total)];
+                bin.mean += reduction;
+                bin.maximum = bin.maximum.max(reduction);
+                bin.input_peak = dsp::larger(
+                    bin.input_peak,
+                    dsp::larger(driven[0].abs(), driven[1].abs()) as f64,
+                );
+                bin.output_peak = dsp::larger(
+                    bin.output_peak,
+                    dsp::larger(frame[0].abs(), frame[1].abs()) as f64,
+                );
+                bin.clip = dsp::larger(bin.clip, clip);
+                bin.clipped += usize::from(affected);
+                bin.count += 1;
+            }
+            for block in [1, 997, 4_096, 65_536] {
+                let mut output = vec![[0.0; 2]; len / 4];
+                let actual = render_with_block_trace(
+                    &mut crate::scratch::Slice(&input),
+                    RenderOptions {
+                        rate: 48_000,
+                        drive_db,
+                        clipper_db,
+                        ceiling,
+                        settings,
+                        block,
+                        collect_trace: true,
+                        statistics: true,
+                        measure: Some((measured.clone(), offset, total)),
+                        keep: 0,
+                    },
+                    &mut output,
+                )
+                .unwrap();
+                let actual = actual.parts.trace.unwrap();
+                for (index, (a, b)) in actual.iter().zip(&expected).enumerate() {
+                    assert_eq!(
+                        bits(a),
+                        bits(b),
+                        "len={len} silent={silent} block={block} bin={index}"
+                    );
+                }
+            }
+        }
+    }
+
     /// The trace bin of each counted frame is the bin of its position
     /// (`waveform::bin_of`), for blocks of any length and a measure that
     /// starts inside a longer signal (D333).
@@ -2334,7 +2437,7 @@ mod tests {
         assert_eq!(whole[0].bands.len(), 8);
         // The prefix without peak control has the window bands of its
         // base-rate frames.
-        let base: Vec<Stereo> = input.chunks_exact(4).map(|g| g[0]).collect();
+        let base: Vec<Stereo> = input.as_chunks::<4>().0.iter().map(|g| g[0]).collect();
         let measured = crate::treatment_render::WindowBands::measure(&base, rate);
         let close = |a: &crate::treatment_render::WindowBands,
                      b: &crate::treatment_render::WindowBands,

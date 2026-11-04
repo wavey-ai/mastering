@@ -3834,6 +3834,16 @@ The following records the earlier prototype; the v2 native contract replaces it.
 - 2026-10-07: The app plays, measures and delivers each set at its render rate (app f57be9b). D174 limits the spectral flatness of the masking model to 20 kHz.
 - 2026-10-16: Keep decision for the listening check Render rate. Basis: acoustics, measurement and the pair prior of D177; no listening, owner decision of 2026-10-16. regression mix 1 and regression mix 2, converted to 48 kHz with FFmpeg (Kaiser-windowed sinc, 256 taps) and rendered through the 48 kHz path, against their native 44.1 kHz renders: loudness −0.06 to +0.09 LU, true peak within 0.01 dB, 50 ms crest within 0.01 dB, the same versions and names. At matched loudness, less the difference that the conversion alone gives the mix in the bands of `master inspect`, each band is within 0.07 dB, and within 0.26 dB in the 16 kHz band, which regression mix 1 leaves empty. Before D174, the 48 kHz path was up to 1.10 LU from the native render. The native rate stays: it has two conversions fewer and takes 6.0% to 9.1% less processor time. The measurements are in the acoustic decisions run.
 
+### Linux validation update, 2026-11-04
+
+- The private delivery auditor still assumed
+  48 kHz. Its check now uses the manifest's render rate and positive
+  nearest-frame conversion, including exact half frames, as D173 requires.
+  Tests accept both rate families and the half-frame conversions, and reject
+  wrong frame counts and rates. The audit's peak and loudness limits are
+  unchanged. This correction changes the evaluator, not audio processing.
+ 
+
 ## D174: Spectral flatness of the masking model up to 20 kHz
 
 - Recorded: 2026-10-07.
@@ -7196,34 +7206,107 @@ The following records the earlier prototype; the v2 native contract replaces it.
 - Supersedes / superseded by: None.
 
 
-## D332: Running peak comparisons in analysis and delivery (pending validation)
+## D332: Running peak comparisons in analysis and delivery
 
 - Recorded: 2026-11-03.
 - Origin: Existing local implementation preserved for testing on the remote host.
 - Basis: The comparison helper of D329, applied to running absolute peaks and absolute sample differences.
-- Status: Proposal. Implemented in the development checkout; performance and full audio regression validation remain pending. Not deployed.
+- Status: Accepted for the 1.15.0 source release by D334 on 2026-11-04, with the recorded stereo/synthetic coverage limit. Originally recorded as a proposal pending full validation. Not deployed.
 - Decision under review: Use `dsp::larger` for the running peaks of the level scans and waveform envelopes and for the maximum sample error of delivery verification.
-- Reason: Avoid the extra NaN handling of floating-point `max` where the running accumulator starts at positive zero and the next value is an absolute value. No speed improvement is claimed.
+- Reason: Avoid the extra NaN handling of floating-point `max` where the running accumulator starts at positive zero and the next value is an absolute value. In a WASM profile pair on track-e, at a load factor of 0.978, the own times of the changed scans took 0.86 s against 1.21 s. The profile total was 75.5 s against 76.3 s.
 - Alternatives and tradeoffs: Keep the `max` operations of D319 and D329.
-- Evidence: The implementation and existing scan, waveform and delivery regression tests. No new benchmark result is recorded.
+- Evidence: a private record. The implementation and the existing scan, waveform and delivery regression tests.
 - Limits and counterexamples: Review NaN handling and signed zero before accepting equivalence on all supported targets.
 - Verification: On 2026-11-03, `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test --release` passed, including the trace-bin regression. Native/WASM corpus comparison remains open.
 - Review condition: Complete native/WASM output equivalence checks and measurements built with `--profile measure` (D227).
 - Work reference: TODO.md, "Pending local optimizations".
 - Supersedes / superseded by: No accepted decision is replaced while this proposal is under review.
 
-## D333: Trace accumulation by consecutive bin runs (pending validation)
+### Linux validation update, 2026-11-04
+
+- The running absolute peaks and absolute sample errors start at +0.0;
+  these values cannot introduce −0.0. A NaN second argument is ignored
+  by both forms. This establishes equivalence for the reviewed scans,
+  not for arbitrary arguments of `larger`.
+- Against `523cb0f`, D332 with corrected D333 gives identical WAV bytes
+  and normalized full reports on nine stereo inputs on each target
+  (72 deliveries), and on the synthetic stem/API fixture. Raw Rust JSON
+  is retained on WASM so signed zero survives comparison. All 407 Linux
+  engine tests, formatting and Clippy pass. No threshold changes.
+- Isolating D332 in an A/B/C/C/B/A series on one stereo set, two samples
+  per variant and `--profile measure`, reduces retired instructions by
+  0.187% natively and 0.279% in WASM; CPU time changes by −0.243% and
+  −0.280%. The shared virtual host and common host/I/O overhead limit
+  time claims. The run records commands, hashes and sample ranges
+ .
+- At completion of this testing pass, the proposal remained open because
+  authentic aligned stems and one original regression source were absent.
+  The stereo measurements do not establish that workload's speed. D334
+  subsequently accepts release with this explicit coverage limit.
+
+## D333: Trace accumulation by consecutive bin runs
 
 - Recorded: 2026-11-03.
 - Origin: Existing local implementation preserved for testing on the remote host.
 - Basis: Counted frame positions increase consecutively; `waveform::bin_start` gives the first position of the next trace bin.
-- Status: Proposal. Implemented in the development checkout; performance and full audio regression validation remain pending. Not deployed.
+- Status: Accepted for the 1.15.0 source release by D334 on 2026-11-04, with the recorded stereo/synthetic coverage limit. Originally recorded as a proposal pending full validation. Not deployed.
 - Decision under review: Keep the current bin and its accumulators in locals for each emitted block, compute a new bin at its boundary, and save the final accumulators at the end of the block.
-- Reason: Reduce repeated bin division and vector reads and writes. No speed improvement is claimed.
+- Reason: Reduce repeated bin division and vector reads and writes. A first form took the bin from the start of the next bin and kept the accumulators in the vector. In a WASM profile pair on track-e, at a load factor of 1.005, its emit closure took 11.20 s against 11.11 s. The form with the accumulators in locals has one profile and no pair.
 - Alternatives and tradeoffs: Keep the per-frame bin calculation. D297 and D299 rejected earlier forms after measurements; their evidence remains valid for those implementations.
-- Evidence: `the_trace_bins_of_the_counted_frames_follow_their_positions` compares counts with the per-frame definition for blocks of 1, 997 and 4,096 frames and an offset measure.
+- Evidence: a private record. `the_trace_bins_of_the_counted_frames_follow_their_positions` compares counts with the per-frame definition for blocks of 1, 997 and 4,096 frames and an offset measure.
 - Limits and counterexamples: Bin counts alone do not establish equality of every statistic or delivered sample. The reduction maximum also uses `dsp::larger`; signed-zero behavior needs review.
 - Verification: On 2026-11-03, `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test --release` passed, including the trace-bin regression. Native/WASM corpus comparison remains open.
 - Review condition: Compare trace statistics, reports and audio with the previous implementation and measure with `--profile measure` (D227).
 - Work reference: TODO.md, "Pending local optimizations".
 - Supersedes / superseded by: Reopens the implementation question of D297 and D299; neither rejection is superseded without new measurements.
+
+### Validation update, 2026-11-04
+
+- Linux review of the initial D333 implementation found that an unreduced
+  frame returns −0.0 from `LimiterStatsAccumulator::push`. Replacing
+  `max(+0.0, −0.0)` with `larger(+0.0, −0.0)` changes a trace maximum's
+  sign bit on both native and WASM probes. Counts alone did not expose it.
+- A per-frame reference regression compares every raw trace accumulator,
+  including signed zero, silence, active limiting/clipping, skipped bins,
+  a measure offset and blocks of 1, 997, 4,096 and 65,536 frames. It fails
+  on the initial proposal and passes after retaining `max` for the reduction
+  maximum. The other accumulators still use the proposed bin runs. This
+  correction preserves the original trace contract without changing audio
+  processing or a DSP threshold.
+- Baseline `523cb0f`, the initial proposal at `7e00a7d` and the corrected
+  form are compared separately. The initial proposal changes signed-zero
+  trace maxima on both targets. The corrected form preserves all 72 WAVs
+  and normalized full reports across nine stereo inputs per target,
+  plus the synthetic stem/API fixture. All 407 Linux engine tests pass.
+- In the isolated A/B/C/C/B/A series, corrected D333 against D332 alone
+  changes native instructions by −0.247% and CPU time by −1.674%; WASM
+  instructions increase 0.141% while CPU time changes by −0.924%.
+  With both proposals against baseline, native CPU changes by −1.912%
+  and WASM CPU by −1.202%. Each variant has two samples on one stereo
+  set, built with `--profile measure`. These are limited measurements
+  on a shared virtual host, not a uniform improvement in the counters.
+  The run records the exact samples and equivalence checks
+ .
+- At completion of this testing pass, the proposal remained open because
+  the original aligned-stem regression workload was unavailable. D334
+  subsequently accepts the corrected implementation for release with
+  that coverage limit. The rejected older implementations retain their
+  decisions; no DSP bound is changed.
+
+
+## D334: Release 1.15.0 from the Linux host with explicit validation limits
+
+- Recorded: 2026-11-04.
+- Origin: The user's explicit authorization to review and commit the tested fixes and reports, advance main safely and push the source release from the Linux host. Deployment and live verification are separately orchestrated after tools and short-lived credentials are ready.
+- Basis: User authorization, source lineage, deterministic regression tests, stereo corpus equivalence and synthetic protocol/DSP evidence.
+- Status: Accepted source release. Version 1.15.0 is prepared; AWS and browser deployment and live validation are not established by this decision.
+- Decision: Set the `mastering-engine` package to 1.15.0 and update only its entries in the root, WASM and Lambda lockfiles. The independent wrapper package versions stay unchanged. Include the synchronized post-1.14.0 changes, the D333 signed-zero correction, assertion-only roundoff fix, equivalent Clippy chunk changes and private audit/measurement workflow corrections.
+- Source lineage: The last recorded deployed engine is 1.14.0 at `7abfc1a`. The synchronized source is `7e00a7d`, followed by documentation-only `50fce6e`. The optimization baseline is `523cb0f`. The new release commits the reviewed Linux working changes on that lineage. Historical results from `f5d24a1` plus its preserved stash remain separately attributed and are not current release evidence.
+- Evidence: The required Linux checks pass with 407 engine tests; Python checks pass 25 tests and the Lambda checks pass 34 tests. Formatting and Clippy pass for the engine, Lambda and WASM target. Against `523cb0f`, the corrected snapshot produces 72 byte-identical WAVs with identical normalized reports across nine stereo inputs per target. Native/WASM decisions agree, and the synthetic additive-stem/API fixture passes. All 36 native deliveries pass independent hash, geometry and meter checks. These corpus measurements belong to their exact pre-version-bump snapshots; they are not newly generated 1.15.0 measurements. Final versioned-source check results are recorded in the release run.
+- Measurement limits: The two-sample stereo series uses the measurement profile, fat LTO and one codegen unit. The corrected combination uses 1.912% less native CPU and 1.202% less WASM CPU than baseline. D333 increases WASM instructions by 0.141% relative to D332 alone. The shared virtual host, small sample and stereo-only workload limit general speed claims.
+- Missing coverage: The user confirms authentic aligned stems do not exist; one available set is unaligned. It is not treated as aligned evidence, and no stem alignment or separation is inferred. Regression mix 1 and the original capture stress inputs are also absent. Synthetic additive stems do not validate authentic-stem analysis or the original full workload. These checks are unperformed, not passed, and are not a prerequisite to this authorized release.
+- Reason: The accumulated changes since 1.14.0 are material and warrant a new engine release identifier. The user accepts the available stereo/synthetic validation while retaining the missing-input limitations.
+- Alternatives and tradeoffs: Retain the 1.14.0 identifier despite the material accumulated changes, or defer release until additional inputs become available. The user chooses a new version with explicitly limited validation. No provisional DSP threshold is adjusted to obtain a passing result.
+- Active behavior: D332 and the corrected D333 implementation are accepted for this release. Original stereo audio remains the rendered source; aligned estimates, when supplied in other uses, only inform bounded analysis and selection. No processing rule or threshold is changed by the version bump.
+- Review condition: Investigate a real regression on a supplied reproducible source. If authentic aligned inputs become available later, run that additional validation and retain its exact source/version attribution. Deployment requires artifact identity, cloud/browser checks and separately recorded live results.
+- Supersedes / superseded by: Replaces the release hold of the D332/D333 proposals with acceptance under these coverage limits. It does not supersede the rejected D297/D299 implementations or claim any deployment complete.

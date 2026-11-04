@@ -1108,10 +1108,9 @@ mod tests {
         );
         assert!((step.expected_db[0][0] + offset).abs() < 1e-9);
         assert!((-0.9 + step.expected_db[1][0] - (TARGET_DB - offset)).abs() < 1e-9);
-        assert_eq!(
-            rise(&gains, step.added[1])[0],
-            step.expected_db[1][0] + offset
-        );
+        // Subtracting and restoring the loudness offset can round by an ulp.
+        let restored = step.expected_db[1][0] + offset;
+        assert!((rise(&gains, step.added[1])[0] - restored).abs() < 1e-12);
     }
 
     #[test]
