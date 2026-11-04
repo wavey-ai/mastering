@@ -21,23 +21,59 @@ pub struct Block {
 
 /// The 10 ms blocks of `audio` at `rate`.
 pub fn blocks(audio: &[Stereo], rate: u32) -> Vec<Block> {
-    audio
-        .chunks(rate as usize / 100)
-        .map(|chunk| {
-            let mut energy = 0.0;
-            let mut peak = 0.0f64;
-            for frame in chunk {
-                for &v in frame {
-                    energy += (v as f64).powi(2);
-                    peak = peak.max(v.abs() as f64);
-                }
-            }
-            Block {
-                energy: energy / (chunk.len() * 2) as f64,
-                peak,
-            }
-        })
-        .collect()
+    let mut blocks = Vec::with_capacity(audio.len().div_ceil(rate as usize / 100));
+    push_blocks(audio, rate, &mut blocks);
+    blocks
+}
+
+/// The 10 ms blocks of the frames `audio` to `blocks`. Each block but the
+/// last of the frames has `rate / 100` frames.
+fn push_blocks(audio: &[Stereo], rate: u32, blocks: &mut Vec<Block>) {
+    blocks.extend(audio.chunks(rate as usize / 100).map(|chunk| {
+        let mut energy = 0.0;
+        let mut peak = 0.0f64;
+        for &[left, right] in chunk {
+            energy += (left as f64).powi(2);
+            energy += (right as f64).powi(2);
+            // The peak of the frame first, as in `Scan::push` (D319, D332).
+            peak = crate::dsp::larger(peak, left.abs().max(right.abs()) as f64);
+        }
+        Block {
+            energy: energy / (chunk.len() * 2) as f64,
+            peak,
+        }
+    }));
+}
+
+/// Blocks of each span of `blocks_read`: 60 s.
+const SPAN_BLOCKS: usize = 6000;
+
+/// `blocks` of the frames of `audio`, read one span of blocks at a time.
+pub(crate) fn blocks_read(
+    audio: &mut impl crate::scratch::Frames,
+    rate: u32,
+) -> crate::audio_io::Result<Vec<Block>> {
+    blocks_read_with(audio, rate, |_| {})
+}
+
+/// `blocks_read`, with each span of frames also to `each`, in order: one
+/// pass of a stored render gives the blocks and the measures of `each`
+/// (D253).
+pub(crate) fn blocks_read_with(
+    audio: &mut impl crate::scratch::Frames,
+    rate: u32,
+    mut each: impl FnMut(&[Stereo]),
+) -> crate::audio_io::Result<Vec<Block>> {
+    let frames = audio.len();
+    let span = SPAN_BLOCKS * (rate as usize / 100);
+    let mut blocks = Vec::with_capacity(frames.div_ceil(rate as usize / 100));
+    let mut buffer = Vec::new();
+    for start in (0..frames).step_by(span) {
+        let part = audio.window(start, span.min(frames - start), &mut buffer)?;
+        each(part);
+        push_blocks(part, rate, &mut blocks);
+    }
+    Ok(blocks)
 }
 
 fn mean_energy(blocks: &[Block]) -> f64 {
@@ -97,94 +133,178 @@ pub struct Temporal {
 }
 
 pub fn analyze(audio: &[Stereo], rate: u32) -> Temporal {
-    let blocks = blocks(audio, rate);
-    let maximum = blocks.iter().map(|b| b.energy).fold(0.0f64, f64::max);
-    let floor = (maximum * 1e-4).max(1e-10);
-    let crests: Vec<f64> = blocks
-        .chunks(5)
-        .filter(|b| b.len() == 5 && mean_energy(b) > floor)
-        .map(crest)
-        .collect();
-    let mut events = Vec::new();
-    let mut next = 5;
-    for i in 5..blocks.len().saturating_sub(20) {
-        let prior = mean_energy(&blocks[i - 5..i]);
-        let rise = db((blocks[i].energy / prior.max(1e-20)).sqrt());
-        if i >= next && blocks[i].energy > floor.max(1e-6) && rise >= 5.0 {
-            events.push(Event {
-                start_seconds: i as f64 / 100.0,
-                attack_sustain_db: attack_contrast(&blocks, i),
-                rise_db: rise,
-            });
-            next = i + 10;
+    let mut scan = Scan::new(audio.len(), rate);
+    scan.push(audio);
+    scan.finish()
+}
+
+/// The block of `count` frames with the energy sum `energy` and the peak
+/// `peak`.
+fn block_of(energy: f64, peak: f64, count: usize) -> Block {
+    Block {
+        energy: energy / (count * 2) as f64,
+        peak,
+    }
+}
+
+/// `analyze` of a signal whose frames arrive in spans.
+pub struct Scan {
+    rate: u32,
+    block: usize,
+    /// The energy, the peak and the frames of the block in progress.
+    energy: f64,
+    peak: f64,
+    count: usize,
+    blocks: Vec<Block>,
+    frames: usize,
+    previous: Option<Stereo>,
+    dc: [f64; 2],
+    clipped: usize,
+    flat: usize,
+    lengths: [usize; 2],
+}
+
+impl Scan {
+    /// The scan of a signal of `frames` frames at `rate`.
+    pub fn new(frames: usize, rate: u32) -> Self {
+        let block = rate as usize / 100;
+        Self {
+            rate,
+            block,
+            energy: 0.0,
+            peak: 0.0,
+            count: 0,
+            blocks: Vec::with_capacity(frames.div_ceil(block)),
+            frames: 0,
+            previous: None,
+            dc: [0.0; 2],
+            clipped: 0,
+            flat: 0,
+            lengths: [0; 2],
         }
     }
-    let gaps: Vec<f64> = events
-        .windows(2)
-        .map(|v| v[1].start_seconds - v[0].start_seconds)
-        .collect();
-    let mut windows = Vec::new();
-    for (i, chunk) in blocks.chunks(1200).enumerate() {
-        let duration = ((audio.len() as f64 / rate as f64) - i as f64 * 12.0).min(12.0);
-        windows.push(Window {
-            start_seconds: i as f64 * 12.0,
-            duration_seconds: duration,
-            rms_dbfs: db(mean_energy(chunk).sqrt()),
-            crest_db: crest(chunk),
-            active: duration >= 3.0 && mean_energy(chunk) > floor * 10.0,
-        });
-    }
-    let levels: Vec<f64> = windows
-        .iter()
-        .filter(|w| w.active)
-        .map(|w| w.rms_dbfs)
-        .collect();
-    let mut dc = [0.0; 2];
-    let mut clipped = 0;
-    let mut flat = 0;
-    let mut lengths = [0usize; 2];
-    for (i, frame) in audio.iter().enumerate() {
-        for c in 0..2 {
-            dc[c] += frame[c] as f64;
-            clipped += usize::from(frame[c].abs() >= 1.0 - 2f32.powi(-23));
-            if i > 0 && frame[c].abs() > 0.5 && (frame[c] - audio[i - 1][c]).abs() <= 2f32.powi(-23)
-            {
-                lengths[c] += 1;
-                if lengths[c] == 2 {
-                    flat += 1;
-                }
-            } else {
-                lengths[c] = 0;
+
+    /// Add the next frames of the signal.
+    pub fn push(&mut self, audio: &[Stereo]) {
+        // In locals, the sums stay in registers.
+        let (mut energy, mut peak, mut count) = (self.energy, self.peak, self.count);
+        for &[left, right] in audio {
+            energy += (left as f64).powi(2);
+            energy += (right as f64).powi(2);
+            // The peak of the frame first, with `max`. `max` passes a NaN by,
+            // and the f32 peak of the frame as f64 is the peak of the samples
+            // as f64 (D319). The running peak is not NaN, so a comparison
+            // gives the value of `max` (D332).
+            peak = crate::dsp::larger(peak, left.abs().max(right.abs()) as f64);
+            count += 1;
+            if count == self.block {
+                self.blocks.push(block_of(energy, peak, count));
+                (energy, peak, count) = (0.0, 0.0, 0);
             }
         }
+        (self.energy, self.peak, self.count) = (energy, peak, count);
+        let (mut dc, mut clipped, mut flat) = (self.dc, self.clipped, self.flat);
+        let (mut lengths, mut previous) = (self.lengths, self.previous);
+        for &frame in audio {
+            for c in 0..2 {
+                dc[c] += frame[c] as f64;
+                clipped += usize::from(frame[c].abs() >= 1.0 - 2f32.powi(-23));
+                if previous.is_some_and(|previous: Stereo| {
+                    frame[c].abs() > 0.5 && (frame[c] - previous[c]).abs() <= 2f32.powi(-23)
+                }) {
+                    lengths[c] += 1;
+                    if lengths[c] == 2 {
+                        flat += 1;
+                    }
+                } else {
+                    lengths[c] = 0;
+                }
+            }
+            previous = Some(frame);
+        }
+        (self.dc, self.clipped, self.flat) = (dc, clipped, flat);
+        (self.lengths, self.previous) = (lengths, previous);
+        self.frames += audio.len();
     }
-    for v in &mut dc {
-        *v /= audio.len().max(1) as f64;
+
+    pub fn finish(mut self) -> Temporal {
+        if self.count > 0 {
+            self.blocks
+                .push(block_of(self.energy, self.peak, self.count));
+        }
+        let rate = self.rate;
+        let blocks = self.blocks;
+        let maximum = blocks.iter().map(|b| b.energy).fold(0.0f64, f64::max);
+        let floor = (maximum * 1e-4).max(1e-10);
+        let crests: Vec<f64> = blocks
+            .chunks(5)
+            .filter(|b| b.len() == 5 && mean_energy(b) > floor)
+            .map(crest)
+            .collect();
+        let mut events = Vec::new();
+        let mut next = 5;
+        for i in 5..blocks.len().saturating_sub(20) {
+            let prior = mean_energy(&blocks[i - 5..i]);
+            let rise = db((blocks[i].energy / prior.max(1e-20)).sqrt());
+            if i >= next && blocks[i].energy > floor.max(1e-6) && rise >= 5.0 {
+                events.push(Event {
+                    start_seconds: i as f64 / 100.0,
+                    attack_sustain_db: attack_contrast(&blocks, i),
+                    rise_db: rise,
+                });
+                next = i + 10;
+            }
+        }
+        let gaps: Vec<f64> = events
+            .windows(2)
+            .map(|v| v[1].start_seconds - v[0].start_seconds)
+            .collect();
+        let mut windows = Vec::new();
+        for (i, chunk) in blocks.chunks(1200).enumerate() {
+            let duration = ((self.frames as f64 / rate as f64) - i as f64 * 12.0).min(12.0);
+            windows.push(Window {
+                start_seconds: i as f64 * 12.0,
+                duration_seconds: duration,
+                rms_dbfs: db(mean_energy(chunk).sqrt()),
+                crest_db: crest(chunk),
+                active: duration >= 3.0 && mean_energy(chunk) > floor * 10.0,
+            });
+        }
+        let levels: Vec<f64> = windows
+            .iter()
+            .filter(|w| w.active)
+            .map(|w| w.rms_dbfs)
+            .collect();
+        let mut dc = self.dc;
+        for v in &mut dc {
+            *v /= self.frames.max(1) as f64;
+        }
+        let (clipped, flat) = (self.clipped, self.flat);
+        let peaks: Vec<f64> = blocks
+            .iter()
+            .filter(|b| b.energy > floor)
+            .map(|b| db(b.peak))
+            .collect();
+        let plateau = percentile(&peaks, 0.999);
+        let plateau_share = peaks.iter().filter(|p| **p >= plateau - 1.0).count() as f64
+            / peaks.len().max(1) as f64;
+        let plateau_levels: Vec<f64> = blocks
+            .iter()
+            .filter(|b| b.energy > floor && db(b.peak) >= plateau - 1.0)
+            .map(|b| db(b.energy.sqrt()))
+            .collect();
+        let plateau_level_spread_db = if plateau_levels.len() > 2 {
+            percentile(&plateau_levels, 0.9) - percentile(&plateau_levels, 0.1)
+        } else {
+            0.0
+        };
+        Temporal { crest_50ms_p10_p50_p90_db: [percentile(&crests, 0.1), percentile(&crests, 0.5), percentile(&crests, 0.9)],
+            median_event_gap_seconds: (!gaps.is_empty()).then(|| percentile(&gaps, 0.5)), events, windows,
+            window_contrast_db: percentile(&levels, 0.9)-percentile(&levels, 0.1),
+            dc_per_channel: dc, flat_top_runs: flat, clipped_channel_samples: clipped, plateau_share, plateau_level_spread_db,
+            analysis_note: "10 ms stereo-power blocks; 50 ms crest; 30 ms peak against 50–200 ms sustain; fixed 12 s windows, not musical section labels",
+            blocks, activity_floor: floor }
     }
-    let peaks: Vec<f64> = blocks
-        .iter()
-        .filter(|b| b.energy > floor)
-        .map(|b| db(b.peak))
-        .collect();
-    let plateau = percentile(&peaks, 0.999);
-    let plateau_share =
-        peaks.iter().filter(|p| **p >= plateau - 1.0).count() as f64 / peaks.len().max(1) as f64;
-    let plateau_levels: Vec<f64> = blocks
-        .iter()
-        .filter(|b| b.energy > floor && db(b.peak) >= plateau - 1.0)
-        .map(|b| db(b.energy.sqrt()))
-        .collect();
-    let plateau_level_spread_db = if plateau_levels.len() > 2 {
-        percentile(&plateau_levels, 0.9) - percentile(&plateau_levels, 0.1)
-    } else {
-        0.0
-    };
-    Temporal { crest_50ms_p10_p50_p90_db: [percentile(&crests, 0.1), percentile(&crests, 0.5), percentile(&crests, 0.9)],
-        median_event_gap_seconds: (!gaps.is_empty()).then(|| percentile(&gaps, 0.5)), events, windows,
-        window_contrast_db: percentile(&levels, 0.9)-percentile(&levels, 0.1),
-        dc_per_channel: dc, flat_top_runs: flat, clipped_channel_samples: clipped, plateau_share, plateau_level_spread_db,
-        analysis_note: "10 ms stereo-power blocks; 50 ms crest; 30 ms peak against 50–200 ms sustain; fixed 12 s windows, not musical section labels",
-        blocks, activity_floor: floor }
 }
 
 /// P90 of the loss of onset energy of `output` against `reference`, in dB:
@@ -206,7 +326,13 @@ pub fn energy_attack_loss_p90_from(
     output: &[Stereo],
     rate: u32,
 ) -> Option<f64> {
-    let (a, b) = (&reference.blocks, blocks(output, rate));
+    energy_attack_loss_p90_of(reference, &blocks(output, rate))
+}
+
+/// `energy_attack_loss_p90_from` with the 10 ms blocks `b` of the output
+/// (`blocks`).
+pub(crate) fn energy_attack_loss_p90_of(reference: &Temporal, b: &[Block]) -> Option<f64> {
+    let a = &reference.blocks;
     let contrast = |blocks: &[Block], start: usize| {
         let mean = |range: std::ops::Range<usize>| {
             blocks[range.clone()].iter().map(|b| b.energy).sum::<f64>() / range.len() as f64
@@ -218,7 +344,7 @@ pub fn energy_attack_loss_p90_from(
         .iter()
         .map(|e| (e.start_seconds * 100.0).round() as usize)
         .filter(|&start| start + 20 <= a.len().min(b.len()))
-        .map(|start| contrast(a, start) - contrast(&b, start))
+        .map(|start| contrast(a, start) - contrast(b, start))
         .collect();
     (!losses.is_empty()).then(|| percentile(&losses, 0.9))
 }
@@ -233,7 +359,11 @@ pub struct Preservation {
 }
 
 pub fn compare(input: &Temporal, output: &[Stereo], rate: u32) -> Preservation {
-    let out = blocks(output, rate);
+    compare_blocks(input, &blocks(output, rate))
+}
+
+/// `compare` with the 10 ms blocks `out` of the output (`blocks`).
+pub(crate) fn compare_blocks(input: &Temporal, out: &[Block]) -> Preservation {
     let crest_losses: Vec<f64> = input
         .blocks
         .chunks(5)
@@ -246,7 +376,7 @@ pub fn compare(input: &Temporal, output: &[Stereo], rate: u32) -> Preservation {
         .iter()
         .filter_map(|e| {
             let start = (e.start_seconds * 100.0).round() as usize;
-            (start + 20 <= out.len()).then(|| e.attack_sustain_db - attack_contrast(&out, start))
+            (start + 20 <= out.len()).then(|| e.attack_sustain_db - attack_contrast(out, start))
         })
         .collect();
     let mut original_levels = Vec::new();
@@ -398,6 +528,60 @@ pub fn align_offset(
         }
     }
     best.0
+}
+
+#[cfg(test)]
+mod peak_tests {
+    use super::*;
+
+    /// The peak of each frame first gives the blocks of two `max` for each
+    /// frame, bit for bit, with NaN and silent frames among the frames
+    /// (D319).
+    #[test]
+    fn the_peak_of_each_frame_first_gives_the_same_blocks() {
+        let mut state = 0x2545_f491u32;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            state as f32 / u32::MAX as f32 * 2.2 - 1.1
+        };
+        let mut audio: Vec<Stereo> = (0..48_000 + 77).map(|_| [next(), next()]).collect();
+        audio[100] = [f32::NAN, 0.5];
+        audio[1_000] = [0.25, f32::NAN];
+        audio[2_000] = [f32::NAN, f32::NAN];
+        audio[3_000] = [0.0, -0.0];
+        let expected: Vec<u64> = audio
+            .chunks(480)
+            .flat_map(|chunk| {
+                let (mut energy, mut peak) = (0.0f64, 0.0f64);
+                for frame in chunk {
+                    for &v in frame {
+                        energy += (v as f64).powi(2);
+                        peak = peak.max(v.abs() as f64);
+                    }
+                }
+                [
+                    (energy / (chunk.len() * 2) as f64).to_bits(),
+                    peak.to_bits(),
+                ]
+            })
+            .collect();
+        let bits = |blocks: &[Block]| -> Vec<u64> {
+            blocks
+                .iter()
+                .flat_map(|b| [b.energy.to_bits(), b.peak.to_bits()])
+                .collect()
+        };
+        assert_eq!(bits(&blocks(&audio, 48_000)), expected);
+        let mut scan = Scan::new(audio.len(), 48_000);
+        audio.chunks(4_099).for_each(|span| scan.push(span));
+        let mut scanned = scan.blocks.clone();
+        if scan.count > 0 {
+            scanned.push(block_of(scan.energy, scan.peak, scan.count));
+        }
+        assert_eq!(bits(&scanned), expected);
+    }
 }
 
 #[cfg(test)]

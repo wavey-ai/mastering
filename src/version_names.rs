@@ -1,5 +1,5 @@
 //! Names and descriptions of the delivered versions of a set from their
-//! measured sound (`set.version-names.v1`).
+//! measured sound (`set.version-names.v2`).
 //!
 //! Each name is a character of the version: what it has more of than the
 //! version before it, at matched loudness. A version keeps the character
@@ -10,7 +10,7 @@
 
 use crate::selection;
 
-pub const RULE: &str = "set.version-names.v1";
+pub const RULE: &str = "set.version-names.v2";
 
 /// The name of the version closest to the mix when no measured character
 /// sets it apart from the other versions.
@@ -173,7 +173,7 @@ impl Character {
         }
     }
 
-    /// The name of a version with more of the character than a version
+    /// The name of a version with more of the character than the version
     /// before it that has the character's name.
     fn more(self) -> &'static str {
         match self {
@@ -190,8 +190,8 @@ impl Character {
         }
     }
 
-    /// What the version adds to the version before it, when both have the
-    /// character: the start of "… than <the version before>".
+    /// What the version adds to the version before it that has the
+    /// character's name: the start of "… than <that version>".
     fn further(self) -> &'static str {
         match self {
             Character::Warm => "adds more body and warmth",
@@ -338,25 +338,32 @@ pub fn name(versions: &[Sound], closest: bool) -> Vec<Named> {
     assign(STEP_DB, false, &mut chosen);
     // A later version whose largest step of `STEP_DB` or more is in a
     // character that a version before it holds takes the comparative name
-    // of that character.
-    let mut further: Vec<Option<(Character, f64)>> = vec![None; versions.len()];
+    // of that character, when it has `STEP_DB` or more of the character
+    // over that version. A character of a later version gives no
+    // comparative name.
+    let mut further: Vec<Option<(Character, f64, usize)>> = vec![None; versions.len()];
     let mut taken: Vec<Character> = Vec::new();
     for &(score, i, c) in &candidates {
-        if i > 0
-            && score >= STEP_DB
-            && chosen[i].is_none()
-            && further[i].is_none()
-            && used.contains(&c)
-            && !taken.contains(&c)
+        if i == 0
+            || score < STEP_DB
+            || chosen[i].is_some()
+            || further[i].is_some()
+            || taken.contains(&c)
         {
-            further[i] = Some((c, score));
+            continue;
+        }
+        let Some(holder) = (0..i).find(|&j| chosen[j].is_some_and(|(h, _)| h == c)) else {
+            continue;
+        };
+        if let Some(over) = step(c, &versions[i], &versions[holder]).filter(|&s| s >= STEP_DB) {
+            further[i] = Some((c, over, holder));
             taken.push(c);
         }
     }
     let names: Vec<&'static str> = (0..versions.len())
         .map(|i| match (chosen[i], further[i]) {
             (Some((c, _)), _) => c.name(),
-            (None, Some((c, _))) => c.more(),
+            (None, Some((c, _, _))) => c.more(),
             (None, None) => CLOSEST_NAME,
         })
         .collect();
@@ -402,9 +409,9 @@ pub fn name(versions: &[Sound], closest: bool) -> Vec<Named> {
                     characters.push((e.name(), s));
                 }
                 text + "."
-            } else if let Some((c, score)) = further[i] {
+            } else if let Some((c, score, holder)) = further[i] {
                 characters.push((c.name(), score));
-                format!("{} than {}.", capitalised(c.further()), names[i - 1])
+                format!("{} than {}.", capitalised(c.further()), names[holder])
             } else {
                 distinct = false;
                 String::new()
@@ -418,6 +425,28 @@ pub fn name(versions: &[Sound], closest: bool) -> Vec<Named> {
             }
         })
         .collect()
+}
+
+/// The names of a set (`set.version-names.v2`). `name` names the delivered
+/// versions together. The first version that is not distinct leaves the
+/// set, and `name` names the other versions again, until each version is
+/// distinct: each name and each step then measures against a version that
+/// the set delivers. The result names each version of `versions` in order.
+/// A version that left has `distinct` false.
+pub fn settle(versions: &[Sound], closest: bool) -> Vec<Named> {
+    let mut kept: Vec<usize> = (0..versions.len()).collect();
+    let mut left: Vec<(usize, Named)> = Vec::new();
+    loop {
+        let sounds: Vec<Sound> = kept.iter().map(|&i| versions[i].clone()).collect();
+        let named = name(&sounds, closest);
+        // The first version is always distinct, so the set keeps it.
+        let Some(k) = named.iter().position(|n| !n.distinct) else {
+            let mut all: Vec<(usize, Named)> = kept.into_iter().zip(named).chain(left).collect();
+            all.sort_by_key(|(i, _)| *i);
+            return all.into_iter().map(|(_, n)| n).collect();
+        };
+        left.push((kept.remove(k), named[k].clone()));
+    }
 }
 
 fn capitalised(text: &str) -> String {
@@ -509,6 +538,61 @@ mod tests {
             "Brings the vocal and lead further forward than Forward."
         );
         assert!(named.iter().all(|n| n.distinct));
+    }
+
+    #[test]
+    fn a_character_of_a_later_version_gives_no_comparative_name() {
+        // Forward goes to the third version, which has 1.5 dB more
+        // presence than the second; the second version has no other step.
+        let natural = version("essential", [0.0; 6], 0.0);
+        let less = version("master", [0.0, 0.0, 0.0, 1.0, 0.0, 0.0], 0.0);
+        let forward = version("bold", [0.0, 0.0, 0.0, 2.5, 0.0, 0.0], 0.0);
+        let named = name(&[natural, less, forward], true);
+        assert_eq!(named[2].name, "Forward");
+        assert_eq!(named[1].name, CLOSEST_NAME);
+        assert!(!named[1].distinct);
+    }
+
+    #[test]
+    fn the_comparative_name_is_measured_against_the_version_that_holds_it() {
+        // Full comes between Forward and the version with more presence.
+        let natural = version("essential", [0.0; 6], 0.0);
+        let forward = version("master", [0.0, 0.0, 0.0, 1.6, 0.0, 0.0], 0.0);
+        let full = version("bold", [1.5, 0.0, 0.0, 1.0, 0.0, 0.0], 0.0);
+        let more = version("open", [1.5, 0.0, 0.0, 2.5, 0.0, 0.0], 0.0);
+        let named = name(&[natural, forward, full, more], true);
+        assert_eq!(named[1].name, "Forward");
+        assert_eq!(named[2].name, "Full");
+        assert_eq!(named[3].name, "More forward");
+        assert_eq!(
+            named[3].description,
+            "Brings the vocal and lead further forward than Forward."
+        );
+        assert!((named[3].characters[0].1 - 0.9).abs() < 1e-9);
+    }
+
+    #[test]
+    fn the_names_measure_against_the_delivered_versions_only() {
+        // master has no step of `STEP_DB` over essential and leaves the set.
+        // bold is then named against essential: its bass step of 0.8 dB
+        // over essential is the second character of its description.
+        let essential = version("essential", [0.0; 6], 0.0);
+        let master = version("master", [0.4, 0.2, 0.0, 0.0, 0.0, 0.0], 0.0);
+        let bold = version("bold", [0.8, 0.4, 0.0, 1.2, 0.0, 0.0], 0.0);
+        let versions = [essential, master, bold];
+        assert_eq!(
+            name(&versions, true)[2].description,
+            "Brings the vocal and lead forward."
+        );
+        let named = settle(&versions, true);
+        let ids: Vec<&str> = named.iter().map(|n| n.id.as_str()).collect();
+        assert_eq!(ids, ["essential", "master", "bold"]);
+        assert!(!named[1].distinct);
+        assert_eq!(named[2].name, "Forward");
+        assert_eq!(
+            named[2].description,
+            "Brings the vocal and lead forward, and adds bass."
+        );
     }
 
     #[test]

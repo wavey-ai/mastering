@@ -10,6 +10,7 @@ use crate::{
     treatment_render::{Rendered, Renderer, Spec, RESTORATION_PASSES},
 };
 use serde::{Deserialize, Serialize};
+use std::time::{Duration, Instant};
 
 /// Matched-level change required in one whole-file stereo band.
 #[derive(Clone, Copy, Serialize, Deserialize, PartialEq, Debug)]
@@ -67,8 +68,8 @@ pub struct Gates {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub workload_as_warning: bool,
     /// Keep the delivered loudness at or under the audibility point of the
-    /// prefix of the candidate (`audibility::point`, D131): the Club preset
-    /// (D197).
+    /// prefix of the candidate (`audibility::point`, D131): each version of
+    /// a set (D206).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub under_own_point: bool,
 }
@@ -82,14 +83,17 @@ pub struct Candidate {
     pub gates: Gates,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct CandidateTrial {
     pub index: usize,
     pub reason: String,
     pub passed: bool,
     pub checks: Vec<imaging::Check>,
+    #[serde(deserialize_with = "number_or_nan")]
     pub lufs: f64,
+    #[serde(deserialize_with = "number_or_nan")]
     pub limiter_maximum_db: f64,
+    #[serde(deserialize_with = "number_or_nan")]
     pub gain_span_db: f64,
     /// P90 attack loss against the mix (`analysis::compare`). It counts the
     /// tone of the version (D164).
@@ -98,8 +102,200 @@ pub struct CandidateTrial {
     /// the loss of the dynamics stages (`Rendered::energy_attack_loss_p90_db`).
     pub energy_attack_loss_p90_db: Option<f64>,
     /// The renders of the low-end hold, in order.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub low_end: Vec<crate::low_end::Step>,
+}
+
+/// A number of a record, where a trial without a render writes `null` for
+/// NaN.
+fn number_or_nan<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<f64, D::Error> {
+    Ok(Option::<f64>::deserialize(deserializer)?.unwrap_or(f64::NAN))
+}
+
+/// The time limit of a worker (`selection.time-limit.v1`). A candidate of a
+/// ladder starts only when the longest candidate of the worker so far can
+/// end before `end`. After the first candidate that cannot start, each
+/// ladder of the worker stops at its first candidate.
+pub struct Deadline {
+    end: Instant,
+    /// The longest candidate of the worker so far.
+    longest: Duration,
+    /// The start of the candidate that runs.
+    started: Option<Instant>,
+    expired: bool,
+}
+
+impl Deadline {
+    pub fn new(end: Instant) -> Self {
+        Self {
+            end,
+            longest: Duration::ZERO,
+            started: None,
+            expired: false,
+        }
+    }
+
+    /// End the candidate that runs, and start the next candidate. The check
+    /// fails when the time that is left is shorter than the longest
+    /// candidate, or when no time is left.
+    fn start(&mut self) -> imaging::Check {
+        self.start_at(Instant::now())
+    }
+
+    fn start_at(&mut self, now: Instant) -> imaging::Check {
+        self.finish_at(now);
+        let left = self.end.saturating_duration_since(now);
+        let check = imaging::Check::range(
+            "selection.time_limit",
+            "Seconds left in the time limit of the worker, against the longest candidate of the worker",
+            "s",
+            Some(if self.expired { 0.0 } else { left.as_secs_f64() }),
+            Some(self.longest.as_secs_f64().max(1e-3)),
+            None,
+        );
+        if check.passed {
+            self.started = Some(now);
+        } else {
+            self.expired = true;
+        }
+        check
+    }
+
+    /// End the candidate that runs.
+    fn finish(&mut self) {
+        self.finish_at(Instant::now());
+    }
+
+    fn finish_at(&mut self, now: Instant) {
+        if let Some(started) = self.started.take() {
+            self.longest = self.longest.max(now - started);
+        }
+    }
+}
+
+impl Deadline {
+    /// Whether a candidate could not start.
+    pub fn expired(&self) -> bool {
+        self.expired
+    }
+}
+
+/// The trials of the candidate ladders of a worker, by ladder key, and the
+/// failed trials of an earlier invocation of the worker. A ladder takes a
+/// failed trial of its key in place of the render of its candidate when the
+/// trial has the index and the reason of the candidate. A ladder that
+/// starts at a candidate on a new renderer gives the trials of the whole
+/// ladder from that candidate, so the trials are the trials of an
+/// invocation without a time limit.
+#[derive(Default)]
+pub struct TrialRecord {
+    key: String,
+    trials: Vec<(String, CandidateTrial)>,
+    earlier: Vec<(String, Vec<CandidateTrial>)>,
+    replay: std::collections::HashMap<String, std::collections::VecDeque<CandidateTrial>>,
+}
+
+impl TrialRecord {
+    /// A record that replays `earlier`: for each key, the trials of an
+    /// earlier invocation in order.
+    pub fn replaying(earlier: Vec<(String, Vec<CandidateTrial>)>) -> Self {
+        let earlier: Vec<_> = earlier
+            .into_iter()
+            .map(|(key, trials)| (key, replayable(trials)))
+            .collect();
+        Self {
+            key: String::new(),
+            trials: Vec::new(),
+            replay: earlier
+                .iter()
+                .map(|(key, trials)| (key.clone(), trials.clone().into()))
+                .collect(),
+            earlier,
+        }
+    }
+
+    /// The key of the ladders that run next: a version, or the empty key
+    /// for the reference.
+    pub fn key(&mut self, key: &str) {
+        self.key = key.to_owned();
+    }
+
+    /// For each key, the failed trials before the first trial that passed
+    /// or met the time limit: the trials that a continuation takes in place
+    /// of renders. A key whose ladders did not run keeps the trials of the
+    /// earlier invocation. The keys of the earlier invocation come first,
+    /// then the other keys in order of their first trial.
+    pub fn replayable(&self) -> Vec<(String, Vec<CandidateTrial>)> {
+        let mut keys: Vec<&str> = self.earlier.iter().map(|(key, _)| key.as_str()).collect();
+        for (key, _) in &self.trials {
+            if !keys.contains(&key.as_str()) {
+                keys.push(key);
+            }
+        }
+        keys.into_iter()
+            .map(|key| {
+                let trials: Vec<CandidateTrial> = self
+                    .trials
+                    .iter()
+                    .filter(|(k, _)| k == key)
+                    .map(|(_, t)| t.clone())
+                    .collect();
+                let trials = match self.earlier.iter().find(|(k, _)| k == key) {
+                    Some((_, earlier)) if trials.is_empty() => earlier.clone(),
+                    _ => replayable(trials),
+                };
+                (key.to_owned(), trials)
+            })
+            .collect()
+    }
+
+    fn log(&mut self, trials: &[CandidateTrial]) {
+        let key = &self.key;
+        self.trials
+            .extend(trials.iter().map(|t| (key.clone(), t.clone())));
+    }
+
+    /// The earlier trial of `candidate`, the candidate at `index` of a
+    /// ladder whose next candidate is `next`. A glue candidate renders the
+    /// next candidate as its plain alternative, and the ladder keeps that
+    /// render for the next candidate, so a glue candidate is replayed only
+    /// with its next candidate. A trial that does not match ends the replay
+    /// of the key.
+    fn replayed(
+        &mut self,
+        index: usize,
+        candidate: &Candidate,
+        next: Option<&Candidate>,
+    ) -> Option<CandidateTrial> {
+        let queue = self.replay.get_mut(&self.key)?;
+        let matches = |trial: Option<&CandidateTrial>, index: usize, candidate: &Candidate| {
+            trial.is_some_and(|t| t.index == index && t.reason == candidate.reason)
+        };
+        if !matches(queue.front(), index, candidate) {
+            queue.clear();
+            return None;
+        }
+        if candidate.gates.glue {
+            if let Some(next) = next {
+                if !matches(queue.get(1), index + 1, next) {
+                    queue.clear();
+                    return None;
+                }
+            }
+        }
+        queue.pop_front()
+    }
+}
+
+/// The failed trials before the first trial that passed or met the time
+/// limit.
+fn replayable(trials: Vec<CandidateTrial>) -> Vec<CandidateTrial> {
+    trials
+        .into_iter()
+        .take_while(|t| !t.passed && !t.checks.iter().any(|c| c.id == "selection.time_limit"))
+        .collect()
 }
 
 /// A rendered candidate with its measurements.
@@ -108,6 +304,9 @@ pub struct Measured {
     pub rendered: Rendered,
     pub output: crate::Metrics,
     pub output_stereo: stereo::StereoAnalysis,
+    /// The measures of the controls on the render (`adjust::measure`),
+    /// from the spectrum of the stereo analysis (D330).
+    pub measures: crate::adjust::Delivered,
     pub preservation: analysis::Preservation,
     pub gain_span_db: f64,
     /// The tone and envelopes of the rendered spec, for gate predictions.
@@ -296,6 +495,8 @@ impl Reference {
                 starts: positions("starts")?,
                 ends: positions("ends")?,
                 power_db,
+                side_db: Vec::new(),
+                low_db: Vec::new(),
             },
             tone,
         })
@@ -318,30 +519,70 @@ impl Reference {
 }
 
 /// The level of each 3 s window of `audio` at `rate`, at 1 s steps.
-fn window_levels(audio: &[Stereo], rate: u32) -> Vec<f64> {
+pub(crate) fn window_levels(audio: &[Stereo], rate: u32) -> Vec<f64> {
+    window_levels_read(&mut crate::scratch::Slice(audio), rate).expect("frames of a slice")
+}
+
+/// Steps of 1 s of `window_levels` in each span of a stored recording.
+const LEVEL_SPAN_STEPS: usize = 64;
+
+/// `window_levels` of the frames of `audio`, read one span of steps at a
+/// time.
+pub(crate) fn window_levels_read(
+    audio: &mut impl crate::scratch::Frames,
+    rate: u32,
+) -> Result<Vec<f64>> {
     let (window, hop) = (3 * rate as usize, rate as usize);
-    (0..audio.len().saturating_sub(window))
-        .step_by(hop)
-        .map(|start| {
-            let energy = audio[start..start + window]
-                .iter()
-                .map(|f| (f[0] as f64).powi(2) + (f[1] as f64).powi(2))
-                .sum::<f64>()
-                / (2.0 * window as f64);
-            db(energy.sqrt())
-        })
-        .collect()
+    let count = audio.len().saturating_sub(window).div_ceil(hop);
+    let mut levels = Vec::with_capacity(count);
+    if count == 0 {
+        return Ok(levels);
+    }
+    // Window k sums the steps k, k + 1 and k + 2. Each step adds its frames
+    // to the sums of its three windows in one pass: each sum adds the same
+    // values in the same order as a pass for each window, and the three
+    // sums are independent chains (D310).
+    let steps = count + 2;
+    let mut sums = [0.0f64; 3];
+    let mut buffer = Vec::new();
+    for first in (0..steps).step_by(LEVEL_SPAN_STEPS) {
+        let last = (first + LEVEL_SPAN_STEPS).min(steps);
+        let frames = audio.window(first * hop, (last - first) * hop, &mut buffer)?;
+        for (step, frames) in (first..last).zip(frames.chunks(hop)) {
+            let [mut a, mut b, mut c] = [sums[1], sums[2], 0.0];
+            for f in frames {
+                let energy = (f[0] as f64).powi(2) + (f[1] as f64).powi(2);
+                a += energy;
+                b += energy;
+                c += energy;
+            }
+            if step >= 2 {
+                levels.push(db((a / (2.0 * window as f64)).sqrt()));
+            }
+            sums = [a, b, c];
+        }
+    }
+    Ok(levels)
 }
 
 /// P10–P90 span of three-second output-minus-source level over active
 /// windows. Both are at `rate`.
 pub fn gain_span_db(source: &[Stereo], output: &[Stereo], activity_floor: f64, rate: u32) -> f64 {
+    gain_span_of(
+        &window_levels(source, rate),
+        &window_levels(output, rate),
+        activity_floor,
+    )
+}
+
+/// `gain_span_db` with the window levels of the source and of the output.
+fn gain_span_of(source_levels: &[f64], output_levels: &[f64], activity_floor: f64) -> f64 {
     let floor = db(activity_floor.sqrt());
-    let a = window_levels(source, rate);
-    let b = window_levels(output, rate);
+    let a = source_levels;
+    let b = output_levels;
     let gains: Vec<f64> = a
         .iter()
-        .zip(&b)
+        .zip(b)
         .filter(|(s, _)| **s > floor)
         .map(|(s, o)| o - s)
         .collect();
@@ -351,17 +592,30 @@ pub fn gain_span_db(source: &[Stereo], output: &[Stereo], activity_floor: f64, r
     analysis::percentile(&gains, 0.9) - analysis::percentile(&gains, 0.1)
 }
 
-pub fn measure(input: &[Stereo], source: &SourceAnalysis, rendered: Rendered) -> Result<Measured> {
+/// The measures of `rendered` against the source of `source`.
+pub fn measure(source: &SourceAnalysis, rendered: Rendered) -> Result<Measured> {
     let rate = source.sample_rate;
-    let output = crate::metrics(&rendered.audio, rate);
-    let output_stereo = stereo::analyze(&rendered.audio, rate)?;
-    let preservation = analysis::compare(&source.temporal, &rendered.audio, rate);
-    let gain_span_db = gain_span_db(input, &rendered.audio, source.temporal.activity_floor, rate);
-    let low_sections = crate::low_end::sections(&rendered.audio, rate);
+    // Each measure reads the frames in spans, so a stored render stays in
+    // its scratch file (D253). One pass gives the metrics and the blocks.
+    let mut frames = rendered.audio.frames();
+    let mut metrics = crate::MetricsScan::new(rate);
+    let blocks = analysis::blocks_read_with(&mut frames, rate, |span| metrics.push(span))?;
+    let output = metrics.finish();
+    let (output_stereo, spectrum) = stereo::analyze_with_spectrum_read(&mut frames, rate)?;
+    let measures = crate::adjust::measures_of(&spectrum);
+    let preservation = analysis::compare_blocks(&source.temporal, &blocks);
+    let gain_span_db = gain_span_of(
+        &source.window_levels_db,
+        &window_levels_read(&mut frames, rate)?,
+        source.temporal.activity_floor,
+    );
+    let low_sections = crate::low_end::sections_read(&mut frames, rate)?;
+    drop(frames);
     Ok(Measured {
         rendered,
         output,
         output_stereo,
+        measures,
         preservation,
         gain_span_db,
         tone: None,
@@ -756,7 +1010,6 @@ pub struct Held {
 #[allow(clippy::too_many_arguments)]
 pub fn hold_low_end(
     renderer: &mut Renderer<'_>,
-    input: &[Stereo],
     source: &SourceAnalysis,
     targets: &[(&crate::low_end::Sections, f64)],
     reference_tone: Option<&crate::treatment::Tone>,
@@ -782,28 +1035,6 @@ pub fn hold_low_end(
             })
             .collect::<Vec<[Option<f64>; 2]>>()
     };
-    // The change of each held band at matched loudness that a restoration
-    // pass from `from` to `to` gains adds, from the source spectrum.
-    let restoration_shift = |from: &[f64; 6], to: &[f64; 6]| -> [f64; 2] {
-        let sum = |gains: &[f64; 6]| {
-            crate::treatment_render::filters_of(gains).iter().fold(
-                [0.0f64; 2],
-                |mut total, filter| {
-                    let (held, loudness) = crate::low_end::effect(
-                        &source.spectrum,
-                        filter,
-                        crate::finishing::Domain::Stereo,
-                    );
-                    for b in 0..2 {
-                        total[b] += held[b] - loudness;
-                    }
-                    total
-                },
-            )
-        };
-        let (before, after) = (sum(from), sum(to));
-        [after[0] - before[0], after[1] - before[1]]
-    };
     let mut changes = changes_of(&measured);
     let mut steps = Vec::new();
     let mut previous: Option<(crate::low_end::Step, Vec<[Option<f64>; 2]>)> = None;
@@ -811,7 +1042,7 @@ pub fn hold_low_end(
         .rendered
         .restoration
         .as_ref()
-        .map(|r| (r.measured_change_db, r.renders));
+        .map(|r| (r.measured_change_db, r.measured_gains_db, r.renders));
     let (mut renders, mut passes) = (0, 0);
     loop {
         // The restoring gains of the render that the hold measures.
@@ -831,7 +1062,9 @@ pub fn hold_low_end(
         };
         // The hold plans against the next render: the changes of this
         // render with the shift of the restoration pass that it takes.
-        let shift = gains.map_or([0.0; 2], |g| restoration_shift(&current, &g));
+        let shift = gains.map_or([0.0; 2], |g| {
+            crate::low_end::restoration_shift_db(&source.spectrum, &current, &g)
+        });
         let planned: Vec<[Option<f64>; 2]> = changes
             .iter()
             .map(|c| std::array::from_fn(|b| c[b].map(|x| x + shift[b])))
@@ -844,7 +1077,7 @@ pub fn hold_low_end(
                 sections,
                 &planned,
                 previous.as_ref().map(|(p, c)| (p, c.as_slice())),
-                input.len(),
+                source.source_frames,
             )
         } else {
             None
@@ -876,8 +1109,8 @@ pub fn hold_low_end(
                 .map_or(0.0, |(p, r)| p - r);
         // The next render takes the place of this one, whose audio is not
         // read again.
-        measured.rendered.audio = std::sync::Arc::new(Vec::new());
-        let mut held = measure(input, source, renderer.render_passes(&start, 0)?)?;
+        measured.rendered.audio = Default::default();
+        let mut held = measure(source, renderer.render_passes(&start, 0)?)?;
         held.tone = Some(next.effective_tone());
         renders += 1;
         changes = changes_of(&held);
@@ -889,9 +1122,10 @@ pub fn hold_low_end(
             previous = Some((step, planned));
         }
     }
-    if let (Some(r), Some((change, before))) = (&mut measured.rendered.restoration, first) {
+    if let (Some(r), Some((change, gains, before))) = (&mut measured.rendered.restoration, first) {
         if renders > 0 {
             r.measured_change_db = change;
+            r.measured_gains_db = gains;
             r.renders = before + renders;
         }
     }
@@ -909,7 +1143,6 @@ pub fn hold_low_end(
 /// of `reference`, for the fallback to the instant attack.
 pub fn ladder(
     renderer: &mut Renderer<'_>,
-    input: &[Stereo],
     source: &SourceAnalysis,
     reference: Option<&Reference>,
     reference_spec: Option<&Spec>,
@@ -917,20 +1150,14 @@ pub fn ladder(
     mut progress: impl FnMut(usize, &str) -> Result<()>,
 ) -> Result<(Option<Chosen>, Vec<CandidateTrial>)> {
     renderer.reference_prefix_lufs = reference.and_then(|r| r.prefix_lufs);
-    let mut result = ladder_inner(
-        renderer,
-        input,
-        source,
-        reference,
-        candidates,
-        &mut progress,
-    );
+    let mut result = ladder_inner(renderer, source, reference, candidates, true, &mut progress);
+    let expired = renderer.deadline.as_ref().is_some_and(|d| d.expired);
     // The limiter attack must not cost a version (`set.peak-attack.v1`):
     // when no candidate passes with it, the reference and the candidates
     // render again with the instant attack. The attack lets the start of a
     // loud low onset reach the clipper, which lowers more bass in a version
     // with more bass, so a move against the reference can shrink.
-    if let Ok((None, trials)) = &result {
+    if let (Ok((None, trials)), false) = (&result, expired) {
         // A version that builds on a fallen-back base has no attack, but its
         // reference can have it.
         if candidates.iter().any(|c| c.spec.limiter.attack_ms > 0.0)
@@ -942,7 +1169,7 @@ pub fn ladder(
                     let mut spec = spec.clone();
                     spec.limiter.attack_ms = 0.0;
                     renderer.reference_prefix_lufs = None;
-                    let mut measured = measure(input, source, renderer.render(&spec)?)?;
+                    let mut measured = measure(source, renderer.render(&spec)?)?;
                     measured.tone = Some(spec.effective_tone());
                     // The gates compare the reference's measurements, not its
                     // audio.
@@ -962,10 +1189,10 @@ pub fn ladder(
             renderer.reference_prefix_lufs = instant_reference.as_ref().and_then(|r| r.prefix_lufs);
             result = ladder_inner(
                 renderer,
-                input,
                 source,
                 instant_reference.as_ref(),
                 &instant,
+                true,
                 &mut progress,
             )
             .map(|(chosen, later)| (chosen, earlier.into_iter().chain(later).collect()));
@@ -976,22 +1203,30 @@ pub fn ladder(
 }
 
 /// Render one `candidate` against `reference` and keep it when it passes
-/// its gates, without the fallback of the instant attack of `ladder`.
+/// its gates, without the fallback of the instant attack of `ladder`. The
+/// render starts at the drive and the restoring gains of `from`, an earlier
+/// render of the version, and corrects the drive by the change of the
+/// prefix loudness from `from` (D204).
 pub(crate) fn one(
     renderer: &mut Renderer<'_>,
-    input: &[Stereo],
     source: &SourceAnalysis,
     reference: Option<&Reference>,
     candidate: &Candidate,
+    from: &Rendered,
     progress: impl FnMut(usize, &str) -> Result<()>,
 ) -> Result<(Option<Chosen>, Vec<CandidateTrial>)> {
-    renderer.reference_prefix_lufs = reference.and_then(|r| r.prefix_lufs);
+    let mut started = candidate.clone();
+    started.spec.initial_drive_db = from.drive_db;
+    if let Some(r) = &from.restoration {
+        started.spec.restoration_db = r.gains_db;
+    }
+    renderer.reference_prefix_lufs = from.prefix_lufs;
     let result = ladder_inner(
         renderer,
-        input,
         source,
         reference,
-        std::slice::from_ref(candidate),
+        std::slice::from_ref(&started),
+        false,
         progress,
     );
     renderer.reference_prefix_lufs = None;
@@ -1000,17 +1235,54 @@ pub(crate) fn one(
 
 fn ladder_inner(
     renderer: &mut Renderer<'_>,
-    input: &[Stereo],
     source: &SourceAnalysis,
     reference: Option<&Reference>,
     candidates: &[Candidate],
+    warm: bool,
+    progress: impl FnMut(usize, &str) -> Result<()>,
+) -> Result<(Option<Chosen>, Vec<CandidateTrial>)> {
+    let result = ladder_candidates(renderer, source, reference, candidates, warm, progress);
+    if let Some(deadline) = &mut renderer.deadline {
+        deadline.finish();
+    }
+    if let (Some(record), Ok((_, trials))) = (&mut renderer.trials, &result) {
+        record.log(trials);
+    }
+    result
+}
+
+/// The candidates in order, until one passes its gates. With `warm`, each
+/// render starts at the drive and the restoring gains of `reference`
+/// (`warm_start`); without it, at those of the candidate.
+fn ladder_candidates(
+    renderer: &mut Renderer<'_>,
+    source: &SourceAnalysis,
+    reference: Option<&Reference>,
+    candidates: &[Candidate],
+    warm: bool,
     mut progress: impl FnMut(usize, &str) -> Result<()>,
 ) -> Result<(Option<Chosen>, Vec<CandidateTrial>)> {
+    let start = |spec: &Spec| {
+        if warm {
+            warm_start(spec, reference)
+        } else {
+            spec.clone()
+        }
+    };
     let mut trials = Vec::new();
     let mut prepared: Option<(usize, Measured)> = None;
     let mut index = 0;
     while index < candidates.len() {
         let candidate = &candidates[index];
+        if let Some(trial) = renderer
+            .trials
+            .as_mut()
+            .and_then(|r| r.replayed(index, candidate, candidates.get(index + 1)))
+        {
+            trials.push(trial);
+            index += 1;
+            continue;
+        }
         let tone = candidate.spec.effective_tone();
         let predictions: Vec<imaging::Check> = match reference.and_then(|r| r.tone.as_ref()) {
             Some(reference_tone) => candidate
@@ -1047,6 +1319,26 @@ fn ladder_inner(
             index += 1;
             continue;
         }
+        if let Some(check) = renderer
+            .deadline
+            .as_mut()
+            .map(Deadline::start)
+            .filter(|c| !c.passed)
+        {
+            trials.push(CandidateTrial {
+                index,
+                reason: candidate.reason.clone(),
+                passed: false,
+                checks: vec![check],
+                lufs: f64::NAN,
+                limiter_maximum_db: f64::NAN,
+                gain_span_db: f64::NAN,
+                attack_loss_p90_db: None,
+                energy_attack_loss_p90_db: None,
+                low_end: Vec::new(),
+            });
+            return Ok((None, trials));
+        }
         progress(index, &candidate.reason)?;
         // A held candidate finishes its restoration in the renders of the
         // hold.
@@ -1055,17 +1347,15 @@ fn ladder_inner(
         let measured = match prepared.take() {
             Some((i, m)) if i == index => m,
             _ => measure(
-                input,
                 source,
-                renderer.render_passes(&warm_start(&candidate.spec, reference), passes)?,
+                renderer.render_passes(&start(&candidate.spec), passes)?,
             )?,
         };
         let plain = if candidate.gates.glue && index + 1 < candidates.len() {
             progress(index + 1, &candidates[index + 1].reason)?;
             let r = measure(
-                input,
                 source,
-                renderer.render(&warm_start(&candidates[index + 1].spec, reference))?,
+                renderer.render(&start(&candidates[index + 1].spec))?,
             )?;
             prepared = Some((index + 1, r));
             prepared.as_ref().map(|(_, m)| m)
@@ -1076,14 +1366,14 @@ fn ladder_inner(
         measured.tone = Some(tone);
         let mut checks = evaluate(&candidate.gates, &measured, reference, plain);
         let mut passed = checks.iter().all(|c| c.passed);
-        let mut spec = warm_start(&candidate.spec, reference);
+        let mut spec = start(&candidate.spec);
         if holds && !passed {
             // The gates decide on the restored render.
             let rendered = renderer.restore(&spec, measured.rendered, RESTORATION_PASSES)?;
             if let Some(r) = &rendered.restoration {
                 spec.restoration_db = r.gains_db;
             }
-            measured = measure(input, source, rendered)?;
+            measured = measure(source, rendered)?;
             measured.tone = Some(candidate.spec.effective_tone());
             checks = evaluate(&candidate.gates, &measured, reference, plain);
             passed = checks.iter().all(|c| c.passed);
@@ -1092,7 +1382,6 @@ fn ladder_inner(
         if let (true, true, Some(r)) = (passed, candidate.gates.low_end, reference) {
             let held = hold_low_end(
                 renderer,
-                input,
                 source,
                 &[(&r.low_sections, r.lufs)],
                 r.tone.as_ref().map(|(t, _)| t),
@@ -1130,25 +1419,43 @@ fn ladder_inner(
             if let Some(r) = &measured.rendered.restoration {
                 prefix_spec.restoration_db = r.gains_db;
             }
-            let prefix = renderer.prepared_prefix(&prefix_spec)?;
+            // The prefix and its 4x frames stay in the scratch storage of
+            // the renderer, and the ratios read the prefix in spans (D228).
             // The render is peak control of this prefix at its drive, so its
             // output gives the ratios of the probe without another render.
-            let at_drive = if measured.rendered.audio.len() == prefix.len() {
-                let ratios = crate::audibility::peak_control_ratios(
-                    &prefix,
-                    &measured.rendered.audio,
-                    source.sample_rate,
-                );
-                crate::audibility::Probe {
-                    drive_db: measured.rendered.drive_db,
-                    lufs: measured.rendered.lufs,
-                    nmr_db: ratios.total_db,
-                    loud_nmr_db: ratios.loud_db,
-                    attack_loss_db: measured.preservation.attack_loss_p90_db,
-                }
+            let at_drive = {
+                let mut prefix = crate::scratch::Shared(renderer.prepared_frames(&prefix_spec)?.0);
+                (measured.rendered.audio.len() == crate::scratch::Frames::len(&prefix))
+                    .then(|| {
+                        crate::audibility::peak_control_ratios_of(
+                            &mut prefix,
+                            &mut measured.rendered.audio.frames(),
+                            source.sample_rate,
+                        )
+                    })
+                    .transpose()?
+                    .map(|ratios| crate::audibility::Probe {
+                        drive_db: measured.rendered.drive_db,
+                        lufs: measured.rendered.lufs,
+                        nmr_db: ratios.total_db,
+                        loud_nmr_db: ratios.loud_db,
+                        attack_loss_db: measured.preservation.attack_loss_p90_db,
+                    })
+            };
+            // The render waits in scratch while the probes of the prefix
+            // render.
+            let spilled = if at_drive.is_none_or(|p| p.excess_db() > 0.0) {
+                renderer.spill(&mut measured.rendered.audio)?
             } else {
-                crate::audibility::probe(
-                    &prefix,
+                None
+            };
+            let (prefix, mut up) = renderer.prepared_frames(&prefix_spec)?;
+            let mut prefix = crate::audibility::Prefix::Shared(crate::scratch::Shared(prefix));
+            let at_drive = match at_drive {
+                Some(probe) => probe,
+                None => crate::audibility::probe_on(
+                    &mut prefix,
+                    &mut up,
                     measured.rendered.drive_db,
                     prefix_spec.clipper_db,
                     prefix_spec.ceiling_dbtp,
@@ -1156,13 +1463,14 @@ fn ladder_inner(
                     prefix_spec.true_peak,
                     Some(&source.temporal),
                     source.sample_rate,
-                )?
+                )?,
             };
             let point = if at_drive.excess_db() <= 0.0 {
                 None
             } else {
-                crate::audibility::point(
-                    &prefix,
+                crate::audibility::point_on(
+                    &mut prefix,
+                    &mut up,
                     measured.rendered.drive_db,
                     prefix_spec.clipper_db,
                     prefix_spec.ceiling_dbtp,
@@ -1172,6 +1480,13 @@ fn ladder_inner(
                     source.sample_rate,
                 )?
             };
+            // A render at the point replaces the render of the candidate.
+            let replaced = point
+                .as_ref()
+                .is_some_and(|p| measured.rendered.lufs - p.lufs > 0.0);
+            if let (Some(spilled), false) = (spilled, replaced) {
+                spilled.restore(&mut measured.rendered.audio)?;
+            }
             checks.push(imaging::Check::range(
                 "selection.own_nmr",
                 "Masked noise-to-mask ratio of peak control on the prefix of the candidate at its drive",
@@ -1199,7 +1514,7 @@ fn ladder_inner(
                         point.lufs - crate::treatment_render::LOUDNESS_TOLERANCE_LU;
                     at_point.fixed_drive_db = None;
                     at_point.initial_drive_db = measured.rendered.drive_db - over;
-                    measured = measure(input, source, renderer.render(&at_point)?)?;
+                    measured = measure(source, renderer.render(&at_point)?)?;
                     measured.tone = Some(candidate.spec.effective_tone());
                     if let Some(r) = &measured.rendered.restoration {
                         at_point.restoration_db = r.gains_db;
@@ -1310,5 +1625,87 @@ impl Signature {
         }
         (self.side_mid_db - other.side_mid_db).abs() < DISTINCT_DB
             && (self.mean_reduction_db - other.mean_reduction_db).abs() < DISTINCT_DB
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_window_levels_of_one_pass_equal_a_sum_for_each_window() {
+        // The sum of each window alone, as before D310.
+        let reference = |audio: &[Stereo], rate: u32| -> Vec<f64> {
+            let (window, hop) = (3 * rate as usize, rate as usize);
+            (0..audio.len().saturating_sub(window))
+                .step_by(hop)
+                .map(|start| {
+                    let energy = audio[start..start + window]
+                        .iter()
+                        .map(|f| (f[0] as f64).powi(2) + (f[1] as f64).powi(2))
+                        .sum::<f64>()
+                        / (2.0 * window as f64);
+                    db(energy.sqrt())
+                })
+                .collect()
+        };
+        let bits = |levels: Vec<f64>| levels.into_iter().map(f64::to_bits).collect::<Vec<_>>();
+        let mut seed = 1u32;
+        for rate in [1u32, 7, 10, 441] {
+            let r = rate as usize;
+            for frames in [
+                0,
+                1,
+                3 * r - 1,
+                3 * r,
+                3 * r + 1,
+                4 * r,
+                4 * r + 1,
+                70 * r + 3,
+                140 * r,
+            ] {
+                let audio: Vec<Stereo> = (0..frames)
+                    .map(|i| {
+                        seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                        let x = (seed >> 8) as f32 / (1 << 24) as f32 - 0.5;
+                        // Three silent seconds of each ten seconds.
+                        if (3..6).contains(&((i / r) % 10)) {
+                            [0.0, 0.0]
+                        } else {
+                            [x, 0.1 - 0.7 * x]
+                        }
+                    })
+                    .collect();
+                assert_eq!(
+                    bits(window_levels(&audio, rate)),
+                    bits(reference(&audio, rate)),
+                    "rate {rate}, {frames} frames"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_candidate_starts_when_the_longest_candidate_can_end_in_time() {
+        let start = Instant::now();
+        let at = |s: u64| start + Duration::from_secs(s);
+        let mut deadline = Deadline::new(at(100));
+        // The first candidate has no estimate.
+        assert!(deadline.start_at(at(0)).passed);
+        // 30 s left 70 s.
+        assert!(deadline.start_at(at(30)).passed);
+        // 20 s, and the longest stays 30 s: 50 s are left.
+        assert!(deadline.start_at(at(50)).passed);
+        deadline.finish_at(at(60));
+        let check = deadline.start_at(at(75));
+        assert!(!check.passed);
+        assert_eq!(check.id, "selection.time_limit");
+        assert_eq!(check.measured, Some(25.0));
+        assert_eq!(check.minimum, Some(30.0));
+        // After a candidate that cannot start, no candidate starts.
+        let mut later = Deadline::new(at(100));
+        assert!(later.start_at(at(0)).passed);
+        assert!(!later.start_at(at(100)).passed);
+        assert!(!later.start_at(at(0)).passed);
     }
 }

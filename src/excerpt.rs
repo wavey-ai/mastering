@@ -42,6 +42,12 @@ pub struct Fixed {
     pub drive_db: f64,
     /// Gain of the whole render after the true-peak correction, in dB.
     pub trim_db: f64,
+    /// Whether the whole render lowered its frames over the ceiling
+    /// (`render_blocks::TruePeakFit::local_db` above 0). The whole render
+    /// lowers each frame over the ceiling when one frame of the recording
+    /// passes the target, so a frame of a span can be lowered by a peak
+    /// outside the span. None for a report without it.
+    pub lowered: Option<bool>,
 }
 
 /// The render report of a version record (`render` of a family result, or
@@ -60,6 +66,7 @@ impl Fixed {
         Ok(Self {
             drive_db: render["drive_db"].as_f64().ok_or("Missing drive")?,
             trim_db: render["true_peak"]["trim_db"].as_f64().unwrap_or(0.0),
+            lowered: render["true_peak"]["local_db"].as_f64().map(|db| db > 0.0),
         })
     }
 }
@@ -130,14 +137,24 @@ pub fn render_span(
         spec.limiter,
         rate,
     )?;
-    // As `render_blocks::fit_true_peak`, with the trim of the whole render.
-    let target = spec.ceiling_dbtp - 0.001;
-    let os = Oversampler::new(rate);
-    if spec.true_peak == dsp::TruePeak::Local && dsp::db(os.peak(&audio)) > target {
-        os.lower_peaks(&mut audio, dsp::gain(target - 0.001));
+    if spec.true_peak == dsp::TruePeak::Local {
+        lower_peaks(&mut audio, spec.ceiling_dbtp, fixed.lowered, rate);
     }
     treatment_render::scale(&mut audio, fixed.trim_db);
     Ok(audio[keep.start - read.start..keep.end - read.start].to_vec())
+}
+
+/// The local true-peak correction of a span at `rate`, as
+/// `render_blocks::fit_true_peak` makes it on the whole render: each frame
+/// over 0.001 dB under the target is lowered when the whole render lowered
+/// its peaks (`lowered`). Without the fact, the span lowers its frames when
+/// one of them passes the target.
+fn lower_peaks(audio: &mut [Stereo], ceiling_dbtp: f64, lowered: Option<bool>, rate: u32) {
+    let target = ceiling_dbtp - 0.001;
+    let os = Oversampler::new(rate);
+    if lowered.unwrap_or_else(|| dsp::db(os.peak(audio)) > target) {
+        os.lower_peaks(audio, dsp::gain(target - 0.001));
+    }
 }
 
 /// `render_span` from the whole source recording at `rate`.
@@ -263,6 +280,32 @@ mod tests {
     }
 
     #[test]
+    fn a_span_lowers_its_peaks_when_the_whole_render_did() {
+        // A tone 0.0005 dB under the target of a −1 dBTP ceiling: the whole
+        // render lowers it when a peak elsewhere in the recording passes the
+        // target.
+        let rate = 48000;
+        let amplitude = dsp::gain(-1.0 - 0.001 - 0.0005) as f32;
+        let tone: Vec<Stereo> = (0..rate as usize)
+            .map(|i| {
+                let x = amplitude * (std::f32::consts::TAU * 100.0 * i as f32 / rate as f32).sin();
+                [x, x]
+            })
+            .collect();
+        let os = Oversampler::new(rate);
+        assert!(dsp::db(os.peak(&tone)) < -1.001);
+        for lowered in [Some(true), Some(false), None] {
+            let mut audio = tone.clone();
+            lower_peaks(&mut audio, -1.0, lowered, rate);
+            if lowered == Some(true) {
+                assert!(dsp::db(os.peak(&audio)) <= -1.002 + 1e-6);
+            } else {
+                assert_eq!(audio, tone);
+            }
+        }
+    }
+
+    #[test]
     fn a_span_equals_the_same_frames_of_the_whole_render() {
         for rate in crate::audio_io::RENDER_RATES {
             let second = rate as usize;
@@ -276,6 +319,7 @@ mod tests {
             let fixed = Fixed {
                 drive_db: whole.drive_db,
                 trim_db: whole.true_peak.trim_db,
+                lowered: Some(whole.true_peak.local_db > 0.0),
             };
             // The span renders keep the de-esser cut of the whole render,
             // as `delivered_spec` gives it.
@@ -304,7 +348,7 @@ mod tests {
                 frames - second..frames,
             ] {
                 let span = render(&input, &spec, fixed, keep.clone(), rate).unwrap();
-                let difference = difference_dbfs(&span, &whole.audio[keep.clone()]);
+                let difference = difference_dbfs(&span, &whole.audio.load().unwrap()[keep.clone()]);
                 assert!(difference < -138.0, "{rate} {keep:?}: {difference} dBFS");
             }
             // A span that solves the reference excess of its own keyed frames
@@ -314,10 +358,36 @@ mod tests {
                 12 * second + 3 * second / 4..15 * second,
             ] {
                 let span = render(&input, &solved, fixed, keep.clone(), rate).unwrap();
-                let difference = difference_dbfs(&span, &whole.audio[keep.clone()]);
+                let difference = difference_dbfs(&span, &whole.audio.load().unwrap()[keep.clone()]);
                 assert!(difference > -100.0, "{rate} {keep:?}: {difference} dBFS");
             }
         }
+    }
+
+    #[test]
+    fn a_span_render_rejects_a_finishing_stage() {
+        let rate = 48000;
+        let second = rate as usize;
+        let input = source(20 * second, rate);
+        let mut spec = spec(input.len());
+        spec.finishing.active = true;
+        spec.finishing.section_gain = vec![
+            crate::finishing::GainPoint {
+                sample: 0,
+                gain_db: 0.0,
+            },
+            crate::finishing::GainPoint {
+                sample: 10 * second,
+                gain_db: 0.2,
+            },
+        ];
+        let fixed = Fixed {
+            drive_db: 0.0,
+            trim_db: 0.0,
+            lowered: None,
+        };
+        let error = render(&input, &spec, fixed, 4 * second..8 * second, rate).unwrap_err();
+        assert_eq!(error.to_string(), "A span render has no finishing stage");
     }
 
     #[test]

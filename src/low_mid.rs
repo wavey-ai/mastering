@@ -14,7 +14,7 @@ use crate::{
     masking,
     treatment::{BlendPoint, EnvelopedBand},
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Region of the correction, in Hz.
 pub const REGION_HZ: (f64, f64) = (250.0, 500.0);
@@ -36,8 +36,9 @@ pub const RELEASE_SECONDS: f64 = 0.5;
 const POINT_FRAMES: usize = 4;
 
 /// The masking of the lead stem in the low mids, frame by frame.
-#[derive(Clone, Serialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct Key {
+    #[serde(deserialize_with = "crate::static_text::text")]
     pub rule: &'static str,
     /// Index of the lead role in `stem_evidence::Evidence::roles`.
     pub lead_role: usize,

@@ -27,7 +27,7 @@ pub struct BandMetrics {
     pub right_power: f64,
     pub mid_power: f64,
     pub side_power: f64,
-    /// Left plus right power weighted by `broad_tone::equal_loudness_weight`.
+    /// Left plus right power weighted by `broad_tone::equal_loudness_weights`.
     pub weighted_power: f64,
     pub side_fraction: Option<f64>,
     pub side_mid_db: Option<f64>,
@@ -128,11 +128,11 @@ struct RawWindow {
     bands: Vec<RawBand>,
 }
 
-/// `broad_tone::equal_loudness_weight` of each FFT bin at `rate`.
+/// `broad_tone::equal_loudness_weights` of the FFT bins at `rate`.
 fn bin_weights(rate: usize) -> Vec<f64> {
-    (0..=FFT_SIZE / 2)
-        .map(|i| crate::broad_tone::equal_loudness_weight(i as f64 * rate as f64 / FFT_SIZE as f64))
-        .collect()
+    crate::broad_tone::equal_loudness_weights(
+        (0..=FFT_SIZE / 2).map(|i| i as f64 * rate as f64 / FFT_SIZE as f64),
+    )
 }
 
 struct Accumulator {
@@ -352,8 +352,54 @@ fn summarize(windows: &[StereoWindow], rate: usize) -> Vec<BandSummary> {
 
 /// The stereo analysis of `audio` at `rate`.
 pub fn analyze(audio: &[Stereo], rate: u32) -> Result<StereoAnalysis> {
-    if audio.is_empty() || audio.iter().flatten().any(|v| !v.is_finite()) {
-        return Err("Stereo analysis requires nonempty finite stereo samples".into());
+    analyze_read(&mut crate::scratch::Slice(audio), rate)
+}
+
+/// The sum of `count` values of `window_power` from `offset`, in order.
+fn window_power_of(window_power: &[f64], offset: usize, count: usize) -> f64 {
+    window_power[offset..offset + count]
+        .iter()
+        .fold(0.0, |sum, power| sum + power)
+}
+
+/// `analyze` of the frames of `audio`, read in batches of FFT windows. The
+/// windows of the centers, one hop apart, cover each frame.
+pub(crate) fn analyze_read(
+    audio: &mut impl crate::scratch::Frames,
+    rate: u32,
+) -> Result<StereoAnalysis> {
+    analyze_read_with(audio, rate, None)
+}
+
+// The frames of the spectrum are the frames of the analysis with a whole
+// window, in the same order.
+const _: () = assert!(FFT_SIZE == crate::SPECTRUM_FFT && HOP_SIZE == crate::SPECTRUM_HOP);
+
+/// `analyze_read` and `crate::spectrum_read` of `audio`. The frame of
+/// center `c` with a whole window holds frames `c - FFT_SIZE / 2` to
+/// `c + FFT_SIZE / 2`, as the frame of the spectrum that starts at
+/// `c - FFT_SIZE / 2`. The spectrum takes the transforms of these frames
+/// (D320).
+pub(crate) fn analyze_with_spectrum_read(
+    audio: &mut impl crate::scratch::Frames,
+    rate: u32,
+) -> Result<(StereoAnalysis, crate::Spectrum)> {
+    let mut sums = crate::SpectrumSums::new();
+    let analysis = analyze_read_with(audio, rate, Some(&mut sums))?;
+    Ok((analysis, sums.finish(rate)))
+}
+
+/// `analyze_read`, which adds the terms of each frame with a whole window to
+/// `spectrum`.
+fn analyze_read_with(
+    audio: &mut impl crate::scratch::Frames,
+    rate: u32,
+    mut spectrum: Option<&mut crate::SpectrumSums>,
+) -> Result<StereoAnalysis> {
+    const NONFINITE: &str = "Stereo analysis requires nonempty finite stereo samples";
+    let length = audio.len();
+    if length == 0 {
+        return Err(NONFINITE.into());
     }
     let rate = rate as usize;
     let weights = bin_weights(rate);
@@ -362,25 +408,31 @@ pub fn analyze(audio: &[Stereo], rate: u32) -> Result<StereoAnalysis> {
     let window_power: Vec<_> = (0..FFT_SIZE)
         .map(|i| (0.5 * (1.0 - (2.0 * PI * i as f64 / FFT_SIZE as f64).cos())).powi(2))
         .collect();
+    let whole_window_power = window_power_of(&window_power, 0, FFT_SIZE);
     let (mut whole, mut short, mut long) =
         (Accumulator::new(), Accumulator::new(), Accumulator::new());
     let (mut short_index, mut long_index) = (0, 0);
     let (mut short_raw, mut long_raw) = (Vec::new(), Vec::new());
-    let centers: Vec<usize> = (0..audio.len())
+    let centers: Vec<usize> = (0..length)
         .step_by(HOP_SIZE)
-        .chain(std::iter::once(audio.len() - 1).filter(|last| last % HOP_SIZE != 0))
+        .chain(std::iter::once(length - 1).filter(|last| last % HOP_SIZE != 0))
         .collect();
+    let mut buffer = Vec::new();
+    let with_spectrum = spectrum.is_some();
     // Each frame is one whole FFT window, so frames transform on the
-    // available cores; the accumulators take them in order. The browser
-    // engine has one thread: a batch of one range holds 4 MB of frames, not
-    // 34 MB.
-    const BATCH: usize = if cfg!(target_arch = "wasm32") {
-        64
-    } else {
-        512
-    };
-    for batch in centers.chunks(BATCH) {
-        let frames = crate::dsp::chunked(batch.len(), 64, |range| {
+    // available cores; the accumulators take them in order. A batch has one
+    // range of 64 frames for each core of `dsp::chunked`, and each range
+    // holds 8.4 MB of frames (D240).
+    let batch_frames = 64 * crate::dsp::threads().min(8);
+    for batch in centers.chunks(batch_frames) {
+        // The frames under the windows of the batch.
+        let first = batch[0].saturating_sub(FFT_SIZE / 2);
+        let last = (batch[batch.len() - 1] + FFT_SIZE / 2).min(length);
+        let frames = audio.window(first, last - first, &mut buffer)?;
+        if frames.iter().flatten().any(|v| !v.is_finite()) {
+            return Err(NONFINITE.into());
+        }
+        let transformed = crate::dsp::chunked(batch.len(), 64, |range| {
             let mut stft = StereoStft::new(FFT_SIZE, FFT_SIZE);
             let (mut left, mut right) = (vec![0.0; FFT_SIZE], vec![0.0; FFT_SIZE]);
             batch[range]
@@ -389,14 +441,21 @@ pub fn analyze(audio: &[Stereo], rate: u32) -> Result<StereoAnalysis> {
                     left.fill(0.0);
                     right.fill(0.0);
                     let start = center.saturating_sub(FFT_SIZE / 2);
-                    let end = (center + FFT_SIZE / 2).min(audio.len());
+                    let end = (center + FFT_SIZE / 2).min(length);
                     let offset = (FFT_SIZE / 2).saturating_sub(center);
-                    let mut available_window_power = 0.0;
-                    for (i, sample) in audio[start..end].iter().enumerate() {
+                    let samples = &frames[start - first..end - first];
+                    for (i, sample) in samples.iter().enumerate() {
                         left[offset + i] = sample[0];
                         right[offset + i] = sample[1];
-                        available_window_power += window_power[offset + i];
                     }
+                    // A frame inside the recording takes the whole window:
+                    // the sum of each frame was one chain of 8,192 additions
+                    // (D313).
+                    let available_window_power = if samples.len() == FFT_SIZE {
+                        whole_window_power
+                    } else {
+                        window_power_of(&window_power, offset, samples.len())
+                    };
                     let (a, b) = stft
                         .add_with(FFT_SIZE, |i| [left[i], right[i]])
                         .expect("Complete FFT input");
@@ -413,11 +472,18 @@ pub fn analyze(audio: &[Stereo], rate: u32) -> Result<StereoAnalysis> {
                             }
                         })
                         .collect();
-                    (start, end, frame)
+                    let terms = (with_spectrum && samples.len() == FFT_SIZE)
+                        .then(|| crate::SpectrumSums::terms(a, b));
+                    (start, end, frame, terms)
                 })
                 .collect::<Vec<_>>()
         });
-        for (&center, (start, end, frame)) in batch.iter().zip(frames.into_iter().flatten()) {
+        for (&center, (start, end, frame, terms)) in
+            batch.iter().zip(transformed.into_iter().flatten())
+        {
+            if let (Some(sums), Some(terms)) = (spectrum.as_deref_mut(), terms) {
+                sums.add(&terms);
+            }
             let next_short = center / short_size;
             if next_short != short_index {
                 short_raw.push(short.finish(
@@ -446,8 +512,8 @@ pub fn analyze(audio: &[Stereo], rate: u32) -> Result<StereoAnalysis> {
             long.add(&frame, start, end, padded);
         }
     }
-    short_raw.push(short.finish(short_index * short_size, audio.len(), &weights, rate));
-    long_raw.push(long.finish(long_index * long_size, audio.len(), &weights, rate));
+    short_raw.push(short.finish(short_index * short_size, length, &weights, rate));
+    long_raw.push(long.finish(long_index * long_size, length, &weights, rate));
     let peak_power = short_raw
         .iter()
         .map(|w| {
@@ -463,7 +529,7 @@ pub fn analyze(audio: &[Stereo], rate: u32) -> Result<StereoAnalysis> {
     Ok(StereoAnalysis {
         schema: "mastering.stereo.1",
         sample_rate: rate,
-        input_frames: audio.len(),
+        input_frames: length,
         fft_size: FFT_SIZE,
         hop_size: HOP_SIZE,
         band_edges_hz: BAND_EDGES_HZ,
@@ -476,7 +542,7 @@ pub fn analyze(audio: &[Stereo], rate: u32) -> Result<StereoAnalysis> {
         deep_mono_loss_fraction: DEEP_MONO_LOSS,
         short_window_samples: short_size,
         long_window_samples: long_size,
-        whole: measure(whole.finish(0, audio.len(), &weights, rate), floor),
+        whole: measure(whole.finish(0, length, &weights, rate), floor),
         short_summary: summarize(&short_windows, rate),
         long_summary: summarize(&long_windows, rate),
         short_windows,
@@ -621,6 +687,40 @@ mod parallel_tests {
                 serde_json::to_string(&analyze_sequential(&audio).unwrap()).unwrap(),
                 "{len}"
             );
+        }
+    }
+
+    /// The analysis with the spectrum gives the analysis and the spectrum
+    /// of their own passes, bit for bit (D320).
+    #[test]
+    fn the_analysis_with_the_spectrum_equals_each_pass() {
+        let mut state = 0x9e37_79b9u32;
+        for len in [7_000, 8_192, 48_000 * 2 + 777, 48_000 * 12 + 2_048] {
+            let audio: Vec<Stereo> = (0..len)
+                .map(|_| {
+                    let mut next = || {
+                        state ^= state << 13;
+                        state ^= state >> 17;
+                        state ^= state << 5;
+                        state as f32 / u32::MAX as f32 - 0.5
+                    };
+                    [next(), 0.3 * next()]
+                })
+                .collect();
+            let (analysis, spectrum) =
+                analyze_with_spectrum_read(&mut crate::scratch::Slice(&audio), 48000).unwrap();
+            assert_eq!(
+                serde_json::to_string(&analysis).unwrap(),
+                serde_json::to_string(&analyze(&audio, 48000).unwrap()).unwrap(),
+                "{len}"
+            );
+            let alone = crate::spectrum(&audio, 48000);
+            assert_eq!(spectrum.analyzed_frames, alone.analyzed_frames, "{len}");
+            let bits = |s: &crate::Spectrum| {
+                [&s.band_power, &s.mid_power, &s.side_power, &s.mel_power]
+                    .map(|v| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>())
+            };
+            assert_eq!(bits(&spectrum), bits(&alone), "{len}");
         }
     }
 }

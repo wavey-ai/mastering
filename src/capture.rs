@@ -15,9 +15,8 @@ use serde::Serialize;
 pub const PRESENCE_RULE: &str = "set.capture-presence.v1";
 pub const LOW_BAND_RULE: &str = "set.capture-low-band.v1";
 
-/// Largest gain of the presence balance bell of a captured recording, and
-/// largest summed response of the static tone of its `master`, in dB: the
-/// largest presence bell of the engine, that of `bold`
+/// Largest gain of the presence balance bell of a captured recording, in
+/// dB: the largest presence bell of the engine, that of `bold`
 /// (`broad_tone::VIVID_PRESENCE_MAXIMUM_DB`). A mix keeps
 /// `broad_tone::RESPONSE_DB`.
 pub const PRESENCE_BELL_MAXIMUM_DB: f64 = broad_tone::VIVID_PRESENCE_MAXIMUM_DB;

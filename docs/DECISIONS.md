@@ -1314,6 +1314,11 @@ The following records the earlier prototype; the v2 native contract replaces it.
 - Supersedes: D038/D039's assumption that source-bound auditory regions must enter the complete set through an external artifact, and D044's optional-stems product behavior. Their measured policy, imported-artifact validation and complete-render evaluation remain active.
 - Work reference: TODO "Local browser mastering" and the browser run record.
 
+### Updates
+
+- 2026-10-26: On the nine regression mixes at 1.14.0, each with its four stems, the native and WASM sets deliver the same versions with the same candidates, statuses, labels and measured names, and each field of each spec that is not a number is identical. 7 of the 36 WAVs are identical; the other 29 differ by 1 to 8 steps of 24 bits, at residuals of −197.2 to −122.3 dB. The measures of the source that use the FFT differ in the last digits, and the other measures are identical. The native engine runs the NEON FFT of rustfft, and the browser engine its WebAssembly SIMD FFT. In the browser engine, the stem analysis takes 10.8 to 22.9 s, 2.8% to 12.6% of a set (the native and WASM parity run).
+- 2026-10-28: D268 keeps the math library of each target. The WAVs of one set can differ between two targets in the last steps of 24 bits, and a comparison of two targets compares the decisions of the set.
+
 ## D046: Parallel treatment-family execution
 
 - Recorded: 2026-09-26.
@@ -1423,6 +1428,7 @@ The following records the earlier prototype; the v2 native contract replaces it.
 ### Updates
 
 - 2026-10-16: Checks from the public site with an anonymous account of `bitneedle.com/id` against `https://mstr.bitneedle.com`. The authorizer accepts the `MSTR` token of an anonymous session: each request of a complete cloud job returned HTTP 200. After "Sign out", `/id/tokens` returns HTTP 401, but a token minted before the sign out still gave HTTP 200 298 s before its expiry, and HTTP 403 5 s after it. The `$default` stage limits every caller together to a burst of 10 and 5 requests per second; 20 `status` requests of one account in 1.81 s gave one HTTP 429. No limit applies to one account. Key rotation is not tested.
+- 2026-10-27: A local test of the authorizer of Zeroth `c57badc` shows the rotation window. The authorizer keeps the JWKS for 300 s, so it denies the tokens of a new key for up to 300 s when the issuer switches to a key that its JWKS did not publish before. The next key therefore goes into the published JWKS 300 s before the switch (the rotation procedure in). A live rotation is not tested.
 
 ## D050: Music and Art routes are the app entry points
 
@@ -1519,6 +1525,12 @@ The following records the earlier prototype; the v2 native contract replaces it.
 - Review conditions: Approve retention and preview bitrate after listening/cost checks. Stream finalizer S3 reads to scratch files as a bounded-copy improvement; implement preview delivery first and revisit direct PCM multipart streaming only if measured `/tmp`, memory, or upload latency justifies it.
 - Extends: [D048](#d048-signed-in-lambda-master-with-explicit-local-processing), [D049](#d049-rust-only-mstr-api-and-zeroth-aws-authorizer), and [D052](#d052-let-the-rust-engine-validate-cross-rate-stem-alignment).
 
+### Updates
+
+- 2026-10-26: The finalizer Lambda writes each family WAV to its scratch file as the chunks of the S3 object arrive (`write_object`), in place of one buffer of the whole object. `distributed::finalize_set` checks the hash of each file before it reads the audio. A raw WAV of a recording of 25:51 holds 595.4 MB.
+- 2026-10-26: 256 kb/s previews of the 32 versions of the eight album sets of 1.14.0. The SoundKit encoder of the library import takes 0.48 to 0.63 s for each minute on the development computer. The loudness of each decode is within 0.01 LU of its version. The versions have a true peak of −0.50 to −0.48 dBTP, and each decode +0.01 to +0.39 dBTP; the 16-bit SoundKit decoder holds 35 to 629 samples of each version at full scale. The total noise-to-mask ratio is −7.48 to −2.35 dB, and the loud ratio −4.07 to +1.84 dB, over 0 dB on 6 of 32 versions.
+- 2026-10-29: Preview rate. With the measured criterion of D059 (the loud noise-to-mask ratio under 0 dB on each delivered version), the previews take 320 kb/s: 256 kb/s puts the ratio over 0 dB on 6 of the 32 versions, and 320 kb/s on none (−8.81 to −3.02 dB). At 320 kb/s the decode peaks at +0.00 to +0.25 dBTP against +0.01 to +0.37 dBTP at 256 kb/s, and the CBR packets hold 25% more bytes. Retention and the account quota stay open.
+
 ## D057: Upload a FLAC source to cloud mastering
 
 - Recorded: 2026-09-26.
@@ -1554,7 +1566,7 @@ The following records the earlier prototype; the v2 native contract replaces it.
 
 - Recorded: 2026-09-26.
 - Origin: The user asked whether the current 192 kb/s Opus library copy should be raised to “full quality” while enabling compressed source uploads.
-- Status: Proposed; the 192 kb/s import profile remains implemented.
+- Status: Accepted on 2026-10-29: 320 kb/s for the library copy of future imports, by the measured criterion of the update of that date. Implementation: SoundKit `3530cad` (branch `library-copy-320k`, from main `253b8d5`) for the web import, and bitneedle-app `b918f68` (branch `library-copy-320k`) for the native library audio policy of the phone import. The app build has SoundKit `74c1964`, with 192 kb/s.
 - Proposal: Upload existing Opus objects unchanged for mastering. Do not re-encode an existing 192 kb/s object to a higher rate. For future imports, compare the current 192 kb/s SoundKit profile with 256 and 320 kb/s on demanding material through level-matched blind listening and encoded-size/CPU measurements; change the single library import profile only if a higher rate audibly improves decisions or playback. Lossless imports continue to use their FLAC copy for mastering regardless of the Opus playback copy's rate.
 - Reason: Opus has no “full quality” lossless setting. The [Opus tools documentation](https://opus-codec.org/docs/opus-tools/opusenc.html) calls 160 kb/s a very-high-quality example and allows higher target rates; the [Opus specification](https://datatracker.ietf.org/doc/rfc6716/) says higher bitrate generally improves quality but places the full-band stereo music sweet spot below the current 192 kb/s. A rate increase spends storage and upload bytes without restoring information lost in an already encoded source. SoundKit's current import feeds 16-bit PCM into the Opus encoder, so changing rate alone is not a high-resolution input-path change.
 - Alternatives: Raise all future imports directly to 256/320 kb/s without listening evidence; transcode old 192 kb/s streams upward (no information gain); retain original imported lossy files alongside SoundKit streams (separate storage and source-contract decision).
@@ -1565,6 +1577,10 @@ The following records the earlier prototype; the v2 native contract replaces it.
 - 2026-09-26 scope update: [D060](#d060-preserve-decoded-source-in-flac-for-every-new-import) makes Opus a playback copy for new imports. This proposal now concerns playback quality; it does not govern the mastering source. Existing Opus-only imports still use their original stored stream until reimported.
 
 - 2026-09-26 replacement update: [D061](#d061-require-flac-for-mastering-and-source-delivery) removes the historical Opus-only mastering path entirely. Opus bitrate remains a playback-only question.
+
+- 2026-10-26 measurement update: On 60 s of each of the eight album mixes at 16 bits, the SoundKit encoder of the library import (CBR, 960 frames) gives a total noise-to-mask ratio of −3.30 to +1.01 dB at 192 kb/s, −7.96 to −3.74 dB at 256 kb/s and −12.34 to −8.38 dB at 320 kb/s. The loudest 5% of the frames reach +0.56 to +5.67 dB, −4.46 to +0.73 dB and −9.18 to −4.07 dB. At 192 and 256 kb/s, the total ratio of SoundKit is 0.06 to 0.21 dB under the total ratio of libopus. With the FLAC copy of D060, 256 kb/s adds 5.2% to the bytes of a track and 320 kb/s 10.4%. The rate stays 192 kb/s until the user decides.
+
+- 2026-10-29 decision: 320 kb/s for the library copy of future imports. The validation condition of this proposal names a blind listening comparison. The owner rule of decisions by measurement, without listening checks, replaces it with a measured criterion: the loud noise-to-mask ratio under 0 dB on each delivered version of the album sets. On the 32 versions, the ratio is over 0 dB on 32 versions at 192 kb/s (+0.93 to +6.78 dB), on 6 at 256 kb/s and on none at 320 kb/s (−8.81 to −3.02 dB). With the FLAC copy, 320 kb/s adds 10.4% to the bytes of a track, and the encode time changes by up to 6%. A copy of an earlier import keeps its rate. The change is the `bitrate` of the two import constructors of `soundkit-wasm/src/lib.rs`, from `192_000` to `320_000`.
 
 ## D060: Preserve decoded source in FLAC for every new import
 
@@ -1582,6 +1598,8 @@ The following records the earlier prototype; the v2 native contract replaces it.
 - 2026-09-26 validation update: Headless Chromium imported an MP3, AAC/M4A, and WAV through the deployed `yl.vin` SoundKit WASM importer. Each yielded nonempty, decodable FLAC and Opus streams; `sourceAudio` selected FLAC. After a library reload, MP3 and AAC had no LOSSLESS badge and WAV did. The MP3 remained unbadged even when named `.wav`, proving the new badge follows codec detection. The stored FLAC bytes were 103,790 / 541,217 / 106,388 respectively for these short fixtures. SoundKit source-provenance getter revision `350ce8d` is pushed. Engine and Lambda format/Clippy/tests pass. Real-track listening, quota measurements, and signed-in cloud upload remain unmeasured.
 
 - 2026-09-26 replacement update: [D061](#d061-require-flac-for-mastering-and-source-delivery) removes the remaining Opus fallback and any source-provenance guess from older notes. The FLAC-on-import and recorded codec-provenance parts of D060 stand; its fallback provision is superseded.
+
+- 2026-10-26 measurement update: The FLAC copy of an AAC or MP3 import is 16-bit. The AAC and MP3 decoders of SoundKit give 16-bit samples, and the import keeps the depth of the decoder. The eight album masters of D177 went through the Apple AAC encoder at 256 kb/s and LAME at 320 kb/s, and the import of each file was compared with the FFmpeg float decode. Two decoder faults showed. The AAC decoder gave each intensity stereo codebook the sign of the other codebook, and the copy error of the AAC files was −24.4 to −39.3 dB. The MP3 decoder decoded the LAME Info frame as audio and kept the encoder delay and padding, so each copy started 2,257 frames late. SoundKit `e11401a` and `9aba8ed` correct the two faults, and the app build `cd764da` has both. With `cd764da`, each sample of the copy is within one 16-bit step of the rounded FFmpeg decode, and the copy error is −83.5 to −88.9 dB. The MP3 copy has the length of the master. The FFmpeg decode is −30.5 to −34.0 dB from the master for AAC and −37.6 to −41.0 dB for MP3, 46.4 to 55.6 dB over the copy error. Four AAC decodes exceed full scale by +0.02 to +0.36 dB in one to four samples. The clamp to full scale is −86.0 to −114.5 dB from the decode, in a 16-bit or a 24-bit copy. The copy stays 16-bit. Its rounding error is 46.4 dB or more under the error of the codec, and a 24-bit copy takes 1.79 to 1.91 times the bytes in FFmpeg FLAC. The SoundKit copy is 7.83 MB for each minute of 48 kHz stereo, 1.16 to 1.22 times FFmpeg FLAC at compression level 5. The noise substitution bands of the FFmpeg AAC encoder decode to random noise, so their samples differ between decoders: the band power of the copy is within 0.03 dB of the FFmpeg decode. With Opus at 128 kb/s, the decodes exceed full scale by +0.30 to +1.36 dB in 33 to 918 samples, and the clamp is 43.9 dB or more under the error of the codec. The signed-in cloud upload of a lossy import remains to be measured. Verification: `intensity_stereo_matches_the_reference_decode` (SoundKit `soundkit-aac-lc`), `info_tag_reads_the_lame_delay_and_padding` (SoundKit `soundkit-mp3`) and the FLAC copy run.
 
 ## D061: Require FLAC for mastering and source delivery
 
@@ -2217,6 +2235,8 @@ The following records the earlier prototype; the v2 native contract replaces it.
 ### Updates
 
 - 2026-10-16: Returns to two jobs on the deployed site after the page closed at the submit. Each return resumed by itself, downloaded the verified files and said "4 versions ready and added to Music." Three faults: a download that stops receiving bytes waits with no time limit ("Saving Essential…" for 9 minutes); a page that closes during a download leaves an empty WAV, and the next return stopped with "Master version already exists." (bitneedle-app `c433d57`, deployed on 2026-10-16, downloads such a file again); after a cancel or a completed return, the note under the status keeps its earlier text.
+- 2026-10-26: bitneedle-app `08de96f` stops a download when no bytes arrive for 30 s, on a network error and on a server error, and starts it again from the first byte, up to three reads in all. bitneedle-app `8b8f991` makes MASTER wait for the import of the track before it reads the lossless copy.
+- 2026-10-26: In headless Chromium on the local build of bitneedle-app `3389cf5`, with the identity and the mastering API answered by the test, a cancel during the upload gives "Mastering cancelled." and hides the note under the status. The hidden note keeps its earlier text.
 
 ## D081: Flicker the leading mastering LEDs during work
 
@@ -2608,6 +2628,7 @@ The following records the earlier prototype; the v2 native contract replaces it.
 - Verification: Unit test on the contour direction; set tests; both excerpts deliver four audited versions in about 25 s each. Listening is open.
 - Review condition: Revisit the phon assumption and the half-deficit scale after listening; add resonance, harshness and sibilance detectors as further recording-derived rules.
 - Work reference: TODO.md, "Human-level program".
+- 2026-10-26: D222 measures resonances and level-dependent harshness against the album pairs and adds no detector. The album masters cut no peak of the long-term spectrum of their mixes by 0.5 dB or more.
 
 ## D113: Bolder general moves and a Bold version
 
@@ -2957,6 +2978,7 @@ The following records the earlier prototype; the v2 native contract replaces it.
 - 2026-10-12: The narrowing of 2026-09-30 is withdrawn. On track-c it took 4.5 to 6.3 dB of side from every band of the whole song (the Master applied the tighter midrange allowance, −4.9 dB, to every band from 120 Hz), and the user judged the mix fine and a master that narrows it not fine. The phase study finds one instrument group polarity-inverted from 0:45 to the end, at zero lag, with the other stems in phase: a mix-stage choice. A band whose P10 window correlation is under the bound now gets no widening and no cut. A per-band narrowing was rendered on the way (track-c Full: 120–500 Hz −1.2 dB, midrange −5.3 and −6.1 dB, 6–12 kHz −1.9 dB, 12–20 kHz −0.1 dB) and withdrawn with the rule. The description of a version reports a side/mid change of 0.3 dB or more against the mix as "Broader" or "More centred stereo balance" (`set::describe_measured`), so a narrower master is named as such. Open: a stem-based source condition that reports an anti-phase instrument group to the user (TODO.md). A DAW mastering assistant narrows this mix by about 4 dB; that stands as a comparison, not a target.
 - 2026-10-16: `set.widening.v4` (D183). The band from 120 to 500 Hz of the Master widens by at least +4.7 dB, the median of the album pairs of D177, within its own allowance; Bold widens it up to the larger of the band above and +4.7 dB. The bounds of the allowance and the narrow band under 120 Hz stay. Basis: acoustics, measurement and the pair prior of D177; no listening, owner decision of 2026-10-16.
 - 2026-10-16: `set.widening.v5` (D184). In each band with a side in the mix, the widening of the Master stays within the P75 widening of the album pairs and that of Bold within the P90. The bolder widening of 2026-10-11 ends: the album masters give the distribution. Basis: acoustics, measurement and the pair prior of D177; no listening, owner decision of 2026-10-16.
+- 2026-10-26: The vocal on headphones (D224). On six tracks with stems, the widening of Full changes the benefit of the vocal in a binaural speech intelligibility model by −0.08 to +0.62 dB against Full at the source image. The album masters change it by −0.06 to +0.73 dB against the mix. The widening stays.
 
 ## D133: De-esser of the Master family keyed by the vocal stem
 
@@ -3133,6 +3155,7 @@ The following records the earlier prototype; the v2 native contract replaces it.
 - 2026-10-16: `set.source-condition.v3` (D187): the report gives the DC offset of each channel. Basis: acoustics, measurement and the pair prior of D177; no listening, owner decision of 2026-10-16.
 - 2026-10-16: The copy of the web Original card for a captured recording (bitneedle-app `b4216c4`, `originalNote` in `web/js/mastering-source.mjs`), against the UI copy rules of the workspace. The sentence "This sounds like a phone, camera or messaging-app recording, so every version is mastered as a live recording." named a treatment that the engine does not have: a captured recording has no path of its own (D166), and its tone gets no equal-loudness move (D146). The card now reads, one sentence for each measured condition: "The original recording, aligned with every version. No mastering changes." "It sounds like a recording from a phone, camera or messaging app, so the masters do not change its bass and treble to suit their louder level." "It is in mono." "Its treble stops at 16.0 kHz, so no version adds treble above that." (the measured frequency) "Some of its sound cancels out on a single speaker, so every version lines the two channels up again." The last sentence said "a mono speaker"; "a single speaker" is the word of the copy that the user agreed for D176. A mix that is not a captured recording keeps "The original mix, aligned with every version. No mastering changes." The native card (`Bitneedle/MasteringStore.swift`) keeps the earlier copy. The agreement of the user for the copy is open.
 - 2026-10-20: `set.source-condition.v4`: the report gives `input_quiet`, true for a source at −24 LUFS or less (`source_condition::QUIET_LUFS`). `SourceCondition::device_capture` reads it for the capture stages (D200, D201). Basis: user decision of 2026-10-20.
+- 2026-10-29: The native Original card has the copy of the web card (bitneedle-app `a2d2488`, branch `mastering-native-card`). The criterion for the copy is the rule for user-facing copy of the workspace `CLAUDE.md`: each sentence states what the person hears or what the masters do, with the measured value, and names no internal term.
 
 ## D143: Phase alignment of a source with an anti-phase band
 
@@ -3170,7 +3193,7 @@ The following records the earlier prototype; the v2 native contract replaces it.
 - Origin: User requirement: master the long live recordings of the stress set. The app refused a track over five minutes.
 - Status: Accepted. Implemented in `render_blocks::render_segmented`, `render_blocks::upsample_into`, `render_blocks::render_peak_control`, `dsp::LimiterStatsAccumulator::merge`, `audibility::point`, the stack template and the stemsplits whole-track worker.
 - Decision: Peak control of a recording longer than five minutes renders in 60 s segments of the 4x stream on the available cores. Each segment starts 1 s early and ends 16,384 4x frames late, and keeps only its core's samples and statistics. The audibility point and the widening keep their 4x prefix in scratch storage. The planner, family and finalizer Lambdas have 3,008 MB, the largest function memory of the account, and 10,240 MB of temporary storage. The stem worker keeps 48 segment requests in flight. The cloud accepts recordings of up to 30 minutes; mastering on the device keeps five minutes.
-- Reason: A whole-file render is limited by the 900 s Lambda timeout and the memory of the function. On the 3.6-minute track-h job the stem worker took 444 s with eight segments in flight; 26 minutes would take about 3,100 s. The audibility point held its 4x prefix in memory: 2.4 GB for 26 minutes.
+- Reason: A whole-file render is limited by the 900 s Lambda timeout and the memory of the function. On the 3.2-minute track-h job the stem worker took 444 s with eight segments in flight; 26 minutes would take about 3,100 s. The audibility point held its 4x prefix in memory: 2.4 GB for 26 minutes.
 - Alternatives and tradeoffs: Chunked mastering with per-chunk decisions: each song of a set would reach the same loudness, and the set's dynamics would be lost. Per-chunk renders with whole-program measurements combined from the chunks: the same result at a higher orchestration cost; it remains the route past 30 minutes and past the function memory.
 - Evidence: Segmented and whole renders: bit-identical on the test signal; on track-e 2 to 8 of 22.4 million samples differ by one 24-bit step (residual −192 to −198 dB) with identical decisions, so the segmented path starts above five minutes. The full stress recording 1 (25:51) renders in 114 s against 124 s on 8 cores, with a peak resident memory of 2.5 GB against 3.4 GB before.
 - Limits and counterexamples: Memory still grows with duration: full-rate buffers remain. The account allows 3,008 MB per function; a 26-minute set needs about 2.5 GB natively.
@@ -3188,6 +3211,49 @@ The following records the earlier prototype; the v2 native contract replaces it.
 - 2026-10-16: The source analysis (`pipeline::analyze_source`) takes about 0.5 s for each minute of audio with two threads on an M1: 1.33 s for regression mix 2 and 14.99 s for a 29.9-minute file. Each family and the finalizer make it. The finalizer reads only the metrics and the stereo image of the source and now measures only those (`pipeline::measure_mix`): 6.75 of 14.99 s on the 29.9-minute file, with identical manifests. A pass of the whole analysis from the planner is not made: it needs an exact encoding of the temporal blocks, and it saves at most 0.5 s for each minute of audio in each family.
 - 2026-10-16: The plan makes one 4x prefix for the audibility point, the base render and the attack render, and frees the base render before the attack render. With two threads, the plan of a 10.9-minute file peaks at 1,749 MB against 2,501 MB, and the plan of a 29.9-minute file at 3,637 MB against 4,249 MB (macOS physical footprint). The stem analysis is now the peak of the 29.9-minute plan, at 3,544 MB, over the 3,008 MB of the planner Lambda. The stems of that file are at 44.1 kHz and the mix at 48 kHz.
 - 2026-10-16: In Node and in headless Chromium, the WASM set of track-e (3.9 minutes) with its stems reaches 1,334 MiB of linear memory in the plan. With two threads natively, the plan of track-e peaks at 687 to 833 MB. On wasm32, `scratch::temporary` keeps the 4x prefix of the audibility point in memory, 358 MB for track-e.
+- 2026-10-26: The stem analysis reads the drum, bass and other stems at the render rate one frame at a time. Each stem reads into a buffer with room for the frames of the render rate, so the vocal converts in its own buffer and each stem fits in the buffer of the stem before it. With two threads, the plan of the 29.9-minute file peaks at 2,462.7 MB of live bytes against 3,113.8 MB. With the 48 kHz stems of the planner Lambda, the macOS footprint peaks at 2,652 MB for a 48 kHz source and at 2,510 MB for a 44.1 kHz source, against 2,688 and 3,255 MB. The WASM set of track-e peaks at 353.4 MiB of linear memory against 409.5 MiB, with the same WAVs and 0.1% to 0.3% more CPU time (the stem memory run).
+- 2026-10-26: Each comparison of a version with an accepted version reads the WAV of the accepted version twice in blocks, once for the gain and once for the residual (`set::matched_residual_db_of_wav`), in the finalizer, the native sink and the browser sink. On stress recording 1 (25:51) with the four families of 1.14.0, the finalizer peaks at 1,288.9 MB of live bytes against 1,815.9 MB, and at 1,519 to 1,525 MB of macOS footprint against 2,112 to 2,117 MB. It takes 23.5 s against 23.0 s. The manifests are identical, and the native set of track-d and the browser set of track-e give identical WAVs (the finalizer memory run).
+- 2026-10-26: In the browser engine, one read of each delivered WAV in blocks gives its hash, its verification and its waveform (`delivery::verify_stream`, `waveform::Envelopes`). The finalizer reads the waveform of each delivered WAV in blocks. In the browser set of track-e, the live bytes after each version record are 85.3 MiB lower, and the peak of each candidate stage falls from 282.4–284.5 MiB to 269.4–272.3 MiB. The linear memory peaks at 353.4 MiB in the stem analysis, as before. The WAVs and the version records of track-e and the manifest of a cloud set of track-h are identical (the delivery memory run).
+- 2026-10-26: With the duration limit at 30 minutes, the browser engine renders a 22-minute set with its stems in Node: 2,477.2 MiB of linear memory, 2,010.8 MiB of live bytes at the peak, 5,800.8 MiB of scratch files and 1,271.6 s of CPU time. The set of track-e (3.9 minutes) reaches 353.4 MiB. The sub lift takes 28% of the render time. The browser engine accepts five minutes.
+- 2026-10-26: The stem worker keeps 128 segment requests in flight. The full stress recording 1 (25:51) has 265 segments of 7.8 s, and a segment takes about 23 s with the Graviton2 kernels. The worker encoded each request and decoded each response on the thread of its loop: 67.4 ms and 95.0 ms for each segment on the M1. A new request started only after the loop had accepted the responses that were ready before it, so each round of requests waited for the codec work of the round before. The new loop encodes and decodes on the blocking pool and adds the segments in order. Against a local service that answers in 11.5 s, stress recording 1 separates in 35.2 s against 80.5 s at a window of 128, with identical stems. The new loop is not deployed.
+- 2026-10-27: The sub lift keeps the first chosen render in a scratch file while it renders its candidate (D226). With two threads, the `master` family of the 29.9-minute file peaks at 2,165.2 MB of live bytes against 2,854.8 MB, and at 7,926 MiB of temporary storage. The family delivers the same WAV.
+- 2026-10-27: The side gain writes each frame in place, and the own-point check reads the prefix of its candidate from scratch in spans (D228). With two threads, the `master` family of the 29.9-minute file peaks at 1,637.0 MB of live bytes against 2,165.2 MB. The family delivers the same WAV.
+- 2026-10-27: The stem analysis keeps the mix in a scratch file while the stems load, and `set::prepare` keeps the compressed prefix in a scratch file after its upsample (D229). With two threads, the plan of the 29.9-minute file peaks at 1,791.4 MB of live bytes against 2,463.5 MB. The plan is identical.
+- 2026-10-27: The renderer keeps one prepared prefix (D230). The temporary storage of the `master` family of the 29.9-minute file peaks at 4,523.4 MiB against 7,894.8 MiB, with the same WAV.
+- 2026-10-27: The accompaniment of the stem analysis waits in scratch while the vocal gives its auditory frames (D231). The planner of the 29.9-minute file peaks at 1,628.0 MB of live bytes in `set::prepare`, against 1,786.1 MB in the vocal stage. The plan is identical.
+- 2026-10-27: The renderer of a family and of a set holds an owned source in a scratch file (D232). With two threads, the `master` family of the 29.9-minute file peaks at 943.9 MB of live bytes against 1,633.7 MB, and its open scratch files at 5,263.2 MiB against 4,605.3 MiB. The family delivers the same WAV.
+- 2026-10-27: The finalizer frees the source after its measures (D233). With the four families of the 29.9-minute file, it peaks at 778.8 MB of live bytes against 1,468.8 MB, with the same manifest.
+- 2026-10-27: The planner holds one buffer at its peak (D234). The stem sum and the vocal of the stem analysis, and the mix of `set::prepare`, wait in scratch files. With two threads, the plan of the 29.9-minute file peaks at 1,054.1 MB of live bytes against 1,628.0 MB, and its open scratch files at 3,947.4 MiB against 3,289.5 MiB. The plan is identical.
+- 2026-10-27: Each stem reads into the buffer of the stem before it, and the audibility ratios read a stored prefix in spans of 1.05 million frames (D235). The browser set of track-e peaks at 154.6 MiB of linear memory against 274.1 MiB, with the same WAVs. The native plans, families and sets are identical.
+- 2026-10-27: Each segment of the segmented peak control writes its core into its place in the output (D236). The browser set of track-e peaks at 132.6 MiB of linear memory against 154.6 MiB. With two threads, the `master` family of the 29.9-minute file peaks at 897.0 MB of live bytes against 943.9 MB. The outputs are identical.
+- 2026-10-27: The threads of the segmented peak control read their segments through the thread that holds the input, and the block render has one compiled loop (D237). With two threads, the `master` family of the 29.9-minute file peaks at 793.5 MB of live bytes against 897.0 MB, and takes 3.0% fewer instructions. The outputs are identical.
+- 2026-10-27: The audibility check keeps two values of each frame in place of its masking frames (D238). With two threads, the `master` family of the 29.9-minute file peaks at 778.1 MB of live bytes against 793.5 MB, with the same outputs.
+- 2026-10-27: The spectrum and the stereo analysis transform 64 FFT frames for each thread in each batch, and the true-peak scans compute their block peaks near each chunk (D240). With two threads, the `master` family of the 29.9-minute file peaks at 756.1 MB of live bytes against 778.1 MB, with the same outputs.
+- 2026-10-27: The planner Lambda hashes its output files in blocks of 1 MiB (D242). Before, it read the float32 `original.wav` whole, twice, beside the mix: 1,379.8 MB with the two buffers at 29.9 minutes, against 1,054.1 MB in the vocal stage.
+- 2026-10-28: The prepare of each prefix reads the source in pieces of 65,536 frames (D243). With two threads, the largest allocation of the prepare in the `master` family of the 29.9-minute file is 6.4 MB, against the shaped copy of 689.9 MB. The family peaks at 756.1 MB of live bytes with each build, with the same outputs.
+- 2026-10-28: The STFT frames compute in batches, and the caller takes each batch before the next (D244). With two threads, the plan of the 29.9-minute file peaks at 977.2 MB of live bytes against 1,054.1 MB, in the vocal stage, with the same plan.
+- 2026-10-28: Each stem waits in a scratch file, and its measures read it in spans (D245). With two threads, the plan of the 29.9-minute file peaks at 839.4 MB of live bytes against 977.2 MB, in the `stems` stage, with the same plan.
+- 2026-10-28: The sum of the stems stays in a scratch file at the render rate, and the refinement makes the accompaniment in that file (D246). With two threads, the plan of the 29.9-minute file peaks at 738.3 MB of live bytes against 839.4 MB, in the `condition` stage, with the same plan.
+- 2026-10-28: The source analysis, the source condition and the compressor plan read the mix from scratch storage in blocks and spans (D247). With two threads, the plan of the 29.9-minute file peaks at 725.0 MB of live bytes against 738.3 MB, in the `read` stage, with the same plan.
+- 2026-10-28: The probes of the audibility point, the base render and the attack render of `set::prepare` wait in scratch files, and the true-peak fit reads a stored render in spans (D248). With two threads, the `level`, `width` and `attack` stages of the plan of the 29.9-minute file peak at 61.4, 34.4 and 698.7 MB of live bytes, against 713.3, 722.1 and 714.8 MB, with the same plan.
+- 2026-10-28: The prefix of Essential passes once through its compressor in pieces of 65,536 frames of the mix, and each piece goes to the 4x prefix, to the onsets of the attack choice and to the prefix in scratch storage (D249). With two threads, the `condition` and `audibility` stages of the plan of the 29.9-minute file peak at 54.8 and 61.4 MB of live bytes, against 703.9 and 715.1 MB, with the same plan.
+- 2026-10-28: The set plan of the command line and of the planner Lambda reads the mix into a scratch file at its render rate, and each measure of the mix reads that file in blocks and spans (D250). With two threads, the plan of the 29.9-minute file peaks at 289.6 MB of live bytes against 725.0 MB, in the `stem` vocals stage, with the same plan.
+- 2026-10-28: A prepared prefix of a recording of 1,800 s or more keeps its frames at the base rate only, and peak control and the own-point check upsample them as they read them (D251). With `MASTERING_UPSAMPLED_MIN_SECONDS=0`, the open scratch files of the `master` family of the 29.9-minute file peak at 2,631.6 MiB against 5,252.9 MiB, with the same family record and 5.35% more instructions.
+- 2026-10-28: The prefix of the plan of a recording of 1,800 s or more keeps no 4x frames, and the audibility point, the base render and the attack render upsample the prefix as they read it (D252). With `MASTERING_UPSAMPLED_MIN_SECONDS=0`, the open scratch files of the plan of the 29.9-minute file peak at 2,564.2 MiB against 4,605.3 MiB, with the same plan and 10.8% more instructions.
+- 2026-10-28: A candidate render of a recording of 1,800 s or more goes from peak control to a scratch file in pieces and stays there to its delivery (D253). With `MASTERING_STORED_RENDER_MIN_SECONDS=0`, the `master` family of the 29.9-minute file peaks at 74.9 MB of live bytes against 759.0 MB, with the same family record and 0.40% more instructions.
+- 2026-10-28: The family Lambda, `family_local` and `family_time` decode the source into a scratch file at its render rate, and the renderer takes the file (D254). The `master` family of the 29.9-minute file allocates no buffer for the source, with the same family record.
+- 2026-10-28: The finalizer reads the source and the float32 render of each version from scratch storage in blocks and batches (D255). The finalizer of the four families of the 29.9-minute file peaks at 97.5 MB of live bytes against 779.2 MB, with the same manifest and 3.2% more instructions.
+- 2026-10-28: Each Lambda writes its upload to a file and decodes the file in chunks (D256). The decode of the upload of the 29.9-minute file peaks at 2.9 MB of live bytes against 400.9 MB, with the same source.
+- 2026-10-28: ADJUST takes the source in scratch storage, the family of the request takes it on loan, and the measures of the result read the source and the render in blocks and batches (D257). On the 29.9-minute file, the macOS footprint of ADJUST is 832.0 to 869.7 MB against 1,529.4 to 1,547.7 MB, with the same results.
+- 2026-10-28: The ADJUST Lambda renders to the deadline of its invocation less 240 s, and a request that stops continues in another invocation from its resume record (D258). At 29.9 minutes, Mono takes an estimated 680 to 1,440 s of Lambda time.
+- 2026-10-28: The finalizer and ADJUST read the float32 render of each version in its file (D259). The finalizer of the four families of the 29.9-minute file takes 537.2 billion instructions against 556.1 billion, with the same manifest.
+- 2026-10-28: The finalizer measures its source before the family files (D260). Its temporary storage at 29.9 minutes peaks at 4,605.3 MiB against 5,263.2 MiB.
+- 2026-10-28: Each stage of a cloud job times out at its Lambda timeout from its own start: the dispatch, the start record of the planner, the plan, or the resume record of a continuation (D261). The split and the plan of a job had one window of 900 s from the dispatch.
+- 2026-10-28: The Lambdas accept a source of up to 45 minutes, keep 180 s for the uploads of a family and 360 s for the measures of ADJUST, and continue within 12 invocations (D262). At 45 minutes with usable stem evidence, each cloud stage peaks at 22% of its memory or less and at 68% of its temporary storage or less.
+- 2026-10-28: The plan of a source of 1,800 s or more runs in two invocations of the planner Lambda: the stem evidence goes to the job between them (D263). At 45 minutes, the invocations take an estimated 134 to 286 s and 303 to 642 s of Lambda time, against 429 to 914 s for one invocation, with the same plans.
+- 2026-10-28: The control Lambda reads the summary of a plan of up to 64,000,000 bytes and checks the stage objects of a job without their bodies (D264). Before D264, the plan of track-f, 2,209,162 bytes, was over the read limit of 2,000,000 bytes, and each status poll of its cloud job in the render stage gave an error.
+- 2026-10-28: The control Lambda sends a reply body of 100,000 bytes or more in gzip to a request that accepts it, and puts the text of the manifest in the status of a complete job without a value of the whole manifest (D265). At 29.7 minutes with the sibilance of track-f, the reply is 2,720,852 bytes against 8,583,781 bytes, over the 6 MB of a Lambda reply, and the status peaks at 31.2 MB of live bytes against 250.9 MB.
+- 2026-10-28: A worker plan (`mastering.worker-plan.9`) holds each distinct de-esser key, low-mid key and set of focus envelopes of its specs once, and each reader puts the values back (D266). The plan at 29.7 minutes with the sibilance of track-f is 1,279,614 bytes against 17,675,544 bytes, and the families of track-f and their manifest are the same.
 
 ## D146: No equal-loudness compensation for a captured recording
 
@@ -3273,6 +3339,13 @@ The following records the earlier prototype; the v2 native contract replaces it.
 - Review condition: A change to the tap layout of `dot_pairs`.
 - Work reference: TODO.md, "Human-level program".
 - Supersedes / superseded by: None.
+
+### Updates
+
+- 2026-10-26: The decimator of the render computes four output frames natively on aarch64, and two in the browser engine, in one pass over its taps (`dsp::dot_pairs_windows`, `Oversampler::down_range_at_window`). Each frame keeps the 16 lane sums of `dot_pairs` and their order. The loads, multiplies and adds are NEON and WebAssembly SIMD intrinsics: the loops of the same order that LLVM vectorized ran 0.8 to 1.5 times as fast as one frame in each pass, as the form of the source changed. The native set of track-d with two threads takes 2,223 to 2,227 billion instructions against 2,641 to 2,650, and 152.6 to 154.3 s of user CPU time against 169.5 to 177.5 s. The browser set takes 251.0 CPU-s against 257.4. The browser engine takes two frames in each pass: four frames hold 16 vectors of sums, and an x86 host has 16 vector registers for WebAssembly SIMD. The WAVs and the reports are identical (the decimator run).
+- 2026-10-27: With the build profile of the Lambda (D227), the native set of track-d takes 2,137.4 to 2,137.5 billion instructions with the decimator change against 2,169.7 to 2,170.2 billion, 1.5% fewer, and 169.9 to 171.2 s of user CPU time against 176.8 to 181.3 s, 4.7% less. The figures of 2026-10-26 came from the release profile with 16 codegen units. The WAVs are identical (the decimator run).
+- 2026-10-27: The true-peak scans compute the 8 points of four frames natively, and of two frames in the browser engine, in one pass over the taps of each point (D239). The renders take 2.5% to 2.9% fewer instructions, and the browser set of track-e 2.4% less CPU time. The outputs are identical (the decimator run).
+- 2026-10-27: The resampler computes four output frames in one pass over their taps, and the stem analysis reads the converted stems one hop at a time (D241). The plan of track-e takes 3.6% to 4.4% less user CPU time. The outputs are identical (the decimator run).
 
 ## D151: One statement of each change in a description
 
@@ -3365,6 +3438,7 @@ The following records the earlier prototype; the v2 native contract replaces it.
 ### Updates
 
 - 2026-10-16: On the 32 versions of the eight confirmation sets of engine 1.8.1, the 4x estimate reads −0.50 dBTP and a 32x reference reads −0.497 to −0.340 dBTP. On sines, the lowest reading of the 4x estimate equals that of an ideal 4x interpolator to 0.0001 dB. Decoded true peaks (32x reference): AAC at 256 kbit/s (afconvert) −0.23 to +0.58 dBTP, Opus at 128 kbit/s +0.31 to +1.80 dBTP, Opus at 256 kbit/s −0.09 to +0.53 dBTP and MP3 at 320 kbit/s (LAME) −0.26 to +0.56 dBTP.
+- 2026-10-25: The true-peak estimate reads 8 points in each sample interval (D211). On the 36 versions of the regression set, the 32x reference reads −0.500 to −0.449 dBTP, against −0.493 to −0.397 dBTP with 1.14.0.
 
 ## D156: Character moves and correction moves
 
@@ -3526,7 +3600,7 @@ The following records the earlier prototype; the v2 native contract replaces it.
 
 ### Updates
 
-- 2026-10-05: Engine 1.2.0 in Lambda, on the 3.6-minute track-h: planner 25.6 s, families 11.4, 42.9 and 47.0 s, finalizer 12.2 s, stems 53.8 s; peak memory 1,203 MB of 3,008 MB.
+- 2026-10-05: Engine 1.2.0 in Lambda, on the 3.2-minute track-h: planner 25.6 s, families 11.4, 42.9 and 47.0 s, finalizer 12.2 s, stems 53.8 s; peak memory 1,203 MB of 3,008 MB.
 - 2026-10-16: A render repeats for the restoration only when a band change exceeds the dead zone and the next gains move a filter by `RESTORATION_FILTER_FLOOR_DB` or more (`treatment_render::next_gains`). On the nine sets of the regression set, 12 of 36 delivered renders take one render, six of them with a band change just over the dead zone. Each repeat without a band change over the dead zone is a step of the low-end hold. Of the 70 prepared prefixes, 11 are restoration passes that change only the restoring gains. A cache of the shaping before the restoring filters can save at most the shaping of those 11 prefixes, about 3% of the time of a set; the engine keeps the shaping of each pass.
 
 ## D164: Bass version
@@ -3560,6 +3634,7 @@ The following records the earlier prototype; the v2 native contract replaces it.
 - 2026-10-16: Limits and verification. In a bass version, no tonal gate checks the equal-loudness bass move; the floor of the low-end gate checks the held bands. A `master` that falls back renders up to two ladders, and each can render again with the instant attack. On regression mix 2, 6–12 kHz of Full is −1.90 dB against `essential`, beyond the range of −1.10 to +0.14 dB of this decision. The change has no listening result. Tests: `set::foundation_plan_tests::the_bass_step_leaves_out_the_gates_of_the_held_bands`, and `a_bass_version_whose_bass_candidates_fail_renders_its_candidates_without_the_step` and `the_finalizer_delivers_the_speculative_bold_when_master_chose_no_candidate` in `tests/set.rs`. `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test --release` pass.
 - 2026-10-16: `set.bass-version.v4` (D182) replaces the bass step with the two low shelves of `open::plan`, the median low-end moves of the album pairs. The hold has no step. Basis: acoustics, measurement and the pair prior of D177; no listening, owner decision of 2026-10-16.
 - 2026-10-16: Family time. On a 10.9-minute file with two threads, the planned `master` took 159.0 CPU-s on an M1. A `master` whose candidates fail in each ladder (a limiter-maximum gate of −100 dB on each candidate) took 924.6 CPU-s. Lambda took 0.9 to 1.9 s for each CPU-second of the M1 on the families of regression mix 2. At 29.9 minutes the fallback takes about 2,290 to 4,830 s against the Lambda limit of 900 s.
+- 2026-10-26: On engine 1.14.0 the early track-b mix, with stems from the stemsplits `separate` binary, delivers `essential`, `master`, `bold` and `open`, each from its first candidate. The low-end gate of `bold` measures −0.42 dB against its floor of −0.5 dB. The version characters (D206, D215) give `master` and `bold` a bass move of −1.2 dB, and 40–120 Hz of `bold` is 1.11 dB under `essential` at matched loudness. 120–250 Hz of `bold` is 0.59 to 1.20 dB under `essential` in each 15 s section.
 
 ## D165: Version names from the measured sound
 
@@ -3580,6 +3655,9 @@ The following records the earlier prototype; the v2 native contract replaces it.
 ### Updates
 
 - 2026-10-08: A later version took any free name when its largest step was in a character that a version before it held, and was described as "A different balance from the version before." On the clip from the user's video, Full had 0.13 dB less bass and 1.1 dB more presence than Forward. Such a version now takes the comparative name (More forward: "Brings the vocal and lead further forward than Forward."). A later version with no step of 0.5 dB or more in any character over the version before it is not delivered (status `not-distinct`), as no name would tell a listener what it changes. User decision of 2026-10-08: fix the name in the engine or do not provide the version.
+- 2026-10-25: The comparative name comes only from a version before the named version. The step is measured against the version that holds the name, and the description names that version. Before, a version took the comparative name when any version held the character, and the description named the version before it. In the untuned v4 set of track-g, `master` took "More forward" from the Forward of `bold`, the version after it, and its description named Essential, which had no Forward character. A version with no other name is now not distinct. The released sets do not have this case: the final de-esser rule keeps the v3 names of each set. Tests: `version_names::tests::a_character_of_a_later_version_gives_no_comparative_name` and `the_comparative_name_is_measured_against_the_version_that_holds_it`.
+- 2026-10-26: `set.version-names.v2`. The first version that no measured step names leaves the set, and the other versions are named again without it, until each version has a name. Each step is then measured against a delivered version. Before, a later version was described against a version that the set did not deliver, and the description of the version closest to the mix counted versions that the set did not deliver. On stress recording 5, `bold` is now described against `essential`. On 41 synthetic sets, the delivered versions stay the same, and the names or the descriptions change in 8. A described duplicate of a version that leaves stays out of the set: in 13 synthetic sets where a duplicate was held in the place of that version, the duplicate also had no step of 0.5 dB over the version before it. Verification: `the_names_measure_against_the_delivered_versions_only`; the names settle run.
+- 2026-10-29: TODO.md, "Version names": the versions keep the names from their measured sound. On the nine sets of 1.14.0, Bright and Forward each name `master` on some tracks of one album and `bold` on others. The album flow of bitneedle-app adds the versions of each track to the library of that track (`web/js/mastering-album.mjs`), and the album page has no version choice across the tracks. Each name describes the sound of the version of its own track, as the user requirement of this decision asks.
 
 ## D166: Limiter attack and local true-peak correction
 
@@ -3604,6 +3682,9 @@ The following records the earlier prototype; the v2 native contract replaces it.
 - 2026-10-05: The user stated that live sets are a low priority and can have their own path. Rule `set.peak-attack.v1`: the local correction for each version; the instant attack for a captured recording; for another source, the 3 ms attack when its base render meets the NMR bound of 1.2.0 and keeps more onset energy.
 - 2026-10-05: Iteration 4, after the user's decisions (the 3 ms attack; the planner time is acceptable; live sets are mono and take their own path; optimise for studio masters): mono sources keep the instant attack, and the fallback renders the reference again. On the 8 studio mixes the four conditions pass; on the stress set no version is delivered less or has a higher NMR. The suite passes. The release check delivers the same versions on 16 sources and the same names on 15.
 - 2026-10-05: Iteration 2 compared the renders at the same drive and gave the attack to 3 of 8 studio mixes; condition 4 failed by one section at −0.505 dB. Iteration 3 compares at matched loudness: the attack goes to the 8 studio mixes, and conditions 1 to 4 pass. On the studio mixes the NMR falls by 1.11 to 6.80 dB and the median energy attack loss P90 from 2.90 to 0.78 dB. Condition 5 fails: the planner of track-h takes 12.5% more time. The set test loses Master on its synthetic 120 Hz pulses with the 3 ms attack, and passes with 1 ms.
+- 2026-10-26: On engine 1.14.0 the check gives stress recording 3, stress recording 4 and stress recording 5 the 3 ms attack, with a masked noise-to-mask ratio 0.88 to 5.36 dB lower and 1.15 to 2.01 dB more onset energy. Each other capture, a stereo live video recording among them, takes the instant attack. Without the instant attack of a mono source, the check gives stress recording 2 the instant attack: +0.30 dB against +0.05 dB, with 0.09 dB more onset energy. The excerpt of stress recording 1 arrives limited and has no base render for the check.
+- 2026-10-26: The path of a captured recording is the set of parts that the source condition selects: the phase alignment of an anti-phase band (D143), the attack of this record, the treble moves of a source with a codec low-pass (D144) and stages 4 and 5 of a device capture (D200, D201). On nine captures without stems, 35 of 36 versions deliver and 34 deliver their first candidate; the eight album mixes without stems deliver 32 of 32 from their first candidates. The total noise-to-mask ratio sets the point of each unlimited capture, and the P90 attack loss bound of D208 sets the point of five of the album mixes. On stress recordings 6 and 7 and a stereo live video recording, which arrive at −38.0 to −21.5 LUFS with a crest of 24 dB or more, the limiter takes loud passages down by 8.6 to 22.2 dB for 0.22 to 2.88 s; on the album mixes it takes at most 4.7 dB for at most 135 ms..
+- 2026-10-26: A section gain of the loud passages before the chain (the 400 ms level of the mono sum down to the 95th percentile of the active windows, with 200 ms of smoothing) on those three recordings lowers the largest limiter reduction from 21.4 to 22.2 dB to 11.8 to 17.6 dB on stress recording 6 and shortens its longest limiting run from 275 to 619 ms to 73 to 148 ms. On each version of the three recordings it raises the window level change span against the source by 0.25 to 1.41 dB and changes the P90 attack loss by −0.04 to +0.28 dB; on stress recording 6 the point rises by 0.93 LU and the ratio of the loudest frames by 4.40 to 5.44 dB. No arm is lower on each measure, so the chain takes no section gain stage.
 
 ## D167: Program-dependent release and a parallel shaper rejected
 
@@ -3638,6 +3719,8 @@ The following records the earlier prototype; the v2 native contract replaces it.
 - Review condition: A master with a masked NMR of peak control above about −5 dB, or a listening result that hears peak control.
 - Work reference: TODO.md, "Human-level program".
 - Supersedes / superseded by: None.
+- 2026-10-26: D223 measures the Full version of four confirmation tracks at the loudness of the engine at that date, 0.59 to 3.05 LU over 1.3.0. The masked NMR of the engine is above −5 dB on three of the four tracks, so the review condition is met. Pro-L 2 Transparent is 2.46 to 3.98 dB lower at the same loudness.
+- 2026-10-28: D267 sets the criterion of a change of peak control: on each track, neither masked ratio nor the gain span rises by 0.5 dB or more, and the total NMR falls by 0.5 dB or more on four of seven tracks. Against the album masters at their loudness, the total NMR of Full is lower on five of seven tracks by 6.14 to 11.39 dB. No form of the run passes, and the peak control of the engine stays.
 
 ## D169: Compressor stays after the commercial compressor comparison
 
@@ -3695,6 +3778,7 @@ The following records the earlier prototype; the v2 native contract replaces it.
 - 2026-10-06: User requirement: the pro tier changes each setting that it makes sense to change. Width, Compression and Ceiling join the controls. The agent instructions keep width automatic in the versions of a set only. The workload gate of an adjusted version becomes a warning (`Gates::workload_as_warning`). On study track 1 Full, Width +3, Compression +2, Ceiling −1 and Loudness +4 delivered +1.69 dB of side/mid, a compressor mean reduction of 2.28 dB against 1.49 dB, −1.00 dBTP and the loudness warning.
 - 2026-10-07: A4 to A10 are implemented (D172). The cloud, the browser and the native render build a request from stored planner facts.
 - 2026-10-09: The Bass measure is 40–250 Hz against 500 Hz–2 kHz, the reference of Presence. Before, it was 40–250 Hz against the K-weighted power of the whole band. On the Full versions of the 8 studio mixes, 40–250 Hz holds 58 to 81% of the K-weighted power, so a shelf raised the reference with the bass: +1 dB took a shelf of +3.1 to +7.6 dB, and +2 dB was out of reach on 5 mixes with a shelf of +12 dB. Against 500 Hz–2 kHz, ±2 dB takes a shelf of 2.3 to 2.8 dB. Bass +4 now delivers on 8 of 8 mixes, 7 at the full step, at +1.88 dB at the median, against 6 of 8, none at the full step, at +1.02 dB.
+- 2026-10-26: A Loudness share whose level leaves −20 to −6.5 LUFS is left out, as a share outside the range of the filters is. Before, the builder held the level at the bound, and the result reported each step as delivered: on engine 1.14.0, Loudness +4 on the Full version reported 4 steps on track-e, track-h and track-d, and measured +0.82, +1.75 and +1.52 LU. Now track-e Loudness +4 is outside the range, and track-h and track-d deliver 75% of the steps at +1.50 and +1.49 LU.
 
 ## D172: Paths of a request on a delivered version
 
@@ -3727,6 +3811,7 @@ The following records the earlier prototype; the v2 native contract replaces it.
 - 2026-10-07: D173 renders each set at the rate family of its source. The worker plan (`mastering.worker-plan.6`) and the manifest (`mastering.distributed-set.4`) record the render rate, and the stored spectrum of the facts records its rate. The span render keeps 4.5 s of context before the kept frames and 2.5 s after them at the render rate. A span starts on one compressor section block, 10 ms at the render rate (`treatment_render::span_grid`), and the de-esser places its masking frames at their positions in the recording (`deesser::Plan::apply_from`). At 44.1 kHz the 15,360-frame grid was 451,584 frames, because 441 and 1,024 have no common factor. At 44.1 and 48 kHz, a span with no steps equals the same frames of the whole render under −138 dBFS, from a start on or off the masking frames (`excerpt::tests`).
 - 2026-10-08: Engine 1.7.0. A Sibilance step changes the mean de-esser cut over the keyed frames by 0.5 dB: the threshold rises and the largest cut falls by a shift that the builder solves from the excess quantiles of the parent (`deesser::Stats::excess_quantiles_db`); before, a step of 2 moved the cut by less than 0.5 dB on each studio mix, and the duplicate screen held it back. `adjust::range` gives the range of each control on a version, and a request outside it is a result with the reason `outside-range`. Each version stores `hold_sections`, with its changes without a hold; the preview keeps the parent's hold wets plus the difference that the request makes to the first step of the hold, and takes its loudness from the mean wets of the enveloped filters (`Spec::mean_tone`). On the 8 studio mixes, 107 of 117 preview checks pass.
 - 2026-10-09: The preview takes the two hold steps of the final render. Between the steps, it gives the rise of the first step from the stored spectrum after the tone of the version (`low_end::rise`). After a bass shelf, the bass is a larger share of the loudness, and the loudness match takes more of each bell's lift: on track-h Bass +2 the first step lifted the held bands by 0.9 dB against 1.55 dB from the source spectrum. Peak control changed them by −0.06 dB inside each window. track-h Bass +2 goes from 0.78 to 0.13 dB of median band difference; 108 of 117 preview checks pass.
+- 2026-10-26: A span lowers its true peaks when the whole render lowered them (`excerpt::Fixed::lowered`, from the stored `true_peak.local_db` of the version). Before, a span lowered them only when a frame of the span passed the target, so a peak outside the span changed frames inside it: on engine 1.14.0 the first span of track-h Full differed by −81.0 dBFS in one 10 ms block. After the fix, each span of the 8 studio mixes is within two least significant bits of 24 bits of the delivered render.
 
 ## D173: Render at the rate family of the source
 
@@ -3789,6 +3874,7 @@ The following records the earlier prototype; the v2 native contract replaces it.
 
 - 2026-10-12: The sixteen sources (the files of this run are no longer kept): track-c reports the `other` stem in the two midrange bands from 0:25 to 2:52 (62% negative windows, −166°); the fourteen other studio and stress sources report no stem. stress recording 3, a live recording whose mix is anti-phase from 6 to 20 kHz (D142), reported its drum stem alone from 12 to 20 kHz, where no other stem is active. Two conditions were added: a band that D142 reports on the mix is left out (the alignment of D143 answers it), and another stem must be active in the band. stress recording 3 then reports no stem, and its Mono-safe preset (a −6 dB bell at 15.5 kHz) is gone.
 - 2026-10-16: The web MASTER screen shows each reported group with its time range (bitneedle-app `46b1764`, `antiphaseNotes` in `web/js/mastering-source.mjs`): under the title on `/master` and on the Original card, from `source_condition.antiphase_stems` of a cloud manifest or of the summary of a local set. The copy for track-c reads: "From 0:25 to 2:52, the left and right channels of the other instruments, such as guitars, keys and synths, are out of phase, so they cancel out on a single speaker. The masters keep this as it is. If you did not intend it, flip the polarity of one channel of that part in your mix." The other roles are "the drums", "the bass" ("it cancels") and "the vocals". Two or more groups end with "The masters keep these as they are. If you did not intend them, flip the polarity of one channel of each part in your mix." The times are the start of the first and the end of the last negative window, rounded down to the second. The native app does not show it. The agreement of the user for the copy is open.
+- 2026-10-29: The native Original card shows each reported group with its time range and the copy of the web screen (bitneedle-app `a2d2488`, branch `mastering-native-card`). On seven source conditions, its note is the same text as `originalNote` of the web. The criterion for the copy is the rule for user-facing copy of the workspace `CLAUDE.md`.
 
 ## D176: Mono-safe preset
 
@@ -3836,6 +3922,7 @@ The following records the earlier prototype; the v2 native contract replaces it.
 - 2026-10-14: The pair measurement script measures the offset (`analysis::align_offset`), the attack and crest losses, the image per band, the sibilance at the offset and the engine's versions in one run. The offsets agree with the hand lags within 3 ms. Sibilance with the repository probe at the offsets: the sibilant P99 moves with the other vocal frames within 0.9 dB on the seven tracks with stems. The single master of track-e at its offset of 286 samples lowers the P99 by 0.97 dB and the other frames by 0.77 dB; the −4.5 dB of 2026-10-13 was measured 60 ms off. The engine's versions against the masters, medians: `open` side/mid +2.08 against +2.10, loudness +3.45 against +3.49 LU, sub − bass +0.79 against +1.38 dB; every version loses 0.8 to 1.3 dB less attack at P90 than the masters.
 - 2026-10-16: The P10 of the track-h master under 0.05 has two causes: one channel of the master has the opposite polarity from 0:00 to 0:33, and the master widens a passage from 2:18 to 2:38 whose low end is already decorrelated. The low-mid width decision is D183. Basis: acoustics, measurement and the pair prior of D177; no listening, owner decision of 2026-10-16.
 - 2026-10-16: The listening check of the album pairs ends in the decisions D179 to D186 for loudness, presence, the de-esser, the low end, the low-mid width, the widening, the low-end hold and the width of `open`. Against the pairs, `master` now has 5 of 8 tracks inside the pair range in presence against body, 5 in low mids against body, 6 in bass against body and 2 in sub against bass, and each version is 0.04 to 0.94 LU under its album master. Sub against bass stays under the pairs on six tracks (TODO.md, "Sub lift"). Basis: acoustics, measurement and the pair prior of D177; no listening, owner decision of 2026-10-16.
+- 2026-10-26: Direction and spread of the moves. The masters raise the sub against the bass, the side/mid and the loudness of each of the eight tracks, raise the bass against the body on seven, and lower the crest on each track. The low mid, the presence, the air and the slope move up on some tracks and down on others. Across the tracks, the spread of each tonal measure of the masters is 0.91 to 1.35 times that of the mixes, and the slope of the move against the distance of the mix from the album mean is −0.25 to +0.22. The four versions of the engine at `da695f3` move the low mid, the air and the side/mid of each track toward the album mean (slopes −0.28 to −0.82); `essential`, `master` and `bold` also move the presence and the slope.
 
 ## D178: Open version from the album pairs
 
@@ -4047,6 +4134,12 @@ The following records the earlier prototype; the v2 native contract replaces it.
 - Work reference: TODO.md, "Cloud MASTER".
 - Supersedes / superseded by: None. Changes the alternative "Sharing the Light reference measurement" of D147.
 
+### Updates
+
+- 2026-10-26: The family result of `essential` keeps the reference record, and the base of the set keeps it for the ADJUST requests of the set (D217).
+- 2026-10-27: The start of a family Lambda before its first render (decode, conversion to the render rate, two fingerprints and the source analysis) takes 6.2 to 6.5 s on an M1 with two threads at 25:51 and 0.8 s at 3:13. A family that starts after the first render of the Essential family adds its start to the critical path of the job; three families that render the reference spend about 420 s of Lambda time at 26 minutes. The decision stays. TODO.md, "Reference render of the cloud families", holds the two forms that save Lambda time.
+- 2026-10-28: D269 lets the Essential family Lambda start the `master`, `bold` and `open` families after its first render, with its reference record in the bucket of the job. The stack setting `SharedReference` selects the form, and its default is `on`. On track-h, one family at a time with two threads, the four families take 88.13 and 93.35 s in place of 188.19 and 190.17 s, with the same WAVs.
+
 ## D197: Medium presets: Streaming, Club, Radio and Mono
 
 - Recorded: 2026-10-17.
@@ -4093,6 +4186,7 @@ The following records the earlier prototype; the v2 native contract replaces it.
 ### Updates
 
 - 2026-10-19: Engine 1.10.0 (D202 to D204). Measured in the presets run, on the 34 versions of the nine sources of the regression set and on 36 delivered results of six of them.
+- 2026-10-26: Club is removed (D216). Since D206, each version sits at the audibility point of its own chain, and the Club level is at most 0.06 LU above the level of each version of the album sets.
   - Offers: each version offers Streaming and Radio. Club raises `essential`, `master` and `open` by 1.75 LU, or 1.90 LU on track-d. `bold` plays 0.5 LU under the point (D203), at or above the Club level, so it does not offer Club. Mono is offered on 11 versions.
   - Own point of Club: the Club level comes from the point of `essential`. On 1.10.0 the shelves and the sub lift give `master` and `open` more low end, and a version with more low end reaches its own point sooner. Three quarters of the Club rise on regression mix 2 `master` were 0.13 LU above the own point of the result. Each Club candidate now stays at or under the point of its own prefix. regression mix 2 `master` delivers half of the rise, +0.87 LU, 0.49 LU under its own point. The other 6 Club results are 0.90 to 1.65 LU under their own points.
   - Streaming, 11 results: −13.99 to −14.00 LUFS and −1.00 to −2.23 dBTP. Each band of `master` and `open` stays within 0.07 dB at matched loudness. A band of `bold` rises by up to 0.16 dB, and its largest limiter reduction falls by 1.94 to 2.78 dB.
@@ -4123,6 +4217,8 @@ The following records the earlier prototype; the v2 native contract replaces it.
 ### Updates
 
 - 2026-10-19: The review after the sub lift (D204), on the pairs of the 1.10.0 regression set. Sub − bass has a gap on 1 of 8 tracks (track-c, +0.57 dB) and bass − body on 2 of 8 (track-h +0.81 dB, track-d +0.75 dB). The P90 attack loss has no gap. The width has a gap on 4 of 8 tracks in each band from 20 Hz to 2 kHz, with the album master wider. No gap falls on more than half the tracks in one direction. The decision stands.
+- 2026-10-29: The review on engine 1.14.0 meets the review condition. Air − presence has a gap on 7 of 8 tracks, with the album master 0.63 to 1.59 dB above every version on 5 of them: since D206 only `bold` solves the air balance shelf (`set.air-balance.v1`). Loudness and crest have a gap on 7 of 8 tracks, with the album masters quieter and less dense: since D206 each version sits at the point of its own chain. The side/mid has a gap on 5 of 8 tracks in one direction from 500 Hz to 2 kHz (album master wider) and from 2 to 12 kHz (album master narrower). Sub − bass, bass − body, presence − body and low mid − body have a gap on 2 tracks or fewer in one direction. The air of the versions is a TODO item ("Air of the versions"), as the sub lift answered the bass gap of 1.9.0. D272 keeps the dials of the measures with a gap.
+- 2026-10-29: D273. The air moves of the version characters come from the single master of track-e (D206), which lowers air against presence by 2.27 dB; the album masters move it by −0.69 to +1.17 dB. In album mode, each version now keeps the air of its mix against presence, and air − presence has a gap on 2 of 8 tracks, 1 above and 1 under. Without album regions, the gap stays on 7 of 8 tracks.
 
 ## D199: Presets as the successor of the controls
 
@@ -4188,6 +4284,8 @@ The following records the earlier prototype; the v2 native contract replaces it.
 - 2026-10-19: Renders on 1.10.0. The sub against the bass of the version with the shelves rises by +1.10 to +2.13 dB, and 20 to 60 Hz by +2.45 to +3.09 dB at matched loudness. Where the shelf is the only change, 2 to 6 kHz changes by −0.03 to −0.87 dB. Each chosen candidate passes every check. The three vivid candidates of the `bold` of stress recording 7 and stress recording 6 fail the low-end gate, at −0.61 to −0.64 dB and at −0.51 dB. stress recording 7 delivers its last candidate, the clear tone with the vivid widening, at 3.8 LU over `master` (D203). stress recording 6 delivers no `bold`, because its last candidate is a described duplicate of `master`. On stress recording 5 the stage `master` carries only the shelves, and its bass step against `essential` is 0.38 dB. The names withdraw it as not distinct, and `open` is a described duplicate of it. stress recording 5 delivers `essential` and `bold`, and stress recording 7 delivers no `open`. The shelves raise the band above the codec cutoff of the stress recording 8 `master` with stems by +0.68 dB, 66.7 dB under 1 to 4 kHz. The nine sets of the regression set render the WAVs and JSON of 1.10.0.
 - 2026-10-19: Merged into engine 1.11.0 (D197 to D199). The nine sets of the regression set render the WAVs and JSON of 1.11.0. stress recording 5, stress recording 7, stress recording 6 and stress recording 8 without stems render the versions of the stage on 1.10.0. On 2026-10-19 the user decided to merge the stage into main.
 - 2026-10-20: The stage applies to a device capture, as D200 (update of 2026-10-20). The test clip of TODO.md (+2.64 dB at 80 Hz) and stress recording 8 (+4.00 dB at 80 Hz, −0.92 dB at 250 Hz) take no shelf. On 1.12.1 the tone of each version comes from `character::plan` (D206), and no version carries the shelves of the stage; they stay in the broad tone analysis. Basis: user decision of 2026-10-20.
+- 2026-10-26: Decision: the character plan keeps its own sub move for a device capture, and the shelves of the stage stay in the broad tone analysis. On 1.14.0 the plan moves sub against bass by +1.6 dB on `essential`, `master` and `bold` and by +2.0 dB on `open`; the delivered versions of stress recording 5 and stress recording 8 move it by +1.44 to +2.11 dB. The shelf of the stage predicts +1.51 to +2.24 dB on the six thin captures, −0.09 to +0.64 dB more than the plan of `essential`. Each version stays under the smallest outcome of the album masters, as the criterion of this record asks. A shelf on top of the plan adds a second lift whose amount its bound sets, not the measure (pass criterion 4 of the capture plan). `essential` and `master` take the same sub move, so the `master` of a capture has no sub step against `essential`.
+- 2026-10-26: The delivered versions of stress recording 3 move sub against bass by +1.30 to +1.60 dB, from −1.16 dB to +0.14 to +0.44 dB, and the `bold` and `open` of stress recording 5 by +1.60 and +2.12 dB. On stress recordings 3, 5 and 8 the moves are +1.30 to +2.12 dB, and each version stays under the smallest outcome of the album masters, +0.59 dB.
 
 ## D202: Compression styles with a section make-up
 
@@ -4218,6 +4316,10 @@ The following records the earlier prototype; the v2 native contract replaces it.
 - Review condition: A listening comparison of the three styles; a source whose Dense version moves the gain audibly; a mix with steps of section level over 10 dB.
 - Work reference: TODO.md, "User decisions", Compression of regression mix 2, removed.
 - Supersedes / superseded by: Supersedes the contrast limit and the depth search of D124 and D125 (`set.compression.v2`), and the stem attack of D124. Uses D130 and D169.
+
+### Updates
+
+- 2026-10-26: The Dense dip run measures the dip of a sustained vocal after each kick, with the drum and vocal stems as the key. On the compressor gain, Dense dips 1.15 to 2.90 dB at P90 and adds 0.51 to 0.77 dB to Gentle on track-b, track-d (the V2 mix), track-e and regression mix 2. In the level of the vocal band against the mix, the album masters of D177 dip by 1 dB or more after 75 to 100% of those kicks, with a median of 1.27 to 2.38 dB on six mixes. The median dip of `bold` is under that of the album master on five of six mixes. Its P90 is over that of the album master on track-g, track-c and track-b by 0.20 to 1.42 dB, and the P90 of `essential` is over it on the same mixes. No bound follows.
 
 ## D203: Bold at the level of a single
 
@@ -4260,6 +4362,8 @@ The following records the earlier prototype; the v2 native contract replaces it.
 ### Updates
 
 - 2026-10-19: A request on a delivered version renders no sub lift (`set::base_ladder`, `lift`). The worker plan of a request marks its version `lifted` (`adjust::worker_plan`), because the candidates of a request carry the shelves of the parent, sub lift included. With 1.10.0, the base ladder of a request solved the lift again. The Streaming preset on the Full of track-h took the 90 Hz shelf from +3.46 to +4.00 dB, and the band under 120 Hz rose by 0.20 dB at matched loudness. The Radio preset on the Full of track-e took the shelves from +0.90 and +2.09 dB to +1.15 and +2.31 dB, because the lift read the mid gain of the fold as a shortfall of the bass. The versions of a set do not change. Verification: `tests/set.rs`, `a_request_keeps_the_sub_lift_of_its_parent`.
+- 2026-10-26: The second render starts at the drive and the restoring gains of the chosen first render, and corrects the drive by the change of the prefix loudness from it (`selection::one`). Before, it started at those of the reference render, or at the planned drive with no restoring gains for `essential`. The low-end hold of the second render solves again from no hold, because the hold only adds and the hold of the first render holds the bass of the first shelves. On track-d the set takes 8.1% fewer instructions, and the second render of `essential` takes 8.3 s against 14.3 s; on track-a, 2.6% fewer. Each version keeps its candidate and its shelves to 0.01 dB, and its loudness moves by −0.019 to +0.008 LU. In the 22-minute browser set, the sub lift took 28% of the render time before the change.
+- 2026-10-27: With the build profile of the Lambda (D227), the start of the second render at the first render takes 8.6% fewer instructions on track-d and 2.0% fewer on track-a, against 8.1% and 2.6% with 16 codegen units.
 
 ## D205: Temporary storage of the browser engine in host scratch files
 
@@ -4276,6 +4380,8 @@ The following records the earlier prototype; the v2 native contract replaces it.
 - Review condition: A host that cannot give scratch files, or a storage quota under the scratch storage of a set.
 - Work reference: TODO.md, "Render a 22-minute set in the browser".
 - Supersedes / superseded by: Extends D145 (the 4x prefix of the audibility point in scratch storage).
+- 2026-10-26: WebKit 26.6 keeps the largest size of each file of the origin in `navigator.storage.estimate()` after a truncate or a removal, until the browser restarts. The 3:53 set of track-e made on the device added 5.57 GB to the count. A 30 s set added 604.9 MiB, while its files reached at most 244.1 MiB on the disk, 172.2 MiB of them in scratch files. In a probe the count passed the quota of the origin (24.75 against 19.20 GiB), and the writes went on. The quota of Safari on an iPhone is not measured.
+- 2026-10-26: The 3:53 set of track-e made on the device takes the files of the origin to 1,829.3 MiB in WebKit 26.6 and 1,819.6 MiB in Firefox 155, at the end of the render. The scratch files of the set hold 1,297.1 MiB of it in WebKit. After the set the files hold 779.3 and 772.3 MiB. The estimate of Firefox counts the bytes of the files: 750.3 MiB after the set, against 5,322.6 MiB in WebKit.
 
 ## D206: Version character of a single, at the audibility point
 
@@ -4315,6 +4421,8 @@ The following records the earlier prototype; the v2 native contract replaces it.
 ### Updates
 
 - 2026-10-20: The point of each version takes the attack loss bound of D208 (`set.audible-loudness.v6`). The rule references of this entry stay those of 1.11.2.
+- 2026-10-26: Second pass. A second pass of a delivered version moves each region again by the move of the version, until the bound of the region stops it. On the confirmation mixes of track-e, track-c, track-d and track-a, the presence and bass moves repeat on each of 14 versions, and the presence move of the `bold` of track-d changes direction. The scope of D130 excludes a master that arrives again, and the rules stay.
+- 2026-10-26: Direction of the moves that follow the mix. The album masters of D177 move the low mid toward the median outcome of the pairs on 4 of the 8 tracks, and the presence on 3 of the 8 tracks. Over the eight album mixes, the versions with `follow_mix` and the region bounds lower the spread of the low mid across the tracks from 1.24 to 0.72 to 0.77 dB, and the masters keep 1.30 dB.
 
 ## D207: Running order and album levels
 
@@ -4334,7 +4442,7 @@ The following records the earlier prototype; the v2 native contract replaces it.
 - Alternatives and tradeoffs: The tempo and key of the stems are more accurate, but the stems of an album take longer on a device than the check of the mixes. The order of 2026-10-12 also used the lyrics. The plan does not use the lyrics.
 - Evidence:
   - On the eight album mixes, the tempos from the mix matched the tempos from the stems on all eight tracks. The keys matched on five of eight tracks; on the other three, the mode or the fifth was different.
-  - The order script of 2026-10-12 gave each key name three semitones too low, because its pitch index started at A. The relations between the keys stay the same.
+  - The order script of 2026-10-12 gave each key name three semitones too high, because its pitch index started at A. The relations between the keys stay the same.
   - The suggested order of the album mixes is track-h, track-f, track-d, track-g, track-a, track-b, track-c, track-e. The album masters of D177 have the same opener, early peak and closer. In the album masters, two steps of two width tiers come next to track-f, and the rules give these steps a cost.
   - The check took 4.0 to 5.1 s for each mix on the host.
   - track-e with an album target of −9.0 LUFS delivered its four versions from −9.00 to −9.02 LUFS in 51 s.
@@ -4351,6 +4459,10 @@ The following records the earlier prototype; the v2 native contract replaces it.
 ### Updates
 
 - 2026-10-20: `album.order.v2` and `album.levels.v2`, after two reviews of the weights and a test of the levels. Each track within 0.25 dB of the lowest crest counts as the densest. A key that leads its second key by less than 0.05 in correlation is not clear, and its step takes the relation of the lower cost of the two keys. The width step and the tempo step break ties only. On the album mixes, v2 gives track-h, track-g, track-f, track-d, track-c, track-a, track-b, track-e: positions 1 and 4 to 8 are those of the album masters, and positions 2 and 3 change places. The keys of track-a and of track-g are not clear. A level cut stays within 1 LU of the point of a track. A mastered track keeps its delivered loudness, and the levels of the other tracks follow it. Each level gives its step from the track before. The WASM order job takes the delivered loudness of the mastered tracks (`delivered`), and each track summary gives `key_clear` and `second_key`. Verification: the album tests. The reviews read this album, so it is not an independent test of v2.
+- 2026-10-26: `album.point.v2`. The check measures the audibility point on the whole mix, without stems, and keeps the crest and the image on the loudest 60 s. The point averages the masked disturbance over the recording, so quiet verses balance a loud chorus, and the loudest 60 s holds few of the verses. On the eight album mixes and regression mix 2, the point of the loudest 60 s read −0.87 to +0.02 LU from the point of the set, with a median of −0.52 LU. The point of the whole mix reads −0.21 to +0.12 LU from it, with a median of +0.04 LU. Excerpts of 6 × 10 s and 12 × 5 s at even spacing read −0.33 to +0.72 LU from it. The native check takes 5.3 to 10.6 s for each mix, against 4.5 to 11.0 s before. The WASM check on one thread takes 20.8 to 46.8 s, against 8.5 to 20.1 s, and its peak linear memory is 184 to 289 MiB, against 330 to 366 MiB. `measure_track` puts the 4x copy of the mix in one scratch file of the host, and the album worker of the web app gives it one OPFS file. The suggested order of the album mixes stays the same, and the album tests take the new points. Verification: `the_point_of_the_check_is_the_point_of_the_whole_track`; the album point run.
+- 2026-10-26: `album.order.v3`. The key is a chroma of the power of the spectral peaks. v2 used their magnitude. The power gives the strong tones of the bass and the chords more weight than the weak peaks of the voice and the reverb. The key of the stems is the chroma of the power of the bass and the other stem. On the eight album mixes, the key of the mix matched the key of the stems on eight tracks with v3 and on five tracks with v2. On 22 mixes with stems, which include three other recordings and eleven other mixes of the album songs, the keys matched on 19 mixes with v3 and on 13 mixes with v2. Of 24 chromas and profiles on the first 11 mixes, the power matched on the most mixes (10). Of 10 variants on the 22 mixes, the power and the power from 55 Hz to 1 kHz matched on the most mixes (19). The variant to 1 kHz gave 11 keys that are not clear, against 9. The review condition of a key error that changes an order applies: v3 gives track-h, track-d, track-f, track-c, track-a, track-b, track-g, track-e. The opener, the early peak at position 3 and the closer are those of the album masters. With the v3 keys, the key steps of the order of the album masters cost 3.35, against 1.93 with the v2 keys. The step from track-f (A minor) to track-g (D major) is an "other" step. The keys of track-a, track-d and track-e are not clear. Verification: the album tests and the unit test of a D major chord over quiet tones of C major.
+- 2026-10-26: Review on two released albums that the reviews of the weights did not read (album 2, 7 tracks; album 3, 10 tracks), in their release order. The rank of an order is the share of the orders of the album with a lower cost, plus half the share with an equal cost; a random order ranks at 50%. `album.order.v3` ranks the release orders at 9.99% and 62.64%, and the order of the album masters of D177 at 0.29%. The suggested orders keep 0 of 7 and 1 of 10 positions of the releases, and 2 of 8 of the album masters. Both releases put the densest track after position 3 and close on a track that is neither the longest nor the most distinct. Of 16,383 sets of the seven weights, each scaled by 0, 0.5, 1 or 2, the set with the lowest mean rank on two albums ranks the third at 2.41%, 57.22% and 62.35%, against 0.29%, 9.99% and 62.64% with `album.order.v3`. The rules give each release order a higher cost than the suggested order, which is the review condition. The weights stay. Limits: the albums are MP3 and AAC copies of released masters with no stems. Verification: the second album run, a private record with `--order` and `--costs`.
+- 2026-10-29: TODO.md, "Album room": the order page shows no choice for a track with less room than its position needs. In the release order of album 2, `album.levels.v2` lowers a2-t4 by the full 1 LU, and the step to a2-t5 stays at −1.58 LU. The release of album 2 steps −7.12 LU between the same tracks. The adjacent steps of the two releases are −7.12 to +5.56 LU and −1.02 to +1.35 LU, and of the album masters of D177 −0.88 to +2.30 LU. On the eight album mixes and in the suggested orders of the two releases, no level reaches the limit of 1 LU. Review condition: a step that stays outside the steps of the releases and of the album masters.
 
 ## D208: Attack loss bound of the audibility point
 
@@ -4385,6 +4497,7 @@ The following records the earlier prototype; the v2 native contract replaces it.
 ### Updates
 
 - 2026-10-20: Regression of the eight album sets, engine 1.11.2 against 1.13.0, each set with its stems. Every set delivers four versions. The P90 attack loss of every version is at most 5.45 dB; on 1.11.2 it reached 7.16 dB (Essential of track-g). track-b and track-e keep their loudness to 0.01 LU. Essential comes down by 1.52 LU on track-a (−8.88 to −10.40 LUFS), 1.78 LU on track-g (−7.64 to −9.42 LUFS), 1.19 LU on track-h (−7.19 to −8.38 LUFS), 0.51 LU on track-c, 0.44 LU on track-f and 0.24 LU on track-d. Full comes down by 1.04 LU on track-a, 1.50 LU on track-g, 1.06 LU on track-h, 0.44 LU on track-f, 0.17 LU on track-d and 0.14 LU on track-c. Bold follows Full within 0.1 LU. Open comes down by 1.81 LU on track-a, 1.47 LU on track-g, 1.27 LU on track-h and 0.57 LU on track-d. The set of track-e in the browser engine (Node) gives the four WAVs of the native set and peaks at 409.5 MiB of linear memory.
+- 2026-10-26: The album masters of D177, each against its mix through the best static stereo filter: five of eight reach a ratio of the loudest 5% of the frames of +4.42 to +7.33 dB (track-a, track-b, track-c, track-d and track-h), and track-e, track-f and track-g reach +0.28, −4.65 and −5.89 dB. The measure counts each change outside a static filter: on the 32 versions of 1.14.0 it reads −0.79 to +4.38 dB over the measure of peak control of the engine, with a median of +0.75 dB. At the loudness of each master, the peak control of the engine reaches −6.08 to −0.01 dB. A bound of 1.5 dB would sit under the measure of five of the eight masters, so the ratio stays a report (the loud frames pair run).
 
 ## D209: Keyed de-essing from the 90% excess of the recording
 
@@ -4459,3 +4572,2658 @@ The following records the earlier prototype; the v2 native contract replaces it.
 - Reason: The engine is for the artist who masters their own music. A commercial mastering service or a label workflow needs a written licence.
 - Alternatives and tradeoffs: The MIT licence allows any commercial use, including a hosted mastering service built on the engine.
 - Limits: The licence text names Bitneedle in its contractor and trademark sections; the terms apply to the engine as written.
+
+## D211: True peak from 8 points in each sample interval
+
+- Recorded: 2026-10-25.
+- Origin: TODO.md, "True peak above the ceiling" (D155, update of 2026-10-16): the 4x estimate of each confirmation master read −0.50 dBTP, and a 32x reference read −0.497 to −0.340 dBTP.
+- Basis: Acoustics and measurement; no listening, owner decision of 2026-10-16.
+- Status: Provisional. Implemented in `dsp::Oversampler` (`between`, `interpolated_peak`) and `dsp::PEAK_POINTS`.
+- Decision:
+  - The true-peak estimate reads 8 points in each sample interval: the 4x points of peak control and the points midway between them, from the same windowed-sinc design.
+  - Each true-peak measure of the engine uses it: `Oversampler::peak`, `peak_scan`, `peak_after` and the frames over the ceiling of `lower_peaks`. Thus the fit of each render (the local correction and the trim), the audibility point, the delivery check and the reports use the 8 points.
+  - The limiter and the clipper stay at 4x.
+- Reason: The fit lowers the frames whose estimate is over the ceiling. With 4 points, a crest between two points passes the fit: an ideal 4x reading is up to `cos(π / N)` under the true peak of a sine at `4 fs / N`, 0.436 dB at 19.2 kHz and 48 kHz. With 8 points the bound is `cos(π / 2N)`, 0.108 dB. The local correction of D166 acts only on the frames over the ceiling, so the loudness changes little.
+- Alternatives and tradeoffs:
+  - A margin of 0.17 dB under the 4x estimate: it lowers the target of the fit on every frame near the ceiling, and the audibility point with it.
+  - 16 points: on two mixes the 32x reference reads −0.499 to −0.480 dBTP, against −0.495 to −0.449 dBTP with 8 points, at 32% more CPU time for a set than 8 points.
+  - Peak control at 8x: twice the work of the limiter and of the 4x decimator, which take about 6% and 15% of the CPU samples of a render in the profile of 2026-10-09 (TODO.md, "Render speed and memory").
+- Evidence: The true peak run, local, on the eight album mixes and regression mix 2 with their stems, against the default sets of 1.14.0. Across the 36 versions, the 32x reference reads −0.500 to −0.449 dBTP, against −0.493 to −0.397 dBTP with 1.14.0. The loudness changes by −0.084 to +0.041 LU, with a median of −0.007 LU. The versions, the names and the descriptions of each set are unchanged. On sines, the lowest reading equals that of an ideal 8x interpolator to 0.0001 dB, and the estimate reads at most 0.0001 dB above the true peak.
+- Rule and code references: `set.peak-share.v3`; `dsp::PEAK_POINTS`, `dsp::Oversampler::peak`, `render_blocks::fit_true_peak`; the peak estimate example.
+- Limits and counterexamples:
+  - The 32x reference reads up to 0.051 dB over the ceiling (the `master` of track-d). After the fit, the remaining crests lie between the points, and the interpolator of the engine, with its cutoff at 21.75 kHz, reads up to 0.029 dB under the reference at the same points.
+  - The audibility point counts the extra local correction: on track-e it falls from −7.268 to −7.351 LUFS, and the four versions follow it. D155 asks that a change does not make the masters quieter.
+  - A set takes 7% more CPU time on two mixes measured alone.
+- Verification: `tests/dsp.rs`, `peak_estimate_reads_sines_within_the_bound_of_its_points` (8 points), and the fit tests of `dsp` and `render_blocks`. `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test --release` pass. No listening result.
+- Review condition: A platform or a meter that reads a delivered version over −0.5 dBTP by more than 0.05 dB; a set that becomes more than 0.1 LU quieter.
+- Work reference: TODO.md, "True peak above the ceiling".
+- Supersedes / superseded by: Extends D155 and D166.
+
+## D212: Focus bells that change the mix where they act
+
+- Recorded: 2026-10-25.
+- Origin: The review condition of D128: remove the focus bells under 0.5 dB with a measurement of each filter in the engine.
+- Basis: Measurement; no listening, owner decision of 2026-10-16.
+- Status: Provisional. Implemented in `refinement::focus_change_db`, `set::FOCUS_CHANGE_DB` and `set::PreparedSet` (`quiet_focus`), as `set.focus-change.v1`.
+- Decision:
+  - The planner measures each focus bell of the refinement (`set.focus-strength.v1`) on the mix, at the gain that the versions carry, with the bound of a side bell under 500 Hz (D128) and with its envelope (`set.focus-passages.v1`).
+  - The measure is the power change of the mid or the side channel from `hz / √2` to `hz × √2`, over the 8192-frame blocks where the envelope is above zero at the block centre. A bell with no envelope acts on every block.
+  - A bell that changes its band by less than 0.5 dB leaves every version, with its envelope. The basis of each version names the bell and its change.
+- Reason: A filter under 0.5 dB in its band makes a change that D128 does not count as a stage. The envelope confines a focus bell to the passages where the vocal overlaps the accompaniment, so the change where the bell acts is the change that a listener meets.
+- Alternatives and tradeoffs:
+  - The change over the whole track, the measure of the tone run of D128: it also removes the mid bell at 1285 Hz of track-c, which changes its band by 1.04 dB in its 68 s and by 0.44 dB over the whole track.
+  - The same rule for the +1.5 dB foundation bells of Essential: they change their bands by 0.06 to 0.32 dB on the nine mixes. Essential keeps the foundation by its own rule.
+- Evidence: The focus change run. On the eight album mixes and regression mix 2, eight focus bells act in the versions. Six change their bands by 1.46 to 2.79 dB where they act. The mid bell at 1285 Hz of track-c changes its band by 1.04 dB where it acts. The side bell at 335 Hz of track-e, at the 1.5 dB bound, changes its band by 0.46 dB, and the rule removes it.
+- Rule and code references: `set.focus-change.v1`; `refinement::focus_change_db`, `set::FOCUS_CHANGE_DB`; the focus bell example.
+- Limits and counterexamples: One album of eight mixes and regression mix 2. The measure counts a block with a small wet share as a block where the bell acts. A side bell under 500 Hz at the 1.5 dB bound changes an octave band by about 0.46 dB at full wet, so the rule removes most such bells. The measure uses the gain of the refinement before the scale of `refinement::Analysis::apply`, which lowers every bell of a tone over the response bound.
+- Verification: `refinement::tests::the_change_of_a_focus_bell_counts_only_the_blocks_where_it_acts`, `set::foundation_plan_tests::a_quiet_focus_bell_leaves_the_tone_with_its_envelope`.
+- Review condition: A focus bell that the rule removes from a mix with a measured lead masking deficit in its band.
+- Work reference: TODO.md, "Focus bells (D128)".
+- Supersedes / superseded by: Completes the review condition of D128 for the focus bells.
+- 2026-10-26: D220 makes each focus bell static, and `set.focus-change.v2` measures its change over the recording. The static mid bell of track-c at 1285 Hz, at +0.60 dB, changes its band by +0.40 dB and leaves the versions. The side bell of track-e at 335 Hz changes its band by +0.46 dB and stays out of the versions.
+
+## D213: Band above the codec cutoff under the threshold of hearing
+
+- Recorded: 2026-10-26.
+- Origin: TODO.md, "Band above the codec cutoff". Peak control fills the band above the codec cutoff of a capture, so criterion 3 of the capture plan failed for each capture version as written.
+- Basis: Measurement; no listening, owner decision of 2026-10-16.
+- Status: Provisional. A pass criterion of the capture plan, measured by a private record. The engine is unchanged.
+- Decision:
+  - The band from a twelfth of an octave over the codec cutoff of the source to 20 kHz stays under the threshold of hearing. Each level is in dB SPL at the listening level of the masking model, where a full-scale sine is 92 dB SPL.
+  - The threshold is the free-field threshold of ISO 389-7:1996, Table 1: 11.0 dB SPL for a part of the band under 14 kHz, 16.0 dB SPL from 14 to 16 kHz, and 43.5 dB SPL from 16 kHz.
+  - At a loudness of L LUFS, the band from 1 to 4 kHz is 92 + L dB SPL or less. A band 92 + L − T dB or more under 1 to 4 kHz passes. At −6.5 LUFS, the bound is 74.5, 69.5 or 42.0 dB.
+  - A part over the threshold passes when the band is under the masked threshold of the content under it: the total noise-to-mask ratio of `audibility` in each critical band is under 0 dB. The threshold is the larger of `masking::thresholds` of the content under the band and the threshold of the part.
+- Reason: Peak control raises an empty band by 6 to 36 dB at matched loudness, so a bound of 0.5 dB on the rise fails for each version. The level of the band against the threshold of hearing is the measure of audibility.
+- Alternatives and tradeoffs:
+  - The threshold in quiet of the masking model (`masking::threshold_in_quiet`, Terhardt): 24.9 dB SPL at 12.5 kHz and 65.9 dB SPL at 16 kHz, 13.9 and 22.4 dB over ISO 389-7.
+  - The diffuse-field thresholds of ISO 389-7 for third-octave bands of noise: 13.0, 21.0 and 47.0 dB SPL, 2.0 to 5.0 dB over the free-field values from 12.5 kHz.
+  - The masked threshold of the content under the cutoff, which shares a critical band with the start of the band. The threshold in quiet is the lower threshold.
+- Evidence: The cutoff band run. On engine 1.14.0, each version of the other seven stress recordings passes by 21.9 dB or more. Stress recording 1 is measured on its test excerpt. Stress recording 8 has its cutoff at 12.2 kHz. Its `bold` is 1.4 dB with stems and 1.7 dB without stems over 11.0 dB SPL from 13.0 to 14.0 kHz. Its other versions pass by 0.3 to 1.7 dB. Against the masked threshold of the content under the band, the total noise-to-mask ratio of each of its versions is −17.0 to −18.1 dB in critical band 23, and the ratio of the loudest 5% of frames is −11.1 to −12.6 dB.
+- Rule and code references: Criterion 3 of private records; `masking::FULL_SCALE_SPL`, `masking::thresholds`, `source_condition::bandwidth_hz`.
+- Limits and counterexamples: The table stops at 16 kHz, and its value at 16 kHz comes from one laboratory. The thresholds are medians for listeners from 18 to 25 years. The level is the mean of the two channels at one listening level. The total ratio averages over the frames: in 0.15 to 0.24% of the frames of stress recording 8, the band is over the masked threshold, by up to 6.3 dB in one frame of 21 ms.
+- Verification: The probe on the stress set.
+- Review condition: A version whose band has a total noise-to-mask ratio of 0 dB or more against the masked threshold. The engine then guards the band after peak control (stage 3 of the capture plan).
+- Work reference: TODO.md, "Band above the codec cutoff".
+- Supersedes / superseded by: Replaces the bound of 0.5 dB on the rise of the band in criterion 3 of the capture plan.
+
+## D214: Time limit of a family worker
+
+- Recorded: 2026-10-26.
+- Origin: TODO.md, "Lambda time of a `master` that falls back". A family Lambda that passes its 900 s writes no family record, and the finalizer starts only when the record of each family exists.
+- Basis: Measurement; no listening.
+- Status: Accepted. Implemented in `selection::Deadline`, `selection::ladder`, `treatment_render::Renderer::deadline`, `distributed::render_family_in` and the family handler of the Lambda (`render_deadline`), as `selection.time-limit.v1`. The Lambda change is not deployed.
+- Decision:
+  - A family worker with a deadline starts a candidate of a ladder only when the longest candidate of the worker so far can end before the deadline.
+  - After the first candidate that cannot start, each ladder of the worker stops at its first candidate, the fallback to the instant attack included.
+  - A version whose ladder stops chooses no candidate. Its last trial fails `selection.time_limit`, with the seconds left and the longest candidate. The finalizer withdraws the version, as it withdraws each version that chooses no candidate.
+  - The cloud family takes the deadline of its invocation less 120 s: the uploads of the delivered and the unquantized WAVs of three 30-minute versions (3.6 GB) at 30 MB/s or more, and the call of the finalizer.
+  - The native set, the browser engine and the local examples have no deadline.
+- Reason: A `master` that falls back through each ladder took 924.6 CPU-s on a 10.9-minute file, 5.8 times the planned `master`. On Lambda it passes 900 s above 5.6 to 11.8 minutes of audio. A candidate that starts close to the deadline ends after it.
+- Alternatives and tradeoffs:
+  - The fallback ladders in their own functions: each version is delivered, at the cost of more invocations and of an orchestration of the ladders.
+  - A bound on the number of renders: the time of a render changes with the duration of the recording and with the host.
+  - An estimate of the time of a candidate from the duration of the recording: the time of a CPU-second on Lambda was 0.9 to 1.9 s of a CPU-second of the M1.
+- Evidence: The time limit run. On track-d, with a plan whose `master` candidates each fail, the `master` family took 86.4 s without a deadline, 51.9 s with a deadline of 60 s and 22.4 s with a deadline of 30 s. With each deadline, `master` chose no candidate, and its last trial failed `selection.time_limit`. The trials before the time limit were identical to the trials without a deadline.
+- Rule and code references: `selection.time-limit.v1`; `selection::Deadline`; `tests/set.rs`, `a_family_past_its_deadline_chooses_no_candidate_and_names_the_time_limit`; `selection::tests::a_candidate_starts_when_the_longest_candidate_can_end_in_time`.
+- Limits and counterexamples: A candidate longer than each candidate before it can end after the deadline. The first candidate of a worker has no estimate. The renders of a reference and of a sub lift outside a ladder have no limit. The reserve of 120 s has no measurement of the uploads from Lambda.
+- Verification: `cargo test --release` passes. A deadline of one hour gives the family of no deadline.
+- Review condition: A family Lambda report near 900 s, or a version withdrawn at the time limit.
+- Work reference: TODO.md, "Lambda time of a `master` that falls back".
+- Supersedes / superseded by: None. Limits D164. Extended by D225: a version that stops at the time limit continues in another invocation.
+
+## D215: Album regions of the version characters
+
+- Recorded: 2026-10-26.
+- Origin: TODO.md, "Tone differences in album mode". With `set.version-character.v1`, each version moves the low mid, the presence and the air of each track of an album toward the mean of the album, and the album masters of D177 keep the tonal differences between the tracks.
+- Basis: Measurement and the album pairs of D177; no listening, owner decision of 2026-10-16.
+- Status: Accepted. Implemented as `set.version-character.v2` in `character::plan`, `album::Track::regions`, `album::mean_regions`, `set::Options::album_regions`, the `--album-regions` option of `master set`, the `album_regions` field of the WASM job and of the cloud submit request, and the `regions` output of `order_album`. bitneedle-app sends no album regions yet.
+- Decision:
+  - The album check measures the five regions of the whole mix of each track (`character::regions`), as the plan of the set measures them.
+  - The album regions are the mean of the regions of the album mixes (`album::mean_regions`).
+  - In album mode, a move that follows the mix takes its direction from the album regions. Each move stops at the bound of its region from the album regions, and then from the regions of the mix.
+  - Without album regions, the reference of each move is the mix, and the moves are the moves of v1.
+- Reason: On the eight album mixes, the sum of the errors of the five regions against the album masters falls in each version: `essential` from 4.19 to 3.77 dB, `master` from 6.62 to 5.47 dB, `bold` from 7.34 to 6.51 dB and `open` from 5.42 to 5.08 dB. The spread of the low mid of `master` rises from 0.72 to 1.03 dB, and of the presence from 1.14 to 1.75 dB. The album masters have 1.30 and 2.32 dB.
+- Alternatives and tradeoffs:
+  - The direction from the album regions and the bounds of the mix only: in the simulation, a sum of errors of 6.18 dB for `master` against 5.82 dB with v2, and the spread of the air of v1.
+  - The move of the album regions on each track, without the bounds of the mix: each spread of the mixes stays, and the presence of track-a rises to −0.57 dB, 2.73 dB above the equal-loudness balance of D134. The album master of track-a cuts its presence by 1.18 dB.
+- Evidence: The album mode run: the simulation of the wanted moves, and the sets of the eight album mixes with their stems and the album regions.
+- Rule and code references: `set.version-character.v2`; `character::plan`, `album::mean_regions`; `character::tests::an_album_track_takes_the_moves_of_the_album_mean_within_its_bounds`; `tests/set.rs`, `an_album_track_takes_the_moves_of_the_album_regions`; a private record, `the_point_and_the_regions_of_the_check_are_those_of_the_whole_track`.
+- Limits and counterexamples: The presence error of `bold` rises from 1.61 to 1.90 dB. The width keeps the correlation allowance of each track (D183, D186), and the spread of the side/mid stays at 1.16 to 1.85 dB against 2.63 dB for the album masters. The album masters take the P10 window correlation under 0 in 13 of the 40 bands from 120 Hz. The evidence is one album with masters.
+- Verification: `cargo test --release` passes. The planned moves of the eight sets are the moves of the simulation.
+- Review condition: A second album with masters (TODO.md, "Second album"), or an album whose mean regions sit on the other side of a median outcome.
+- Work reference: TODO.md, "Album mode".
+- Supersedes / superseded by: Replaces `set.version-character.v1`. Extends D206. `set.version-character.v3` (D273) gives each version in album mode the air of its mix against presence.
+
+## D216: Removal of the Club preset
+
+- Recorded: 2026-10-26.
+- Origin: TODO.md, "Club level from the own audibility point". User decision 2 of 2026-10-12: a preset exists where the default versions do not already cover the result.
+- Basis: Measurement and the user decisions of 2026-10-12; no listening, owner decision of 2026-10-16.
+- Status: Accepted. `adjust::Preset::Club`, `adjust::club_lufs`, `adjust::CLUB_MARGIN_LU` and `adjust::Medium::level_shares` are removed. `master adjust --preset`, the cloud action `adjust` and the WASM `Preview` take `streaming`, `radio`, `mono` and `mono-safe`. The ADJUST panel of bitneedle-app keeps an entry for Club, which the engine offers on no version.
+- Decision:
+  - The Club preset of D197 is removed.
+  - Each version of a set stays at or under the audibility point of its own prefix (`selection.own_point`, D206). A request has no own-point gate.
+- Reason: Since D206, each version sits at the audibility point of its own chain, the loudest output before the disturbance of peak control is audible. The Club level is the point of the set at −1 dBTP less 0.5 LU, 1.0 LU under the point of the set. On the eight album sets, each of the 32 versions sits 0.00 to 1.06 LU under the point of the set, and the Club level is 0.00 to 0.06 LU above its level. `adjust::offers` offers Club where the level rises by 0.5 LU or more, so Club is offered on no version. The default versions cover the result of Club.
+- Alternatives and tradeoffs:
+  - Club at the point of the set with the ceiling of the versions: the level of `master` and `bold`, and 0.00 to 1.06 LU above `essential` and `open`. Each version already sits at the point of its own chain, and a louder level passes that point.
+  - Club over the point of the version: the disturbance of peak control is then above its masking threshold.
+- Evidence: The presets run.
+- Rule and code references: `adjust.club.v1` (removed); `adjust::Preset`, `adjust::medium`; `adjust::tests::the_range_gives_the_first_share_of_each_step` (updated).
+- Limits and counterexamples: The measurement covers the eight album sets. Where the facts of a set hold no audibility point, the Club level was the level of the version.
+- Verification: `cargo test --release` passes.
+- Review condition: A version that sits 1.5 LU or more under the point of its set, or a user request for a louder club file.
+- Work reference: TODO.md, "Advanced presets and ADJUST".
+- Supersedes / superseded by: Supersedes the Club preset of D197.
+
+## D217: Reference record of a set for its ADJUST requests
+
+- Recorded: 2026-10-26.
+- Origin: TODO.md, "Reference render of the cloud families": an ADJUST request can read the reference record of its set in place of its reference render.
+- Basis: Measurement and the plan of a request (final render, step 5: one family with `essential` as the reference).
+- Status: Accepted. Implemented in `distributed::FamilyResult::reference_record`, `distributed::reference_record`, `distributed::finalize_set`, `set::render_with`, `adjust::Base::record`, `adjust::render_in`, `adjust::render` and the ADJUST action of the family Lambda. Not deployed.
+- Decision:
+  - The family result of `essential` keeps the reference record that it gives the other families (`reference_record`).
+  - The base of a set (`adjust::Base`) keeps the record in `record`. The finalizer takes it from the family result of `essential`, and `set::render_with` makes it from the render that the Essential version chose.
+  - A request takes its reference from the record of its base (`adjust::render_in`). `master adjust` takes the record of the versions record when the base has none: `adjust.record` of a manifest, or `reference_record` of a family result.
+  - The ADJUST action of the family Lambda takes the record from the manifest of the set.
+  - A base without the record renders the `essential` spec, as before.
+  - The result of a request gives the `work` counts of its family.
+- Reason: Before D217, the family of a request rendered the `essential` spec as its reference. The plan of a request holds no Essential version, so the family could not render the reference as the Essential version chooses it. The families of the set compare with the render that the Essential version chose (D196). With the record, a request compares with the same render and renders no reference. On two album mixes, a request takes 44% to 58% of the wall time of a request that renders the spec. The measured change against the parent differs by at most 0.044 LU in loudness and 0.007 dB in each tone measure.
+- Alternatives and tradeoffs:
+  - The plan of a request names the first version of `essential`, and the family renders its ladder without the record. The WAVs equal those of the record, but a request takes 2.10 to 2.49 times the wall time of the spec form, and the base of track-d grows by 204 KB of candidates.
+  - A file of the record beside the manifest: after one day the browser renders a request on a cloud set from the summary of the set, and the summary would hold no record.
+- Evidence: a private record. The test `an_adjust_request_takes_its_reference_from_the_record_of_its_set` (`tests/set.rs`) compares a request that takes the record with a request whose family renders the ladder of the Essential version, and compares the record of a local set with the record of the family result.
+- Rule and code references: `adjust.steps.v1` and the presets of a request (the reference of the gates and of the low-end hold); `distributed::REFERENCE_SCHEMA`.
+- Limits and counterexamples: The record adds about 72 KB to the manifest and to the summary of a set; on track-d the chosen spec is 66.9 KB of it. The `adjust_version` job of the browser engine of 1.14.0 refuses a base with `record` (`deny_unknown_fields` of `adjust::Base`), so the site ships the new browser engine before the cloud stack (TODO.md). A request on a set made before D217 renders the `essential` spec.
+- Verification: `cargo test --release` of the engine and of the Lambda crate passes. Clippy of the engine, the WASM crate and the Lambda crate passes.
+- Review condition: A reference of a request other than the render of the Essential version, or a record that the gates of a request do not read.
+- Work reference: TODO.md, "Cloud MASTER".
+- Supersedes / superseded by: None. Changes the reference of a request of D171 and D197.
+
+### Updates
+
+- 2026-10-29: D270 moves the record of a cloud manifest to its Essential version record (`reference_record`). The base of the manifest keeps no record, so the browser engine of 1.14.0 reads it, and the site and the cloud stack can deploy in either order. `master set` and a set made in the browser keep the record in their base.
+
+## D218: Broad-tone analysis of the lead and its low-mid cut
+
+- Recorded: 2026-10-26.
+- Origin: TODO.md, "Lead masking" (item 2): replace the share-parity premise of the lead presence bell with excitation-pattern masking.
+- Basis: Code and measurement. Since D206 the tone of each version is the solve of its character on top of the stem focus (`character::plan`).
+- Status: Accepted. Implemented in `broad_tone::analyze`, `broad_tone::Analysis` and `set::prepare_with` as `set.broad-tone.v7`.
+- Decision:
+  - The broad-tone analysis of a set gives the lead role, the lead's share of the arrangement in its low mids and in its body, and the largest cut of the dynamic low-mid correction (`Analysis::low_mid_cut_db`).
+  - The largest cut is the share deficit from the body to the low mids, from 0.5 to 2 dB, when the stems key the correction for the lead (`set.low-mid.v1`, D158).
+  - The analysis proposes no other move. The equal-loudness shelves, the lead presence bell, the presence balance bell, the air balance shelf and the low shelves of a device capture leave the analysis and the summary of a set, with the screen of unmeasurable moves (D144).
+- Reason: Since D206 the set used only the low-mid cut of the analysis. The summary of a set reported the other proposals, and no version carried them. On the early track-b mix on engine 1.14.0, the summary gave a lead presence bell of +0.74 dB, a presence balance bell of +1.14 dB, an air shelf of +2.0 dB and a bass shelf of −1.03 dB, and the tone of each of the four versions held none of them. The lead presence bell, the subject of the review item, is in no version, so its premise sets no move.
+- Alternatives and tradeoffs:
+  - Excitation-pattern masking for the lead presence bell (the review item): the bell is in no version.
+  - The proposals as diagnostics in the summary: the summary then gives moves that the versions do not make.
+- Evidence: The plans of track-e, track-b and track-d (48 kHz, with stems) are byte-identical before and after the change. The plans of track-e and track-b carry low-mid cuts of up to 0.95 and 0.66 dB.
+- Rule and code references: `set.broad-tone.v7`, `set.low-mid.v1`; `broad_tone::RULE`, `broad_tone::masking`, `broad_tone::lead`.
+- Limits and counterexamples:
+  - The depth of the low-mid cut keeps the share premise, with the vocal centroid at 1 kHz: low mids from 250 to 500 Hz and a body from 500 Hz to 2 kHz. The measured vocal centroids of the corpus are 554 to 826 Hz.
+  - Since D206 no `master` carries the presence move or the low shelves of a device capture (D200, D201); TODO.md, "Capture stages 4 and 5 on the site", holds the decision. A private record keeps the dry run of both stages, and `bold` of a device capture keeps the bound of `set.capture-presence.v1`.
+- Verification: `broad_tone::tests::the_low_mid_cut_is_the_deficit_of_the_lead_within_its_bounds` and `broad_tone::tests::a_set_without_stems_has_no_lead_and_no_cut`. `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test --release` pass.
+- Review condition: A version tone that takes a move from the masking of the lead.
+- Work reference: TODO.md, "Engine".
+- Supersedes / superseded by: Supersedes `set.broad-tone.v6`: the equal-loudness shelves of D112 and D116, the lead presence bell of D114, the presence balance bell and the air balance shelf of `master` (D134, D162, D180) and the screen of D144. `bold` keeps its steps and bounds (D161, D162, D180, D200).
+
+## D219: No tone change that follows the level of a role
+
+- Recorded: 2026-10-26.
+- Origin: TODO.md, "Role-conditioned dynamic tone" (item 4): dynamic tone for the vocal effort and the drum upper region, from the level of the role in the stems.
+- Basis: Measurement and the pair prior of D177; no listening, owner decision of 2026-10-16.
+- Status: Accepted. No rule. The measurement tools are a private record and `PAIR_WRITE` of a private record.
+- Decision: The engine adds no tone change that follows the level of a role.
+- Reason: On six album pairs with stems, each album master against the mix through its best static filter moves presence, upper and air against the body by 0.15 dB or less over the P10 to P90 span of the vocal level, at a constant level of the mix. Against the drum level, the largest move is in the upper region: +0.52 dB on track-e and −0.43 dB on track-b, in opposite directions. Each other move is 0.19 dB or less. A rule of 0.5 dB, the smallest move of a stage, has no support in the pairs.
+- Alternatives and tradeoffs: A dynamic band processor with a detector on the level of a role (the review item). Against the mix without the static filter, both the album masters and the versions raise presence against the body by +0.09 to +0.87 dB as the vocal rises; a static filter gives that change on a spectrum that changes with the arrangement, and the static prediction removes it.
+- Evidence: The role tone run.
+- Rule and code references: None.
+- Limits and counterexamples: One album of one engineer, six mixes, stems from the separation. The Full versions of track-a and track-g carry enveloped focus bells (D212), which move the body against the whole band by −0.63 and −0.42 dB over the span of the vocal level, where the album masters move it by 0.01 and 0.04 dB (TODO.md, "Focus envelopes against the album pairs").
+- Verification: The run record.
+- Review condition: A second album of pairs, or a pair whose master follows the level of a role by 0.5 dB or more.
+- Work reference: TODO.md, "Engine".
+- Supersedes / superseded by: None. Closes item 4 of the decision review.
+
+## D220: Focus bells at the mean share of their passages
+
+- Recorded: 2026-10-26.
+- Origin: TODO.md, "Focus envelopes against the album pairs" (D212, D219). With their envelopes, the focus bells of Full on track-a and track-g move the body against the whole band with the level of the vocal. The album masters keep it within 0.04 dB.
+- Basis: Measurement and the pair prior of D177; no listening, owner decision of 2026-10-16.
+- Status: Provisional. Implemented in `refinement::focus` and `refinement::static_gain_db` as `set.focus-passages.v2`, and in `refinement::focus_change_db` as `set.focus-change.v2`.
+- Decision:
+  - Each focus bell of the refinement is static. Its gain gives the centre response of the mean blend of the dry mix and the bell at its strength gain (`set.focus-strength.v1`): 20·log10(1 + w × (10^(g/20) − 1)).
+  - w is the mean share of the passages, weighted by their frames. The share of a passage is the wet share of `set.focus-passages.v1`. A bell whose shares vary by less than 0.2 from P10 to P90 also takes the blend.
+  - A side bell under 500 Hz takes its 1.5 dB bound (D128) before the blend.
+  - The change of a focus bell (D212) is the change of the static bell over the recording.
+  - The envelopes of the foundation of Essential stay.
+- Reason: Over the P10 to P90 span of the vocal level, the album masters move the body against the whole band by 0.01 and 0.04 dB (D219). With the envelope, Full moves it by −0.63 dB on track-a and −0.42 dB on track-g, and the static form by +0.06 and +0.10 dB. Against the album master, in the passages where the four stems are active, the spread of each region is 0.43 to 1.17 dB smaller with the static form.
+- Alternatives and tradeoffs:
+  - The envelope (`set.focus-passages.v1`): in the passages with a wet share of 0.5 or more, it gives 0.12 to 0.35 dB more overlap ratio of the vocal against the accompaniment in the band of the bell. The vocal stays 4.3 to 6.8 dB under the accompaniment in the band with either form.
+  - The static bell at its strength gain: +4.37 to +4.66 dB on track-a and track-g, 2.3 to 2.6 dB over the blend.
+  - In the passages where the vocal is over the accompaniment in the band, the static form raises the band by 1.1 to 1.2 dB and the overlap ratio by 0.50 to 0.66 dB on track-a and track-g. The envelope leaves these passages dry.
+- Evidence: The role tone run. In the plans of the eight album mixes, the mid bell of track-a at 680 Hz goes from +4.66 to +2.03 dB, and the mid bells of track-g go from +4.37 to +2.05 dB at 245 Hz and from +4.44 to +1.88 dB at 667 Hz. They change their bands by +1.92, +1.40 and +1.81 dB. The mid bell of track-c at 1285 Hz leaves (D212). The plans of the other five mixes change only in their basis text.
+- Rule and code references: `set.focus-passages.v2`, `set.focus-change.v2`; `refinement::static_gain_db`, `refinement::Focus` (`strength_gain_db`, `mean_wet`); private records.
+- Limits and counterexamples:
+  - One album of one engineer. Three mixes have focus bells with envelopes.
+  - Over the span of the bass level, the static form moves the sub by +0.38 and +0.32 dB on track-a and track-g, and the bass of track-a by +0.30 dB. The album masters move them by 0.08 to 0.19 dB.
+  - On track-a, in the passages where the four stems are active, the median of the static form is 0.98 dB farther from the album master in the upper region, and nearer in five regions by 0.27 to 0.95 dB.
+  - The overlap ratio uses the stems before the dynamics of the chain.
+- Verification: `refinement::tests::a_static_focus_bell_blends_its_bounded_gain_by_its_share`, `refinement::tests::the_change_of_a_focus_bell_is_its_change_over_the_recording`; `tests/refinement.rs`, `strength_and_passages_follow_measured_stem_distribution` and `a_locally_unreliable_passage_takes_no_share_of_the_focus_bell`. `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test --release` pass.
+- Review condition: A second album of pairs, or an album master that lifts the band of a focus bell by 0.5 dB or more in the passages where the vocal is under the accompaniment, against the other passages.
+- Work reference: TODO.md, "Engine".
+- Supersedes / superseded by: Supersedes `set.focus-passages.v1` and `set.focus-change.v1`. Changes the measure of D212.
+
+## D221: No sub or bass move from the stems
+
+- Recorded: 2026-10-26.
+- Origin: TODO.md, "Low end from the stems" (item 3): sub and bass moves from the kick and bass overlap below 150 Hz and from the bass fundamental against its harmonics.
+- Basis: Measurement and the pair prior of D177; no listening, owner decision of 2026-10-16.
+- Status: Accepted. No rule. The measurement tools are private records (`ROLE_SMOOTH`, the role `kick`).
+- Decision: The engine takes no sub or bass move and no cut of the shared band from the stems.
+- Reason:
+  - On six album pairs with stems, the album masters lift the sub against the bass on each track, by +0.82 to +1.57 dB. No stem measure explains the differences between the tracks: |r| is 0.45 or less.
+  - The bass fundamental of the stem, the bass from 30 to 80 Hz against 80 to 250 Hz, gives the largest correlation with the bass − body move, r −0.72 (t 2.08 at 4 degrees of freedom). It follows the sub − bass of the mix, r +0.84, which the engine measures without stems.
+  - In frames of 85 ms where the four stems are active, the album masters move the sub and the bass against their static prediction by 0.08 dB or less over the P10 to P90 span of the kick level (20 to 42 dB). The masters show no cut keyed by the kick.
+- Alternatives and tradeoffs:
+  - A cut of the shared band keyed by the kick in the drum stem (stage 6 of): it has no support in the album pairs.
+  - A sub move from the kick overlap: r +0.34 with the sub move, from +0.10 to +0.64 with one track left out.
+- Evidence: The low end stems run. Full lifts the sub against the bass by +1.07 to +1.59 dB, within 0.43 dB of the album master of each track.
+- Rule and code references: None.
+- Limits and counterexamples:
+  - One album of one engineer, six tracks, stems from the separation.
+  - Full lowers the bass against the body on each of the six tracks, by 0.19 to 0.99 dB, and the album masters raise it on five, by up to 2.11 dB. Full takes the moves of the single masters (D206), and album mode takes the direction of each move from the album regions (D215).
+  - Against its static prediction, Full moves the sub up with the kick level by up to 0.42 dB and down with the bass level by up to 0.55 dB, in frames of 85 ms.
+- Verification: The run record.
+- Review condition: A second album of pairs, or a pair whose master moves the sub or the bass with the kick level by 0.5 dB or more.
+- Work reference: TODO.md, "Engine".
+- Supersedes / superseded by: None. Closes item 3 of the decision review.
+
+## D222: No resonance or harshness detector from the album pairs
+
+- Recorded: 2026-10-26.
+- Origin: TODO.md, "Fault detectors" (D112): a detector for resonances against the envelope of the recording, and a detector for level-dependent harshness.
+- Basis: Measurement and the pair prior of D177; no listening, owner decision of 2026-10-16.
+- Status: Accepted. No rule. The measurement tools are private records (the mix region swing).
+- Decision: The engine takes no resonance cut and no level-dependent cut of the presence or the upper region. The keyed de-esser (D133, D209) stays the only fault detector.
+- Reason:
+  - The eight mixes of the album pairs have 74 narrow peaks of 3.0 to 6.6 dB in the long-term spectrum, 73 of them from 109 Hz to 1.8 kHz. The album masters change the peaks by −0.45 to +1.23 dB and cut no peak by 0.5 dB or more. The median change at the peaks of each track is −0.08 to +0.26 dB.
+  - Against their static prediction, the album masters move the presence (2 to 5 kHz) by 0.11 dB or less over the P10 to P90 span of the level, on six tracks with stems.
+  - The album masters lower the upper region (5 to 10 kHz) as the level rises on two of the six tracks, by 0.48 and 0.29 dB. Over the six tracks, the change of the upper region of the mix with the level and the move of the master have r −0.28. On one of the two tracks, the upper region of the mix falls as the level rises.
+- Alternatives and tradeoffs:
+  - A resonance cut from the prominence of the long-term spectrum: the album masters keep the peaks, which are mostly the tonal center and the fundamentals of the music.
+  - A dynamic cut of the upper region keyed by the level: it has support on two of six tracks, and the mix gives no measure that selects them.
+- Evidence: The fault detector run.
+- Rule and code references: None.
+- Limits and counterexamples:
+  - One album of one engineer. The mixes are finished studio mixes with no resonance fault.
+  - The resonance probe reads the long-term spectrum, so a resonance in one part of a recording has a smaller prominence.
+  - Full cuts two peaks by 0.5 dB or more, by 0.55 and 0.60 dB, from 295 to 332 Hz. It moves the presence and the upper region by 0.14 dB or less against the level.
+  - The probe reads a difference between two mixes as a change of the master. One pair gives a median change of −0.55 dB at the peaks with an earlier mix in place of the mix of its master, and +0.04 dB with the mix of its master.
+- Verification: The run record.
+- Review condition: A pair whose mix has a resonance or level-dependent harshness that its master corrects, or a second album of pairs.
+- Work reference: TODO.md, "Engine".
+- Supersedes / superseded by: None. Answers the review condition of D112 for resonance and harshness detectors.
+
+## D223: Peak control after the Oxford Limiter comparison
+
+- Recorded: 2026-10-26.
+- Origin: TODO.md, "Oxford Limiter" (D166, D168): measure Sonnox Oxford Limiter as a black box at the loudness of the engine.
+- Basis: Measurement; no listening, owner decision of 2026-10-16.
+- Status: Accepted. No rule. The measurement tools are private records.
+- Decision: The engine takes no part of the design of the Oxford Limiter. The masked NMR of the engine at the loudness of Full meets the review condition of D168, so peak control is open work in TODO.md.
+- Reason:
+  - On four confirmation tracks at the target loudness of Full, each Oxford render that reaches the target has a higher masked NMR than the engine on the same track. The difference is 2.08 to 5.47 dB for the lowest Oxford render of each track. The gain span of the Oxford renders is 3.00 to 17.59 dB, against 0.35 to 1.59 dB for the engine.
+  - With the default attack of 0.052 ms, 15 of 20 Oxford renders stop under the target at the largest input gain, +18 dB.
+  - Pro-L 2 has a lower NMR than the engine on each track at the same loudness: by 2.46 to 3.98 dB with Transparent. Modern has a lower energy attack loss than the engine on each track.
+  - The engine renders Full 0.59 to 3.05 LU louder than 1.3.0 on these tracks. Its NMR is above −5 dB on three of the four tracks, the review condition of D168.
+- Alternatives and tradeoffs:
+  - The slower attack of the Oxford Limiter with Enhance at 100%, which limits each sample value that passes the attack: it reaches the target on each track, with an NMR 3.24 to 5.47 dB above the engine and an energy attack loss of 1.23 to 1.55 dB.
+  - The two-stage design of Pro-L 2, a slow gain envelope under a fast stage (D168): the open work.
+- Evidence: The Oxford Limiter comparison; its result files.
+- Rule and code references: None.
+- Limits and counterexamples:
+  - Four tracks and one version.
+  - The masked NMR has no calibration against listening on this material (D127). In the comparison of D168, a difference of up to 3 dB under about −7 dB was not audible, and near the threshold the preferred master had the higher NMR.
+  - The Oxford Limiter ran as a trial version, at seven points of its controls, with the soft knee at 0 dB.
+- Verification: The run record.
+- Review condition: The result of the peak control item in TODO.md.
+- Work reference: TODO.md, "Engine".
+- Supersedes / superseded by: None. Closes the Oxford Limiter item; answers the review condition of D168 with a measurement.
+
+## D224: Widening and the vocal on headphones
+
+- Recorded: 2026-10-26.
+- Origin: TODO.md, "Vocal clarity" (D132). D132 lists two limits: the vocal level at matched loudness falls as the side rises, and the spatial release from masking of a centered vocal has no measurement.
+- Basis: Measurement; no listening, owner decision of 2026-10-16.
+- Status: Accepted. No rule. The measurement tool is a private record.
+- Decision: The widening of `set.widening.v6` (D206) stays. The engine adds no vocal bound to the widening.
+- Reason:
+  - The probe applies each version to the vocal stem and to the sum of the other stems of six tracks. It then computes the binaural speech intelligibility model of Jelfs, Culling and Lavandier (2011) for headphones. The benefit is the weighted sum of the better-ear SNR and the binaural masking level difference (BMLD).
+  - Against Full at the source image, the widening of Full changes the benefit by −0.08 to +0.62 dB. The widening of Bold changes it by −0.07 to +0.77 dB.
+  - Against the mix, the album masters change the benefit by −0.06 to +0.73 dB, Full by −0.07 to +0.63 dB, and Bold by −0.05 to +0.77 dB.
+  - In a band, the widening raises the better-ear SNR when the vocal has a larger share of side than the other stems, and lowers it when the vocal has a smaller share. Over 254 bands, the Pearson r of the difference of the two shares and the change for each dB of widening is 0.83.
+  - The weighted BMLD of the mixes is 0.00 to 0.43 dB.
+- Alternatives and tradeoffs:
+  - A bound on the widening of a band where the vocal has a smaller share of side than the other stems. The largest decrease that the bound prevents on the six tracks is 0.08 dB (track-g). The bound needs stems. On track-g, the album master widens the region from 100 to 500 Hz by 2.5 dB, where the vocal has the smaller share of side.
+- Evidence: The vocal clarity run; its result files.
+- Rule and code references: None.
+- Limits and counterexamples:
+  - Six tracks of one album.
+  - Headphones only. On loudspeakers each ear receives both channels.
+  - The model predicts the intelligibility of speech in noise. It has no calibration on a sung vocal in a mix.
+  - A static stereo filter and frame gains in each band represent each version. A mid or side change that differs from frame to frame is in the filter as its mean.
+- Verification: The run record. Two renders with a linked gain only, at the target of Full, change the benefit by +0.06 dB or less.
+- Review condition: A loudspeaker model, a listening result, or a track where the widening lowers the benefit by 0.5 dB or more.
+- Work reference: TODO.md, "Engine".
+- Supersedes / superseded by: None. Answers the limits of D132 on the vocal level and on spatial release from masking.
+
+## D225: Continuation of a family at its time limit
+
+- Recorded: 2026-10-27.
+- Origin: TODO.md, "Fallback ladders in their own functions". With D214, a `master` that falls back through each ladder on a recording over 5.6 to 11.8 minutes chooses no candidate at the time limit, and the finalizer withdraws it.
+- Basis: Measurement; no listening.
+- Status: Accepted. Implemented in `selection::TrialRecord`, `distributed::Resume`, `distributed::render_family_continued`, the family handler of the Lambda (`continues`, `resume_key`) and the status of the control (`continuations`), as `selection.continuation.v1`. Not deployed.
+- Decision:
+  - A family with a deadline records the trials of each candidate ladder, by version, and by the empty key for the ladder of the reference.
+  - When a candidate cannot start, the family gives a resume record (`mastering.family-resume.1`): for each ladder, the failed trials before the first trial that passed or met the time limit. When the family completed its reference before the time limit, the record also holds the reference record of the family (`mastering.reference-render.1`, D196).
+  - The Lambda family writes the record to `families/{id}.resume-{n}.json` and invokes the family function again with its key. It writes no family record and uploads no version. The continuation writes the family record, so the finalizer waits for the family as before.
+  - The continuation renders the family again. It takes the reference of the record in place of its reference render. A ladder takes a failed trial of the record in place of the render of its candidate when the trial has the index and the reason of the candidate. A glue candidate is replayed only with the candidate after it, whose render the glue candidate keeps. A ladder that does not run in the continuation keeps the trials of the record before it.
+  - A family continues while it has made fewer than 8 invocations and the invocation added trials or the reference to the record before it (`distributed::Resume::advances`). Otherwise it writes its family record with the versions that chose no candidate, as in D214.
+  - The status of a job that renders allows 900 s more for each invocation of the longest chain of a family, and renews the seat of the job.
+- Reason: A ladder that starts at a candidate on a new renderer gives the trials of the whole ladder from that candidate, in the first pass and in the pass with the instant attack. A candidate render depends on the reference and the candidate, and the families keep no probe cache. A `master` that falls back through each ladder on 30 minutes takes up to 4,830 s of Lambda time, and an invocation has 780 s for its renders.
+- Alternatives and tradeoffs:
+  - Each fallback ladder in its own family of the plan: the finalizer chooses the first candidate that passes across the families, and each family renders its reference.
+  - A record of the chosen render of each version: the continuation renders the chosen candidate of a base version again, so that a Bold or Denser version builds on it, at the time of one render.
+- Evidence: `a_ladder_resumed_at_a_candidate_gives_the_trials_of_the_whole_ladder` and `a_family_continued_after_its_time_limit_gives_the_family_without_one` (`tests/set.rs`). In the second test, the `master` family of a plan whose candidates each fail took 5 invocations with a third of the time of the family each, and gave the result of the family without a time limit, the reference ladder and the Bold version included. On track-d (2.5 minutes) with two threads, the `master` family of a plan whose candidates each fail gave the family record of the run without a time limit (70.9 s) in 2 invocations of 60 s and 3 invocations of 40 s. With the reference in the resume record, 3 invocations of 40 s took 91.1 s against 115.1 s, and 4 invocations of 30 s took 92.1 s.
+- Rule and code references: `selection.continuation.v1`; `selection::TrialRecord`; `distributed::Resume`; `distributed::render_family_continued`; a private record, `a_family_continues_while_it_adds_trials_within_its_invocations`; a private record, `the_longest_chain_of_a_family_gives_the_continuations`.
+- Limits and counterexamples: The source analysis, the render of the reference with the instant attack and the render of each chosen base candidate repeat in each continuation. A trial record reads its numbers from JSON, where a NaN is `null`. The family reads each resume record back before it writes it; a record that does not read back ends the family as in D214. The reserve of 120 s for the uploads has no measurement from Lambda.
+- Verification: `cargo test --release` passes. The tests of the Lambda crate pass.
+- Review condition: A cloud run of a recording of 10 minutes or more whose `master` falls back through each ladder.
+- Work reference: TODO.md, "Fallback ladders in their own functions".
+- Supersedes / superseded by: None. Extends D214: a version that stops at the time limit continues, within 8 invocations.
+
+## D226: Scratch for the first render of the sub lift
+
+- Recorded: 2026-10-27.
+- Origin: Measurement. With two threads, the `master` family of a 29.9-minute recording peaks at 2,854.8 MB of live bytes, 95% of the 3,008 MB of the family Lambda.
+- Basis: Measurement; no listening.
+- Status: Accepted. Implemented in `set::base_ladder`, `treatment_render::Renderer::spill` and `treatment_render::Spilled`.
+- Decision: While the sub lift renders its candidate, the audio of the first chosen render waits in a scratch file of the renderer. The ladder reads the audio back only when the lifted candidate fails. When the lifted candidate passes, the ladder deletes the file.
+- Reason: The sub lift reads only the drive, the restoring gains and the prefix loudness of the first render (`selection::one`). Its audio stayed in memory as a fourth buffer of the source length. At 29.9 minutes, four buffers were live in the prepare of the lifted candidate (2,782.8 MB) and in its own-point check (2,792.0 MB). Each other ladder of the family peaks at three buffers.
+- Alternatives and tradeoffs: Keep only the three values, and render the first candidate again when the lift fails: one more full render. A stream of the prefix in the own-point check: it lowers the other points of three buffers, and it is the next step of a private record.
+- Evidence: The 29.9-minute recording, `master` family, two threads, delivered files kept as the Lambda keeps them. Live bytes peak at 2,165.2 MB against 2,854.8 MB, and the macOS footprint at 2,634 MB against 3,319 MB. The largest live total at the allocation of a buffer is 2,095.6 MB: three buffers. The temporary storage peaks at 7,926 MiB against 7,748 MiB of 10,240 MiB. The render takes 217.4 s against 217.2 s, and 301.9 s of user CPU time against 301.8 s. With the build profile of the Lambda (D227), the `master` family of track-d with a plan whose ladders all fall back takes 1,582.5 to 1,582.8 billion instructions against 1,581.8 to 1,584.4 billion. The WAV, the float32 render and the family record are identical, apart from the times. `a_failed_sub_lift_delivers_the_first_render_from_scratch` (`tests/set.rs`) checks the audio that the ladder reads back.
+- Rule and code references: `set::base_ladder`; `treatment_render::Renderer::spill`; the family timer.
+- Limits and counterexamples: The family writes 690 MB to its temporary storage for each sub lift at 29.9 minutes, and reads it back when the lift fails. In the browser engine, the file comes from the scratch pool of the render host: 32 files for a set. A set of 3.9 minutes peaks in the stem analysis, so its peak of linear memory stays the same. The planner still peaks at 2,462.7 MB at 29.9 minutes.
+- Verification: `cargo test --release` passes.
+- Review condition: A Lambda report of a family near its memory or its temporary storage.
+- Work reference: TODO.md, "Master recordings over 30 minutes".
+- Supersedes / superseded by: None. Extends D145.
+
+## D227: Local measurements with the build profile of the cloud
+
+- Recorded: 2026-10-27.
+- Origin: Measurement. Two local builds of the `master` family of track-d gave 1,626 and 1,902 billion instructions for the same work and the same family record (D226).
+- Basis: Measurement.
+- Status: Accepted. Implemented in `Cargo.toml` (`profile.measure`).
+- Decision: A local measurement of speed or instructions uses binaries from `cargo build --profile measure`. The profile `measure` is the release profile with fat LTO and one codegen unit, as in the Lambda and WASM builds.
+- Reason: The release profile of the engine crate has 16 codegen units and no LTO. A change of a function outside the hot path moves the boundaries of the units, and with them the inlining of hot functions. In the two builds of D226, `Oversampler::peak_scan`, `Oversampler::peak_after` and `render_blocks::render_with_block_trace` were separate functions in one build and inlined in the other. With one codegen unit, the counts of the two builds agree within 0.2%.
+- Alternatives and tradeoffs: Fat LTO and one codegen unit in the release profile: each release build of the test binaries then links with fat LTO.
+- Evidence: The `master` family of track-d, with a plan whose ladders all fall back, on two threads. Each build gives the same family record and the same work: 19 prepared prefixes and 36 probes.
+
+  | Profile | Before D226 (billion instructions) | With D226 (billion instructions) |
+  | --- | ---: | --- |
+  | Release, 16 codegen units | 1,625.6 to 1,626.7 | 1,901.9 to 1,902.0 |
+  | One codegen unit | 1,577.7 | 1,580.5 |
+  | Fat LTO, one codegen unit | 1,581.8 to 1,584.4 | 1,582.5 to 1,582.8 |
+
+- Rule and code references: `Cargo.toml`, `profile.measure`.
+- Limits and counterexamples: The native instruction and time figures before this decision come from the release profile with 16 codegen units. They include the decimator update of D150 and the update of D204 on the start of the second render, both of 2026-10-26. The browser figure of D150 comes from a build with one codegen unit. A clean build with the profile takes 2 to 4 minutes on the M1.
+- Verification: Each build gives the same family record, apart from the times.
+- Review condition: A change of the build profile of the Lambda or the WASM module.
+- Work reference: TODO.md, "Render speed and memory".
+- Supersedes / superseded by: None.
+
+### Updates
+
+- 2026-10-27: Measurements with the profile replace the native figures of the decimator change (D150) and of the start of the second render (D204). The decimator change takes 1.5% fewer instructions and 4.7% less user CPU time on the native set of track-d, against 15.9% and 11.5% with 16 codegen units. The start of the second render takes 8.6% fewer instructions on track-d and 2.0% fewer on track-a, against 8.1% and 2.6%.
+
+## D228: Side gain and own-point check without full copies
+
+- Recorded: 2026-10-27.
+- Origin: Measurement. After D226, the `master` family of the 29.9-minute file still holds three buffers of the source length in the side gain of each prepare and in the own-point check.
+- Basis: Measurement; no listening.
+- Status: Accepted. Implemented in `fir::filter_each_many`, `width::SideGain::apply_each`, `treatment_render::apply_mono_safe`, `audibility::Prefix`, `audibility::peak_control_ratios_of`, `treatment_render::Renderer::prepared_frames` and the own-point check of `selection`.
+- Decision:
+  - The side gain runs its side filter, its decorrelation filter and its mid filter in one pass over the frames. The pass writes each frame after the last read of that frame, so the gain holds no copy of the side or the mid. A mono-safe cut blends each frame in the same pass and holds no copy of the audio.
+  - The own-point check reads the prefix of the candidate from the scratch storage of the renderer, in spans of 8,192 masking hops. The masking frames of each span equal those of the whole prefix. The probes of the check run on the 4x prefix of the renderer in place of a new upsample.
+  - While the probes of the own-point check render, the render of the candidate waits in a scratch file (`Renderer::spill`, D226). A render at the point replaces it; otherwise the check reads it back.
+- Reason: The side gain held an f64 side of the source length, and an f32 mid with a mid gain. A mono-safe cut also held a copy of the audio. The own-point check read the whole prefix into memory beside the source and the render of the candidate, and each probe of its point search added one more render.
+- Alternatives and tradeoffs: A prefix shaped in spans: it also removes the shaped copy of the prepare, and it needs the de-esser and compressor values of the full file. A side in f32: the delivered samples change in the last bit.
+- Evidence: The 29.9-minute recording, `master` family, two threads, delivered files kept as the Lambda keeps them, with the build profile of D227. Live bytes peak at 1,637.0 MB against 2,165.2 MB with D226. The largest live total at the allocation of a buffer is 1,400 MB, two buffers, against 2,095.6 MB. Against `e372445`, the macOS footprint peaks at 2,090 MB against 2,614 MB, and the temporary storage at 7,927 MiB against 7,944 MiB. The render takes 208.2 s against 213.9 s, and 4,222.3 billion instructions against 4,197.9 billion (+0.6%). The WAV, the float32 render and the family record are identical, apart from the times. On the eight confirmation mixes, the 40 WAVs and the 48 reports are identical to those of `e372445`, apart from the times and the hash of the renderer. The total instructions of the eight mixes fall from 17,196.2 billion to 17,105.1 billion (−0.5%).
+- Rule and code references: `fir::filter_each_many`; `width::SideGain::apply_each`; `audibility::peak_control_ratios_of`; `treatment_render::Renderer::prepared_frames`; `one_pass_of_several_kernels_in_place_matches_each_filter` (`src/fir.rs`); `the_ratios_of_a_stored_prefix_equal_those_of_the_whole_prefix` (`src/audibility.rs`).
+- Limits and counterexamples: The live peak is 237 MB above two buffers. The record of allocations lists only allocations of 200 MiB or more, so it does not give the source of these 237 MB. The prepare of each prefix holds the source and the shaped copy, and the drive search holds the source and its best render. When the own-point check searches a point at 29.9 minutes, it writes 690 MB to the temporary storage. The planner still peaks at 2,462.7 MB at 29.9 minutes.
+- Verification: `cargo test --release` passes. The eight confirmation mixes give identical WAVs and reports.
+- Review condition: A Lambda report of a family near its memory, or a shaped prefix in spans.
+- Work reference: TODO.md, "Master recordings over 30 minutes".
+- Supersedes / superseded by: None. Extends D145 and D226.
+
+### Updates
+
+- 2026-10-27: In the planner, the same peak control holds a segment buffer of 93.8 MB for each of the two threads over the mix and the render (`render_blocks::render_in_segments`, D229). A second run of the family with D229 peaks at 1,644.2 MB of live bytes with the same files. `scratch::Pcm` now reads a span into a buffer of the exact span length; before, the second span of the own-point check doubled its buffer to 134.2 MB.
+
+## D229: Mix and prefix of the plan in scratch
+
+- Recorded: 2026-10-27.
+- Origin: Measurement. After D228, the planner of the 29.9-minute file peaks at 2,462.7 MB of live bytes, 82% of the 3,008 MB of its Lambda, with three buffers of the source length at four points.
+- Basis: Measurement; no listening.
+- Status: Accepted. Implemented in `stem_evidence::analyze_set`, `stem_evidence::finish_evidence`, `foundation::propose`, `refinement::analyze_matched`, `deesser::key_with_frames`, `set::prepare_with`, `set::peak_attack`, `audibility::render_at` and `scratch::Pcm::temporary_of`.
+- Decision:
+  - `stem_evidence::analyze_set` takes the mix of its caller. It measures the fingerprint of the mix, the mid band powers of the de-esser key and the spectral flatness of the low-mid key first. Then the mix waits in a scratch file while the stems load. The sums of the stem evidence, the windows of the foundation and the passages of the refinement read the mix from the file in blocks. The caller gets the mix back when the analysis returns.
+  - In `set::prepare`, a compressed prefix waits in a scratch file after its 4x upsample and the onset analysis of the attack choice. The audibility point, the base render and the attack choice read it in spans (`audibility::Prefix::Stored`, D228).
+  - `scratch::Pcm` reads a span into a buffer of the exact span length.
+- Reason: The stem analysis held the mix beside the stem sum and the vocal, and `set::prepare` held the mix, the compressed prefix and one render. After the first measures, the stem analysis reads the mix only in sequence, and `set::prepare` reads the prefix only through the masking ratios of a render and the onsets.
+- Alternatives and tradeoffs: The stem analysis in chunks: it also removes the stem sum and the vocal, and it needs chunk functions and a coordinator. The low-mid key took the flatness of the mix only when the stems are usable and have a lead role; the planner now measures it for each set.
+- Evidence: The 29.9-minute recording with its stems at 44.1 kHz, two threads, the build profile of D227. The planner peaks at 1,791.4 MB of live bytes against 2,463.5 MB, in the vocal stage of the stem analysis. `set::prepare` peaks at 1,634.3 MB against 2,324.0 MB. In ABBA order, the macOS footprint peaks at 2,080 and 2,086 MB against 2,619 and 2,606 MB. The planner takes 182.5 and 183.0 s against 180.7 and 177.9 s, and 3,852.1 and 3,852.3 billion instructions against 3,831.0 and 3,827.9 billion (+0.6%). The four plans are identical. On the eight confirmation mixes, the 48 reports are identical to those of `e0e742d`, with the hash of each WAV, apart from the times and the hash of the renderer. The instructions of the eight sets rise from 17,105.1 billion to 17,140.1 billion (+0.2%). In Node, the browser set of track-e (3.9 minutes) peaks at 251.2 MiB of live bytes against 303.8 MiB, and at 334.5 MiB of linear memory against 353.4 MiB. Its four WAVs are identical.
+- Rule and code references: `stem_evidence::analyze_set`; `audibility::Prefix`; `set::prepare_with`; `a_held_mix_gives_the_evidence_of_the_whole_mix_and_returns_to_its_caller` (`src/stem_evidence.rs`); `the_ratios_of_a_stored_prefix_equal_those_of_the_whole_prefix` (`src/audibility.rs`).
+- Limits and counterexamples: The stem analysis still holds the stem sum and the vocal, and the auditory frames of the vocal and of the accompaniment. `set::prepare` holds the mix, one render and a segment buffer of 93.8 MB for each thread of peak control. The planner writes the mix and the compressed prefix to its temporary storage, 690 MB each at 29.9 minutes, and reads the mix up to four times. The browser set of track-e now peaks in its candidate renders. The temporary storage of the family is the nearest limit at 29.9 minutes: 7,927 MiB of 10,240 MiB.
+- Verification: `cargo test --release` passes. The plan of the 29.9-minute file and the eight confirmation mixes are identical.
+- Review condition: A Lambda report of a planner near its memory, or a stem analysis in chunks.
+- Work reference: TODO.md, "Master recordings over 30 minutes".
+- Supersedes / superseded by: None. Extends D145 and D228.
+
+## D230: One prepared prefix in the renderer
+
+- Recorded: 2026-10-27.
+- Origin: Measurement. After D229, the temporary storage of the `master` family of the 29.9-minute file is the nearest limit of its Lambda: 7,894.8 MiB of 10,240 MiB at its peak. The two prefix slots of the renderer hold 6,579.0 MiB of it: a 4x prefix and a base-rate prefix in each slot.
+- Basis: Measurement; no listening.
+- Status: Accepted. Implemented in `treatment_render::PREFIX_SLOTS`.
+- Decision: The renderer keeps one prepared prefix. A candidate with another prefix replaces it. The renderer deletes the scratch files of the old prefix before it prepares the new one.
+- Reason: The renderer kept two prefixes so that glue and plain candidates could alternate without a new prepare. In 10 runs (the eight confirmation mixes, the 29.9-minute family and the family of track-d that falls back through each ladder), one reused prefix came from the older slot. Each prefix holds five buffers of the source length in scratch storage.
+- Alternatives and tradeoffs: Two slots up to a duration and one slot above it: the browser engine keeps the larger storage, and the work of the targets differs. A prefix store with a byte budget: more code for one prepare in 10 runs.
+- Evidence: The 29.9-minute family: the temporary storage peaks at 4,523.4 MiB against 7,894.8 MiB (the open scratch files, `lsof` every 1 s), with 4 prepares in each build and the same WAV, float32 render and family record. The family of track-d that falls back: 19 prepares and 8 reuses in each build, the same family record, and 1,593.2 against 1,592.9 billion instructions. The eight confirmation mixes: the WAVs and the reports are identical, apart from the work counters of track-g, which prepares 18 prefixes against 17 and takes 0.73% more instructions. The eight sets take 17,135.8 against 17,140.1 billion instructions (−0.03%). In Node, the browser set of track-e peaks at 597.1 MiB of scratch storage against 938.2 MiB, with the same four WAVs.
+- Rule and code references: `treatment_render::PREFIX_SLOTS`; `treatment_render::Renderer::prepare`.
+- Limits and counterexamples: A ladder that returns to an older prefix prepares it again: one more prepare on track-g. At 29.9 minutes, a prepare writes 3,290 MiB to the temporary storage.
+- Verification: `cargo test --release` passes.
+- Review condition: A set or a family with more prepares than with two slots in a measurement of time, or a Lambda report near its time limit.
+- Work reference: TODO.md, "Master recordings over 30 minutes".
+- Supersedes / superseded by: None. Changes the two prefix slots of the set renderer. Extends D145.
+
+## D231: Accompaniment of the stem analysis in scratch
+
+- Recorded: 2026-10-27.
+- Origin: Measurement. After D229, the planner of the 29.9-minute file peaks at 1,791.4 MB of live bytes in the vocal stage of the stem analysis. The stage holds the stem sum and the vocal, 690 MB each, and the auditory frames of the vocal and of the accompaniment. Each frame vector grows by doubling to 134.5 MB.
+- Basis: Measurement; no listening.
+- Status: Accepted. Implemented in `stem_evidence::analyze_stems`, `auditory::measure_stem`, `auditory::propose_from_measured` and `stft::stereo_frames_of`.
+- Decision:
+  - When the set analysis proposes the automatic focus, the stem analysis measures the auditory frames of the accompaniment at the end of the other stage. The accompaniment is the sum of the drum, bass and other stems. Then the sum waits in a scratch file, and its buffer is freed. The vocal gives its auditory frames, and the focus proposals use the two sets of frames. Then the sum returns to a buffer with the room of the render rate, and the vocal adds to it.
+  - `stft::stereo_frames_of` collects its frames in a buffer of the exact frame count.
+- Reason: The focus proposals read the accompaniment only through its auditory frames. A collected flatten grows its buffer by doubling, to up to twice the frames.
+- Alternatives and tradeoffs: The stem analysis in chunks: it also removes the stem sum and the vocal, and it needs chunk functions and a coordinator. The exact frame buffer without the stored sum: an estimate of 1,735 MB for the vocal stage, with the stem sum, the vocal and the two frame vectors.
+- Evidence: The 29.9-minute recording with its stems at 44.1 kHz, two threads, the build profile of D227, against `61d1e59`. The vocal stage peaks at 1,557.0 MB of live bytes against 1,786.1 MB. The planner peaks at 1,628.0 MB in `set::prepare`, against 1,786.1 MB in the vocal stage. The sum holds 604.4 MiB of the temporary storage for 8 s, and the storage peaks at 3,289.5 MiB in `set::prepare` with each build. In ABBA order, the planner takes 182.4 and 180.4 s against 180.1 and 179.3 s, and 3,854.6 and 3,853.6 billion instructions against 3,851.9 and 3,851.6 billion (+0.06%). The four plans are identical. On the eight confirmation mixes, the 48 reports are identical to those of `61d1e59`, with the hash of each WAV, apart from the times and the hash of the renderer. The eight sets take 17,129.9 against 17,135.8 billion instructions (−0.03%). In Node, the stem analysis of the browser set of track-e peaks at 194.0 MiB of live bytes against 228.7 MiB, and the linear memory peaks at 274.1 MiB against 334.5 MiB. The four WAVs are identical. The set peaks at 250.6 MiB of live bytes with each build, in its candidate renders.
+- Rule and code references: `stem_evidence::analyze_stems`; `auditory::propose_from_measured`; `the_automatic_focus_and_the_reconstruction_use_the_sum_from_scratch` (`src/stem_evidence.rs`).
+- Limits and counterexamples: The macOS footprint of the planner rises to 2,266 and 2,270 MB against 2,113 and 2,051 MB. At 10 s into the audibility stage, in the same code, the planner holds 462.6 MB of freed large regions that the macOS allocator keeps mapped, against 209.4 MB. The Lambdas use glibc, which serves each allocation of 32 MiB or more from its own mapping and unmaps it when it is freed (`mallopt(3)`, `M_MMAP_THRESHOLD`). A Lambda report of the planner gives its memory; the change is not deployed. After the focus proposals, the stem analysis holds the stem sum and the vocal again. The planner writes the sum to its temporary storage and reads it once.
+- Verification: `cargo test --release` passes. The plan of the 29.9-minute file, the eight confirmation mixes and the browser set of track-e are identical.
+- Review condition: A Lambda report of a planner near its memory, or a stem analysis in chunks.
+- Work reference: TODO.md, "Master recordings over 30 minutes".
+- Supersedes / superseded by: None. Extends D145 and D229.
+
+## D232: Source of the renderer in scratch
+
+- Recorded: 2026-10-27.
+- Origin: Measurement. After D228, the `master` family of the 29.9-minute file peaks at 1,633.7 MB of live bytes. At the allocation of each render of the drive searches and the ladders, 1,396.7 MB is live: the source and one render. After the source analysis, the renderer reads the source in the prepare of each prefix, which copies it, and in the gain span of each render.
+- Basis: Measurement; no listening.
+- Status: Accepted. Implemented in `pipeline::SourceAnalysis::window_levels_db`, `selection::measure`, `treatment_render::RenderSource` and `treatment_render::Renderer::of_source`.
+- Decision:
+  - The source analysis keeps the 3 s window levels of the source (`window_levels_db`). The measure of each render takes its gain span against these levels (`4b77159`).
+  - A caller can give the renderer an owned source (`RenderSource::Owned`). The renderer writes the source to a scratch file and frees its buffer. The prepare of each prefix reads the file into the shaped copy.
+  - The family Lambda, the native `master set` and the browser engine give an owned source. When the versions of a native set render beside each other (300 s or less, `PARALLEL_VERSIONS_SECONDS`), the source stays in memory, because each thread reads it.
+- Reason: After the source analysis, the family holds the source for its whole render, and only the prepare of each prefix reads its frames.
+- Alternatives and tradeoffs: The prefix chain in spans (order of work): it also removes the shaped copy, but the drive search still holds its best render. The source in scratch adds one file of the source length to the temporary storage, and each prepare reads the file.
+- Evidence:
+  - The window levels (`4b77159`) against `dbeed4e`: the family of track-d that falls back takes 1,591.4 and 1,591.5 billion instructions against 1,593.5 and 1,593.3 billion, and the 29.9-minute family 4,235.1 against 4,241.4 billion. The family records, the WAVs and the 48 reports of the eight confirmation mixes are identical.
+  - The owned source against `4b77159`, with two threads and the build profile of D227: the 29.9-minute family peaks at 943.9 MB of live bytes against 1,633.7 MB. At each buffer allocation, at most 706.8 MB is live against 1,396.7 MB. The open scratch files peak at 5,263.2 MiB against 4,605.3 MiB. In ABBA order, the family takes 197.5 and 188.2 s against 189.7 and 190.3 s, and 4,232.3 and 4,232.6 billion instructions against 4,235.5 and 4,236.6 billion (−0.08%). The macOS footprint peaks at 1,229 and 1,325 MB against 2,017 and 2,006 MB. The WAV, the float32 render and the family record are identical.
+  - The family of track-d that falls back prepares 19 prefixes, so it reads the source file 19 times. It takes 71.3 and 71.4 s against 70.4 and 71.0 s, and 1,590.0 and 1,589.7 billion instructions against 1,591.4 and 1,591.5 billion, with the same family record.
+  - The eight confirmation mixes: the 48 reports are identical, apart from the times and the hash of the renderer. The eight sets take 17,116.2 against 17,126.9 billion instructions (−0.06%).
+  - In Node, the version stages of the browser set of track-e peak at 163.0 to 165.4 MiB of live bytes against 248.2 to 250.6 MiB. The set peaks at 244.8 MiB in the level stage of `set::prepare` against 250.6 MiB, and the linear memory at 274.1 MiB with each build. The scratch files peak at 682.4 MiB against 597.1 MiB. The four WAVs are identical.
+- Rule and code references: `treatment_render::Renderer::of_source`; `an_owned_source_gives_the_set_of_a_borrowed_source` (`tests/set.rs`); the continued families of `a_family_continued_after_its_time_limit_gives_the_family_without_one` (`tests/set.rs`) take an owned source.
+- Limits and counterexamples: The source file holds 657.9 MiB of the temporary storage of the 29.9-minute family for its whole render. The family peak holds 237.1 MB more than one buffer, in allocations of less than 200 MiB: the segment buffers of peak control take 93.8 MB for each thread. One run of the 29.9-minute family took 197.5 s, with 290.8 s of user CPU time against 273.7 to 274.9 s in the other three runs. The planner and the finalizer hold two buffers at their peaks.
+- Verification: `cargo test --release` passes. The 29.9-minute family, the family of track-d, the eight confirmation mixes and the browser set of track-e give identical outputs.
+- Review condition: A Lambda report of a family near its memory or its temporary storage, or the prefix chain in spans.
+- Work reference: TODO.md, "Master recordings over 30 minutes".
+- Supersedes / superseded by: None. Extends D145 and D228.
+
+## D233: Source of the finalizer freed after its measures
+
+- Recorded: 2026-10-27.
+- Origin: Measurement. With the four families of the 29.9-minute file, the finalizer peaks at 1,468.8 MB of live bytes: the source and the float32 render of one version. The finalizer reads the source only for its fingerprint, its metrics and its stereo image.
+- Basis: Measurement; no listening.
+- Status: Accepted. Implemented in `distributed::finalize_set`.
+- Decision: `distributed::finalize_set` takes the source by value. After the fingerprint check and `pipeline::measure_mix`, it frees the source. The checks of each version compare its frames with the frame count of the source.
+- Reason: The measures of each version read its own render and the WAVs of the accepted versions. They read no source frames.
+- Alternatives and tradeoffs: The Lambda measures the source before it calls the finalizer, and gives the measures in place of the frames: a second public type for the same facts.
+- Evidence: The four families of the 29.9-minute file with D232, rendered with two threads. The finalizer tools use the release profile of the Lambda crate. The finalizer peaks at 778.8 MB of live bytes against 1,468.8 MB, and its macOS footprint at 840 and 832 MB against 1,523 and 1,531 MB. In ABBA order, it takes 28.0 and 27.9 s against 28.3 and 28.4 s. The six manifests are identical.
+- Rule and code references: `distributed::finalize_set`; the finalizer tests of `tests/set.rs`.
+- Limits and counterexamples: The peak holds one buffer of 689.9 MB and 88.9 MB of other allocations. The planner holds two buffers at its peak.
+- Verification: `cargo test --release` passes, and `cargo clippy --all-targets` passes for the engine and for the Lambda crate.
+- Review condition: A Lambda report of the finalizer near its memory.
+- Work reference: TODO.md, "Master recordings over 30 minutes".
+- Supersedes / superseded by: None. Extends D145.
+
+## D234: Planner at one buffer
+
+- Recorded: 2026-10-27.
+- Origin: Measurement. After D233, the planner of the 29.9-minute file peaks at 1,628.0 MB of live bytes in `set::prepare`, with the mix and one render. The stem stages hold the stem sum and one stem, and the focus stage holds the vocal and the accompaniment.
+- Basis: Measurement; no listening.
+- Status: Accepted. Implemented in `scratch::Pcm::add`, `stem_evidence::analyze_stems`, `refinement::analyze_matched`, `refinement::band_powers` and `set::prepare_holding`.
+- Decision:
+  - The stem analysis keeps the stem sum in a scratch file. The first stem writes the file, and each other stem adds to it in blocks of 65,536 frames (`scratch::Pcm::add`). With the automatic focus, the other stage reads the sum back for the auditory frames of the accompaniment. After the vocal stage, the sum returns to a buffer with the room of the render rate.
+  - The vocal at the render rate waits in a scratch file for the refinement. The refinement reads the vocal in spans for the accompaniment and for the passages. The focus of all bells takes 4 rounds: the bells at 0 dB, the probes, the bells at their strength and the delivered bells. Each round reads the vocal once, and each bell keeps the state of its filters from passage to passage.
+  - `set::prepare_holding` takes the mix of a caller that owns it. When the source is not limited, the mix waits in a scratch file from the prefix copy to the end of the attack stage, and then returns to the buffer of the caller. A prefix that is the mix reads the scratch file. The planner Lambda, the plan of the native CLI, the plan of the browser engine and a renderer with an owned source use it.
+- Reason: The stem stages read the sum only in the other stage and at the end. The refinement reads the vocal one passage at a time. From the prefix copy to the end of the attack stage, `set::prepare` reads the mix only through its prefix.
+- Alternatives and tradeoffs: The stem analysis and `set::prepare` in chunks (order of work): they also remove the last buffer, and they need chunk functions and a coordinator. One read of the vocal for each bell in each round: on a 30-minute file with 6 bells, about 72 reads of 690 MB.
+- Evidence:
+  - The 29.9-minute recording with its stems at 44.1 kHz, two threads, the build profile of D227, against `27ea72a`. The planner peaks at 1,054.1 MB of live bytes in the vocal stage against 1,628.0 MB in `set::prepare`, and `set::prepare` peaks at 938.2 MB. The stem stages peak at 792.1 to 1,054.1 MB against 1,482.1 to 1,557.0 MB. The open scratch files peak at 3,947.4 MiB against 3,289.5 MiB. In ABBA order, the planner takes 179.2 and 183.6 s against 180.2 and 180.7 s, and 3,855.6 and 3,857.8 billion instructions against 3,854.7 and 3,854.9 billion (+0.06%). The macOS footprint peaks at 1,683 and 1,661 MB against 2,267 and 2,273 MB. The four plans are identical. The file gives no focus bells, and these measures use the build before the last form of the frame loop of the focus.
+  - The plan of track-e, with two focus bells: in ABBA order, 29.4 and 28.8 s against 28.0 and 28.0 s, and 611.4 billion instructions against 607.1 billion (+0.7%). The focus stage takes 2.00 s against 1.58 s. The four plans are identical.
+  - The eight confirmation mixes against the sets of `34be96d` (D232); D233 changes only the finalizer. The 48 reports are identical, apart from the times and the hash of the renderer. The eight sets take 17,133.4 against 17,116.2 billion instructions (+0.10%).
+  - In Node, the browser set of track-e peaks at 165.4 MiB of live bytes in its version stages against 244.8 MiB in `set::prepare`. `set::prepare` peaks at 159.5 MiB, and the stem stages at 98.4 to 130.9 MiB against 183.7 to 196.1 MiB. The linear memory peaks at 274.1 MiB with each build: with D234, it grows by 85.3 MiB in the other stage and in the vocal stage. The set takes 162.1 against 161.6 s of CPU time. The four WAVs are identical.
+- Rule and code references: `scratch::Pcm::add`; `refinement::passage_powers`; `set::prepare_holding`; `an_added_stem_gives_the_sum_in_memory` (`src/scratch.rs`); `each_bell_of_a_round_gives_the_focus_of_a_round_of_its_own` (`src/refinement.rs`); `a_held_mix_gives_the_plan_of_the_whole_mix_and_returns_to_its_caller` (`src/set.rs`).
+- Limits and counterexamples:
+  - The frame loop of the focus pairs the mid and side bandpass filters in one vector operation in the code before D234, with 86 instructions for each frame. The loop of `refinement::passage_powers` takes 101 scalar instructions for each frame. With the filters of each bell in a vector, the loop took 150 instructions and 42 memory accesses for each frame.
+  - The scratch files of the planner hold 657.9 MiB more, for the mix in `set::prepare`.
+  - The planner Lambda decodes the upload into a buffer that grows as it decodes (`decode_encoding`). A private record reads a WAV, so the measurement does not include that decode.
+  - With an aligned mix, the aligned copy stays in memory.
+- Verification: `cargo test --release` passes, and `cargo clippy --all-targets` passes for the engine, the Lambda crate and the WASM crate. The plan of the 29.9-minute file, the plan of track-e, the eight confirmation mixes and the browser set of track-e are identical.
+- Review condition: A Lambda report of a planner near its memory or its temporary storage, or the stem analysis in chunks.
+- Work reference: TODO.md, "Master recordings over 30 minutes".
+- Supersedes / superseded by: None. Extends D145, D229 and D231.
+
+## D235: One stem buffer and short spans of the audibility ratios
+
+- Recorded: 2026-10-27.
+- Origin: Measurement. After D234, the browser set of track-e reaches 274.1 MiB of linear memory in the vocal stage, with at most 130.9 MiB of live bytes. The other stem and the vocal each grow the linear memory by one stem of 85.3 MiB.
+- Basis: Measurement; no listening.
+- Status: Accepted. Implemented in `stem_evidence::analyze_stems`, `audio_io::read_source_into`, `audio_io::read_stream_into`, `Input::read_into` of the WASM crate, `source::decode_stem` of the Lambda crate and `audibility::peak_control_ratios_of`.
+- Decision:
+  - The loader of each stem reads into an empty buffer that the stem analysis gives. The first stem gets a buffer with room for the frames of the mix at the render rate and one more. Each other stem gets the buffer of the stem before. The sum of the other stage and the sum at the end of the stem analysis read into the same buffer.
+  - `audibility::peak_control_ratios_of` reads a prefix in scratch storage in spans of 1,024 hops, 1.05 million frames, against 8,192 hops before.
+- Reason: The linear memory of a module never shrinks. In dlmalloc, a small request can take part of a freed stem buffer, and the next stem of the same size then grows the linear memory. Each read of a span of 8,192 hops holds 67 MB.
+- Alternatives and tradeoffs: A pool of stem buffers in the WASM crate: the stem analysis frees each stem before it loads the next, so a pool needs the same change of the loader. Spans of 256 hops: four times the reads of 1,024 hops, for 6.3 MB less in each read.
+- Evidence:
+  - The browser set of track-e in Node: the linear memory peaks at 154.6 MiB against 274.1 MiB, and the live bytes at 130.9 MiB in the vocal stage against 165.4 MiB in a candidate stage. With the one stem buffer alone, the linear memory peaks at 196.6 MiB: the audibility stage grows it by 64.1 MiB for one span. The set takes 162.2 s of CPU time against 162.1 s. The four WAVs are identical.
+  - The native engine: the plans of the 29.9-minute file and of track-e, the `master` family of the 29.9-minute file, the fallback family of track-d and the 48 reports of the eight confirmation mixes are identical. The planner peaks at 1,054.1 MB of live bytes and the family at 943.9 MB with each build. The eight sets take 17,133.9 against 17,133.4 billion instructions (+0.003%), and the fallback family of track-d 1,590.5 and 1,590.4 against 1,590.5 and 1,590.3 billion in ABBA order.
+- Rule and code references: `each_stem_reads_into_the_buffer_of_the_stem_before_it` (`src/stem_evidence.rs`); `the_ratios_of_a_stored_prefix_equal_those_of_the_whole_prefix` (`src/audibility.rs`).
+- Limits and counterexamples: In the other stage, the sum reads into the stem buffer, which has the room of the render rate. The other stage of the native plan of the 29.9-minute file peaks at 960.8 MB of live bytes against 904.7 MB, under the 1,054.1 MB of the vocal stage. With D235, the first candidate of the browser set grows the linear memory by 22.1 MiB, with 112.0 MiB live.
+- Verification: `cargo test --release` passes for the engine and the Lambda crate, and `cargo clippy --all-targets` passes for the engine, the Lambda crate and the WASM crate.
+- Review condition: A browser set that grows its linear memory by more than its live bytes, or a Lambda report of a planner near its memory.
+- Work reference: TODO.md, "Browser memory".
+- Supersedes / superseded by: The stem buffer is superseded by D245: each stem waits in a scratch file. Extends D145, D205 and D228.
+
+## D236: Cores of peak control in place
+
+- Recorded: 2026-10-27.
+- Origin: Measurement. With D235, the first candidate of the browser set of track-e grows the linear memory by 22.1 MiB, for one allocation of 23,072,768 bytes in `render_blocks::render_in_segments` with 112.0 MiB live.
+- Basis: Measurement; no listening.
+- Status: Accepted. Implemented in `render_blocks::render_in_segments` and `render_blocks::render_with_block_trace`.
+- Decision: Each segment of a segmented peak control decimates only the frames of its core, and writes them into their place in the output of the render. The render of a recording of one segment or less writes into an output of its frame count.
+- Reason: Each segment rendered into a buffer of its own: its core, 1 s before the core and 16,384 4x frames after it, 23.1 MB at 48 kHz. The render then copied the core into the output. The frames before and after the core set the state of the limiter and the decimator, and the render keeps none of their output.
+- Alternatives and tradeoffs: A buffer of the core for each segment, and a copy of it into the output: 23.0 MB for each thread, and the copy.
+- Evidence:
+  - The browser set of track-e in Node: the linear memory peaks at 132.6 MiB in the vocal stage against 154.6 MiB in the first candidate. The live bytes peak at 130.9 MiB with each build. The set takes 162.8 s of CPU time against 162.2 s. The four WAVs are identical.
+  - The native engine with two threads: the `master` family of the 29.9-minute file peaks at 897.0 MB of live bytes against 943.9 MB, and the audibility, level and attack stages of its plan at 891.2 MB against 938.2 MB. In ABBA order, the family takes 4,224.8 and 4,224.6 against 4,234.4 and 4,233.6 billion instructions (−0.23%), the fallback family of track-d 1,584.7 against 1,588.7 billion (−0.25%), and the plan of track-e 610.10 and 610.05 against 611.03 billion (−0.15%). The eight confirmation sets take 17,083.1 against 17,133.9 billion (−0.30%). The WAVs, the family records, the plans and the 48 reports are identical.
+- Rule and code references: `a_window_renders_as_its_copy` and `a_segmented_render_matches_the_whole_render` (`src/render_blocks.rs`).
+- Limits and counterexamples: With two threads, each thread reads a copy of its segment at 4x, 93.8 MB at 48 kHz. The family of the 29.9-minute file peaks 190.2 MB above the largest live bytes at a buffer allocation.
+- Verification: `cargo test --release` passes for the engine and the Lambda crate, and `cargo clippy --all-targets` passes for the engine, the Lambda crate and the WASM crate.
+- Review condition: A change of the segment length, the roll before a core or the tail after it.
+- Work reference: TODO.md, "Browser memory" and "Master recordings over 30 minutes".
+- Supersedes / superseded by: None. Extends D145 and D235.
+
+## D237: Segment reads through the input thread, and one block loop
+
+- Recorded: 2026-10-27.
+- Origin: Measurement. With D236 and two threads, the thread that holds the input of the segmented peak control reads a copy of each segment at 4x, 93.8 MB at 48 kHz, for each of the two threads. The `master` family of the 29.9-minute file peaks 190.2 MB above the largest live bytes at a buffer allocation.
+- Basis: Measurement; no listening.
+- Status: Accepted. Implemented in `render_blocks::render_in_segments`, `render_blocks::render_with_block_trace`, `scratch::Remote` and `scratch::serve`.
+- Decision:
+  - The threads of a segmented render read the frames of their segments through the thread that holds the input, one block of 65,536 4x frames at a time. After each read, a thread asks for its next block.
+  - `render_blocks::render_with_block_trace` takes its input as a trait object (`&mut dyn scratch::Frames`), so one compiled loop serves each kind of input.
+- Reason: `scratch::Scratch` has no `Send` bound, so the threads of a render cannot share the storage of its input. With a loop for each kind of input, the loop of the remote reader added 0.35% to the instructions of the plan of track-e, and the loops of D236 took 2.7% more instructions than the one loop. The code generation of a loop changes with the build (D227).
+- Alternatives and tradeoffs:
+  - A `Send` bound on `scratch::Scratch`, and a reader of the storage in each thread: a change of the storage of each host.
+  - Requests of 1,048,576 frames, or one request for each segment: the same instructions as requests of 65,536 frames, for 8.4 MB or 93.8 MB in each thread.
+  - Reads without the request of the next block: the family of the 29.9-minute file took 202.8 and 203.2 s against 196.4 and 197.2 s.
+- Evidence:
+  - The `master` family of the 29.9-minute file with two threads: 793.5 MB of live bytes against 897.0 MB, and a macOS footprint of 998 and 987 MB against 1,248 and 1,198 MB. In ABBA order, it takes 196.4 and 197.2 s against 203.0 and 205.2 s, and 4,104.3 and 4,104.6 billion instructions against 4,231.7 and 4,231.5 billion (−3.0%).
+  - The fallback family of track-d: 72.20 and 72.84 s against 73.01 and 73.43 s, and 1,533.0 and 1,532.9 billion instructions against 1,585.2 and 1,585.0 billion (−3.3%). The plan of track-e: 593.93 and 593.90 billion instructions against 610.14 and 610.13 billion (−2.7%). The eight confirmation sets: 16,542.7 against 17,083.1 billion instructions (−3.2%), and 648.8 against 654.2 s.
+  - The browser set of track-e with the one loop: 162.2 s of CPU time against 162.8 s, with the same linear memory, 132.6 MiB.
+  - The WAVs, the family records, the plans and the 48 reports are identical.
+- Rule and code references: `remote_reads_equal_the_stored_frames` (`src/scratch.rs`); `a_segmented_render_matches_the_whole_render` (`src/render_blocks.rs`).
+- Limits and counterexamples: The plan of track-e took 28.16 and 28.08 s against 27.93 and 27.94 s, with 2.6% fewer instructions. The family of the 29.9-minute file peaks in `audibility::peak_control_ratios_of`: the masking frames of the prefix of a candidate grow while the render of the candidate is live. The browser engine renders each segment on one thread and reads it in place (D236).
+- Verification: `cargo test --release` passes for the engine and the Lambda crate, and `cargo clippy --all-targets` passes for the engine, the Lambda crate and the WASM crate.
+- Review condition: A storage of scratch files that threads can share, or a change of the build profile (D227).
+- Work reference: TODO.md, "Master recordings over 30 minutes".
+- Supersedes / superseded by: None. Extends D145, D227 and D236.
+
+## D238: Frame ratios of the audibility check
+
+- Recorded: 2026-10-27.
+- Origin: Measurement. With D237, the `master` family of the 29.9-minute file peaks at 793.5 MB of live bytes in `audibility::peak_control_ratios_of`: the masking frames of the prefix of a candidate grow while the render of the candidate is live.
+- Basis: Measurement; no listening.
+- Status: Accepted. Implemented in `audibility::peak_control_ratios_of`, `audibility::nmr_of` and `masking::Thresholds`.
+- Decision: Each span of the audibility check gives the band power of the masker and the noise-to-mask ratio of each of its frames. The masking thresholds continue their forward masking from span to span. The ratios of the check come from these two values of each frame.
+- Reason: The ratios need the loudest frame, the mean of the ratios of the frames near it and one quantile. The masking frames of the masker and the noise take 416 bytes for each frame, and the two values take 16 bytes.
+- Alternatives and tradeoffs: The ratio of each frame only, with a second pass for the loudest frame: two reads of each span.
+- Evidence:
+  - The `master` family of the 29.9-minute file with two threads: 778.1 MB of live bytes against 793.5 MB. In ABBA order, it took 207.3 and 208.2 s against 231.5 and 205.6 s, and 4,130.8 and 4,133.7 billion instructions against 4,142.3 and 4,134.1 billion. A first series, in which another program used the processor, took 245.8 and 209.9 s against 198.2 and 197.2 s.
+  - The plan of the 29.9-minute file: the audibility stage peaks at 722.7 MB against 782.6 MB. The browser set of track-e: the audibility, level and attack stages hold 95.8 MiB of live bytes against 103.5 MiB, with the same linear memory, 132.6 MiB, and 161.6 s of CPU time against 162.2 s.
+  - The WAVs of the browser set, the family records, the plans and the 48 reports of the eight confirmation mixes are identical.
+- Rule and code references: `the_ratios_of_a_stored_prefix_equal_those_of_the_whole_prefix` (`src/audibility.rs`).
+- Limits and counterexamples: The family now peaks in `stereo::analyze` and `spectrum`, beside a candidate render (D240). The true-peak fit of the render reaches 742.0 MB at its allocation of 21.6 MB. The eight confirmation sets ran while another program used the processor: 926.1 s against 648.8 s, and 16,567.4 against 16,542.7 billion instructions (+0.15%).
+- Verification: `cargo test --release` passes for the engine and the Lambda crate, and `cargo clippy --all-targets` passes for the engine, the Lambda crate and the WASM crate.
+- Review condition: A change of the masking model (`masking::thresholds`) or of the statistics of the check.
+- Work reference: TODO.md, "Master recordings over 30 minutes".
+- Supersedes / superseded by: None. Extends D228 and D235.
+
+## D239: Windows of the true-peak scan
+
+- Recorded: 2026-10-27.
+- Origin: Measurement. In a profile of the fallback family of track-d at D238, `Oversampler::peak_scan` took 20% of the samples outside the waits of the threads.
+- Basis: Measurement; no listening.
+- Status: Accepted. Implemented in `Oversampler::each_interpolated_peak` and `dsp::dot_pairs_windows`.
+- Decision: The true-peak scans compute the 8 points of four frames natively on aarch64, and of two frames in the browser engine, in one pass over the taps of each point. The windows of the frames start 1 frame apart. Each point keeps the 16 lane sums of `dot_pairs` and their order.
+- Reason: The frames of a pass share each load of the taps. The largest absolute value of a set of points is the same in each order of the comparisons, so each frame gives the peak of `interpolated_peak`.
+- Alternatives and tradeoffs: Two points of two frames in one pass: 16 vectors of sums. An x86 host has 16 vector registers for WebAssembly SIMD (D150).
+- Evidence:
+  - The `master` family of the 29.9-minute file with two threads, in two ABBA series: 4,010.2 to 4,028.6 billion instructions against 4,125.7 to 4,150.2 billion (−2.8%). In the second series, it took 200.6 and 206.8 s against 204.4 and 214.4 s.
+  - The fallback family of track-d: 1,492.4 and 1,492.8 billion instructions against 1,532.4 and 1,532.3 billion (−2.6%). The plan of track-e: 579.4 and 579.2 billion against 594.3 and 594.0 billion (−2.5%). The eight confirmation sets: 16,084.7 against 16,567.4 billion (−2.9%).
+  - The browser set of track-e: 157.8 s of CPU time against 161.6 s, with the same linear memory, 132.6 MiB.
+  - The WAVs, the family records, the plans and the 48 reports are identical.
+- Rule and code references: `the_windows_of_the_interpolated_peaks_equal_each_frame_bit_for_bit` and `the_scan_gives_the_peak_and_the_overs_of_the_exhaustive_passes` (`src/dsp.rs`).
+- Limits and counterexamples: The plan of track-e took 30.9 and 28.3 s against 30.8 and 29.2 s. The fallback family took 68.1 and 69.9 s against 68.9 and 70.0 s. Runs 3 and 4 of the first family series ran while another program used the processor.
+- Verification: `cargo test --release` passes for the engine and the Lambda crate, and `cargo clippy --all-targets` passes for the engine, the Lambda crate and the WASM crate.
+- Review condition: A change to the tap layout of `dot_pairs` or to `PEAK_POINTS`.
+- Work reference: TODO.md, "Render speed and memory".
+- Supersedes / superseded by: None. Extends D150 and D211.
+
+## D240: Spectrum batches for each thread, and the true-peak scan in chunks
+
+- Recorded: 2026-10-27.
+- Origin: Measurement. With D239 and two threads, the `master` family of the 29.9-minute file peaks at 778.1 MB of live bytes in `stereo::analyze` and `spectrum`: each holds a batch of 512 FFT frames, 67 MB, beside a full buffer. The statement of D238 that the family peaks in `render_blocks::fit_true_peak` came from the allocations of 20 MiB or more.
+- Basis: Measurement; no listening.
+- Status: Accepted. Implemented in `spectrum`, `stereo::analyze`, `dsp::BlockPeaks` and `dsp::PeakScan`.
+- Decision:
+  - `spectrum` and `stereo::analyze` transform a batch of 64 FFT frames for each thread of `dsp::chunked`.
+  - The true-peak scans compute the sample peaks of the blocks near each chunk of 65,536 frames in that chunk. The scan of a render keeps the block results of each chunk in its own vector.
+- Reason: The sums take the frames in order, and the bound of a block reads the same block peaks, so each result is the same. A batch of 512 frames spans 8 threads; the Lambdas have 2.
+- Alternatives and tradeoffs: The power, mid and side sums of each frame in place of its spectrum: 98 KB against 131 KB for each frame.
+- Evidence:
+  - The `master` family of the 29.9-minute file with two threads: 756.1 MB of live bytes against 778.1 MB. In ABBA order, it took 194.4 and 187.7 s against 187.6 and 187.2 s, and 3,992.2 and 3,984.9 billion instructions against 3,981.1 and 3,980.9 billion.
+  - The largest allocation of `render_blocks::fit_true_peak`: 2.7 MB at 720.5 MB of live bytes, against 21.6 MB at 742.0 MB.
+  - The plan of the 29.9-minute file: the condition, attack and tone stages peak at 713.9, 722.1 and 714.8 MB against 764.2, 772.4 and 744.6 MB.
+  - The fallback family of track-d took 71.4 and 71.1 s against 71.3 and 71.4 s. The eight confirmation sets took 16,089.5 against 16,084.7 billion instructions.
+  - The WAVs, the family records, the plans and the 48 reports are identical.
+- Rule and code references: `the_peak_of_a_core_is_the_largest_sample_and_interpolated_point`, `the_scan_gives_the_peak_and_the_overs_of_the_exhaustive_passes` and `the_peak_after_the_local_gain_is_the_peak_of_the_changed_audio` (`src/dsp.rs`).
+- Limits and counterexamples: The family now peaks in `low_end::sections`, beside a candidate render: the FFT of the last section of the file holds about 35 MB, and its sizes follow from the length of that section. The planner peaks at 1,054.1 MB in the stem stage with each build. The browser engine has one thread, and its batches keep 64 frames.
+- Verification: `cargo test --release` passes for the engine and the Lambda crate, and `cargo clippy --all-targets` passes for the engine, the Lambda crate and the WASM crate.
+- Review condition: More threads in the Lambdas, or a change of the FFT size of the spectrum or the stereo analysis.
+- Work reference: TODO.md, "Master recordings over 30 minutes".
+- Supersedes / superseded by: None. Extends D145 and D238.
+
+## D241: Four frames in each pass of the resampler
+
+- Recorded: 2026-10-27.
+- Origin: Measurement. In a profile of the plan of track-e at D240, `resample::Kernel::at` took 10% of the samples outside the waits of the threads.
+- Basis: Measurement; no listening.
+- Status: Accepted. Implemented in `resample::Kernel::fill_from`, `resample::Converted::fill_from` and `masking::frame_pairs_read_of`.
+- Decision: The resampler computes four consecutive output frames in one pass over their taps. Each frame adds its products in the order of `Kernel::at`. The stem analysis reads the converted drum, bass and other stems one hop at a time.
+- Reason: `Kernel::at` adds the products of a frame into one f64 sum for each channel, and each addition waits for the one before it. The sums of different frames are independent, so the core runs them beside each other.
+- Alternatives and tradeoffs: Eight frames in each pass: 0.7% more instructions than four frames, and no less time.
+- Evidence:
+  - The plan of track-e, with stems at 44.1 kHz, in two ABBA series: 41.9 to 44.0 s of user CPU time against 44.3 to 45.8 s, and 576.2 to 576.5 billion instructions against 579.2 to 579.5 billion.
+  - The eight confirmation sets: 1,227.0 s of user CPU time against 1,252.1 s, and 16,065.4 against 16,089.5 billion instructions.
+  - The browser set of track-e: 155.2 s of CPU time against 156.4 s.
+  - The WAVs, the family records, the plans and the 48 reports are identical.
+- Rule and code references: `the_frames_of_a_pass_equal_each_frame_bit_for_bit`, `a_converted_reader_gives_the_samples_of_convert` and `a_conversion_in_place_gives_the_samples_of_convert` (`src/resample.rs`).
+- Limits and counterexamples: A source and stems at the render rate convert no frames: the family of the 29.9-minute file at 48 kHz keeps its time.
+- Verification: `cargo test --release` passes for the engine and the Lambda crate, and `cargo clippy --all-targets` passes for the engine, the Lambda crate and the WASM crate.
+- Review condition: A change of the taps of the resampler.
+- Work reference: TODO.md, "Render speed and memory".
+- Supersedes / superseded by: None. Extends D150.
+
+## D242: Hashes of the planner files in blocks
+
+- Recorded: 2026-10-27.
+- Origin: Code review of the planner Lambda during the memory work of D145. After the plan, the planner reads `original.wav`, the float32 WAV of the mix, whole for its SHA-256, twice, while the mix is live.
+- Basis: Code review and arithmetic; no listening.
+- Status: Accepted. Implemented in `file_sha256` and a private record. Not deployed.
+- Decision: The planner Lambda hashes `original.wav`, `source.json` and `plan.json` in blocks of 1 MiB. A private record hashes the mix file in blocks of 1 MiB.
+- Reason: At 29.9 minutes at 48 kHz, the WAV holds 689.9 MB, and the mix 689.9 MB: 1,379.8 MB at the hash, over the 1,054.1 MB of the vocal stage, the peak that the local tool measures.
+- Alternatives and tradeoffs: A hash of the WAV bytes as `audio_io::write` writes them: one read less, and a second writer in `audio_io`.
+- Evidence:
+  - `a_file_hash_in_blocks_is_the_hash_of_the_bytes` passes for a file of 3 MiB and 17 bytes.
+  - A private record on the 29.9-minute file: the drum stage peaks at 741.9 MB of live bytes against 1,207.4 MB, and the other stages keep their peaks.
+- Rule and code references: `a_file_hash_in_blocks_is_the_hash_of_the_bytes`.
+- Limits and counterexamples: This run does not measure the planner Lambda, which reads its upload and its stems from S3. The planner Lambda still decodes the upload into a buffer that grows as it decodes.
+- Verification: `cargo test --release` and `cargo clippy --all-targets` pass for the Lambda crate.
+- Review condition: The Lambda report of each stage after a deployment.
+- Work reference: TODO.md, "Master recordings over 30 minutes".
+- Supersedes / superseded by: None. Extends D145 and D234.
+
+## D243: The prefix in pieces
+
+- Recorded: 2026-10-28.
+- Origin: Step 4 of the order of work of a private record. With D242, the prepare of each prefix reads the source into a shaped copy, 689.9 MB at 29.9 minutes.
+- Basis: Measurement; no listening.
+- Status: Accepted. Implemented in `Renderer::prepare`, `prefix_stream::Chain`, `fir::Stream`, `compressor::Stream`, `render_blocks::Upsample`, `analysis::Scan`, `treatment_render::WindowScan` and `deesser::MidPowers`. Not deployed.
+- Decision:
+  - `Renderer::prepare` reads the source in pieces of 65,536 frames, and each piece goes through the stages of the prefix in order. Each stage keeps its state from one piece to the next.
+  - The measures of the prefix, the compressor and the 4x stream take each piece. The compressor gives its output in one pass. The 4x stream upsamples a span of 524,288 frames at a time, or 65,536 frames in the browser engine.
+  - With a de-esser, a first pass writes the signal before the de-esser to a scratch file and keeps the mid powers of the de-esser key. The second pass reads the scratch file.
+  - Each buffer of a pass holds one piece and serves each piece in turn.
+  - A spec with an active finishing stage or with dynamic bands takes the path of the whole signal.
+- Reason: Each stage before the compressor depends only on the frames before it and on its own state. The FIR stages start their blocks at frame 0, the filters keep their state, and the window bands of the measures depend only on their own samples. The compressor needs about two section windows after a frame. So the output is the output of the whole signal, bit for bit.
+- Alternatives and tradeoffs:
+  - Buffers of a span of 524,288 frames at each stage: the macOS footprint of the eight confirmation sets was 55 to 190 MB higher, with the same live bytes.
+  - A new buffer for each span: the macOS footprint of the family was 245 MB higher.
+  - The input of the compressor in a scratch file, and three passes over it: one more file of the source length.
+- Evidence:
+  - The `master` family of the 29.9-minute file with two threads: the largest allocation of the prepare is 6.4 MB at 25.9 MB of live bytes, against 689.9 MB at 704.1 MB. The live bytes peak at 756.1 MB with each build, in `low_end::sections`. In ABBA order, the family took 4,021.5 and 4,021.7 billion instructions against 3,984.5 and 3,982.6 billion (+0.95%). In three series on a loaded machine, the shortest run took 189.1 s against 193.5 s. The open scratch files peak at 5,265.4 MiB against 5,263.2 MiB.
+  - The fallback family of track-d took 1,513.4 and 1,514.3 billion instructions against 1,498.3 and 1,494.3 billion (+1.1%). The plan of track-e took 577.72 and 577.59 billion against 576.95 and 576.99 billion (+0.12%). The eight confirmation sets took 16,174.9 against 16,061.6 billion (+0.71%), with a macOS footprint of 3,366 MB in sum with each build.
+  - The browser set of track-e keeps 132.6 MiB of linear memory and its live bytes in each of its 31 phases. It took 157.1 and 159.8 s of CPU time against 156.3 and 156.2 s.
+  - The WAVs, the family records, the plans and the 48 reports are identical.
+- Rule and code references: `the_streamed_prefix_equals_the_whole_prefix` (`src/treatment_render.rs`), `the_stream_equals_the_compressor_of_the_whole_signal` (`src/compressor.rs`) and `the_streamed_filter_matches_the_whole_filter` (`src/fir.rs`).
+- Limits and counterexamples: Each frame passes through each FIR stage of the chain, and the family takes 0.95% more instructions. The live peak of the family is a candidate render in `selection::measure`, so it stays at 756.1 MB. The drive search still holds its best render until step 6.
+- Verification: `cargo test --release` passes for the engine and the Lambda crate, and `cargo clippy --all-targets` passes for the engine, the Lambda crate and the WASM crate.
+- Review condition: A stage of the prefix that reads frames after its own frame, or a finishing stage in a production spec.
+- Work reference: TODO.md, "Master recordings over 30 minutes".
+- Supersedes / superseded by: None. Extends D145, D228 and D232.
+
+## D244: STFT frames in batches
+
+- Recorded: 2026-10-28.
+- Origin: Measurement. With D243 and two threads, the plan of the 29.9-minute file peaks at 1,054.1 MB of live bytes in `auditory::measure_stem`. The ranges of the STFT frames of the whole signal waited beside their joined copy, so each auditory frame of the vocal was held twice (a private record).
+- Basis: Measurement; no listening.
+- Status: Accepted. Implemented in `stft::stereo_frames_each`, `stft::stereo_frame_pairs_each`, `masking::frames_of`, `masking::frame_pairs_in` and `stem_evidence::band_frames`. Not deployed.
+- Decision:
+  - The STFT frames compute in batches of 4 ranges of 256 hops for each thread, and the caller takes the frames of a batch before the next batch.
+  - The masking frames and the band frames of the stems take each frame into their own vectors, with no vector of pairs.
+- Reason: Each range of 256 hops starts its transform before its first hop, so its frames depend only on its own hops. The batches keep the same ranges, so each frame is the same.
+- Alternatives and tradeoffs: The stems from scratch in spans: the stem stages then hold no buffer of the stem length. It is step 5 of the order of work, and changes each measure of a stem.
+- Evidence:
+  - The plan of the 29.9-minute file with two threads: the vocal stage peaks at 977.2 MB of live bytes against 1,054.1 MB, and the other stem at 883.5 MB against 960.8 MB. The read stage and the drum and bass stages peak 16.9 to 33.7 MB lower. The planner took 3,659.0 billion instructions against 3,656.4 billion.
+  - The plan of track-e took 578.65 and 578.60 billion instructions against 578.27 and 578.60 billion. The eight confirmation sets took 16,207.9 against 16,220.0 billion.
+  - The browser set of track-e peaks at 130.9 MiB of linear memory against 132.6 MiB.
+  - The plans, the 48 reports and the browser outputs are identical.
+- Rule and code references: `frames_on_several_cores_match_the_sequential_loop` and `paired_frames_equal_the_frames_of_each_signal` (`src/stft.rs`), with a hop of 16 frames for several batches.
+- Limits and counterexamples: The planner still peaks in the stem analysis: with D235, the buffer of 689.9 MB is live from the drum stage to the end of the stem analysis.
+- Verification: `cargo test --release` passes for the engine and the Lambda crate, and `cargo clippy --all-targets` passes for the engine, the Lambda crate and the WASM crate.
+- Review condition: A change of the STFT size or hop of a measure, or of `dsp::chunked`.
+- Work reference: TODO.md, "Master recordings over 30 minutes".
+- Supersedes / superseded by: None. Extends D145 and D234.
+
+## D245: Stem analysis from scratch storage
+
+- Recorded: 2026-10-28.
+- Origin: Measurement. With D244 and two threads, the plan of the 29.9-minute file peaks at 977.2 MB of live bytes in the vocal stage. With D235, the stem buffer of 689.9 MB is live from the drum stage to the end of the stem analysis (a private record).
+- Basis: Measurement; no listening.
+- Status: Accepted. Implemented in `stem_evidence::analyze_stems`, `stem_evidence::masking_pairs`, `stem_evidence::converted`, `resample::Windowed`, `scratch::Pcm::add_at`, `scratch::Pcm::read`, `scratch::Frames::window`, `stft::stereo_frames_read`, `stereo::analyze_read`, `auditory::measure_stem_read`, `masking::frames_read`, `refinement::analyze_matched`, `audio_io::read_source_blocks`, `source::decode_stem` of the Lambda crate and `Input::read_blocks` of the WASM crate. Not deployed.
+- Decision:
+  - The loader of each stem gives its frames to the stem analysis block by block, with the sample rate of the stem. Each stem goes to a scratch file, and each block adds to the stored sum of the stems.
+  - The fingerprint, the 10 ms levels of the drums and the checks of the rate, the length and the samples take each block as it arrives.
+  - The other measures of a stem read the stored stem in spans. The masking frames of the drum, bass and other stems convert to the render rate one span at a time. The vocal converts to the render rate in spans into its own scratch file.
+  - In the browser engine, the buffer of the held mix waits empty while the stems load, and the sum of the stems reads into it. On each target, the refinement leaves the buffer of the sum to the stem analysis, and the held mix reads back into it.
+  - `deesser::key_with_frames` takes the mid band powers of the vocal in place of the vocal.
+  - A measure of a recording in memory reads each span in place (`scratch::Frames::window`), and a measure of a stored recording reads each span into one buffer.
+  - A read of a scratch file reserves its output before its pieces (`scratch::Pcm::read`).
+- Reason: Each measure of a stem needs a window of frames before each span: the hops before an STFT range, the half window of the stereo image and the radius of the rate conversion. The spans read these frames from the stored stem, so each measure is the same. The linear memory of a module never shrinks, and the allocations of the stem stages and the pieces of a read split a freed buffer (D235).
+- Alternatives and tradeoffs: The sum of the stems from scratch in `finish_evidence`, `foundation::propose` and the refinement: the `stems` stage then holds no buffer of the stem length. It is the next part of step 5 of the order of work. A stem buffer for each target, as D235 gave: the stem stages then hold 689.9 MB at 29.9 minutes.
+- Evidence:
+  - The plan of the 29.9-minute file with two threads: the stem stages peak at 79.5 to 289.6 MB of live bytes against 757.5 to 977.2 MB, and the planner at 839.4 MB in the `stems` stage against 977.2 MB in the vocal stage. The planner took 3,653.8 billion instructions against 3,645.1 billion (+0.24%), and its macOS footprint was 897.5 MB against 1,050.6 MB.
+  - The open scratch files of the planner peak at 3,947.4 MiB with each build. The stem analysis holds 2,525 MiB at its peak against 1,678 MiB.
+  - The plan of track-e took 578.99 and 579.09 billion instructions against 577.18 and 577.20 billion (+0.32%). The eight confirmation sets took 16,175.7 against 16,167.6 billion (+0.05%).
+  - The browser set of track-e peaks at 125.2 MiB of linear memory against 130.9 MiB, in the vocal stage, and takes 1.4% more CPU time. Without the buffer of the held mix and the buffer of the sum, it peaks at 176.4 MiB. With the pieces of a read before its output, it peaks at 210.6 MiB.
+  - The plans of the 29.9-minute file and of track-e, the 48 reports and the browser outputs are identical.
+- Rule and code references: `stems_in_blocks_of_any_length_give_one_evidence` (`src/stem_evidence.rs`); `a_stored_stem_converts_in_spans_to_the_frames_of_convert` and `the_masking_frames_of_a_stored_stem_equal_those_of_the_whole_stem` (`src/stem_evidence.rs`); `windows_of_a_recording_give_the_samples_of_convert` (`src/resample.rs`); `frames_on_several_cores_match_the_sequential_loop` (`src/stft.rs`); `an_added_stem_gives_the_sum_in_memory` (`src/scratch.rs`); `sequential_stems_match_retained_stems_and_reconstruction_exactly` (`tests/stem_evidence.rs`); `a_stem_in_blocks_is_the_stream_after_its_look_ahead`.
+- Limits and counterexamples: The planner peaks in the `stems` stage: the sum of the stems at the render rate, 689.9 MB, is whole for `finish_evidence`, `foundation::propose` and the refinement. The stem analysis holds up to four scratch files: the mix, the sum, the vocal and the vocal at the render rate. The planner takes 0.24% more instructions, and the browser set 1.4% more CPU time.
+- Verification: `cargo test --release` passes for the engine and the Lambda crate, and `cargo clippy --all-targets` passes for the engine, the Lambda crate and the WASM crate.
+- Review condition: A change of the STFT ranges, of the windows of `stereo::analyze`, of the kernel of `resample`, or of the loader of a stem.
+- Work reference: TODO.md, "Master recordings over 30 minutes".
+- Supersedes / superseded by: Supersedes the stem buffer of D235. Extends D145, D234 and D244. The buffer of the sum of the stems is superseded by D246: the sum stays in a scratch file.
+
+## D246: Stem sum from scratch storage
+
+- Recorded: 2026-10-28.
+- Origin: Measurement. With D245 and two threads, the plan of the 29.9-minute file peaks at 839.4 MB of live bytes in the `stems` stage: the sum of the stems at the render rate, 689.9 MB, is whole for `finish_evidence`, `foundation::propose` and the refinement (a private record).
+- Basis: Measurement; no listening.
+- Status: Accepted. Implemented in `stem_evidence::analyze_stems`, `stem_evidence::finish_evidence`, `foundation::propose`, `foundation::reliable_windows`, `refinement::analyze_matched`, `refinement::band_powers` and `refinement::focus`. Not deployed.
+- Decision:
+  - After the stem stages, the sum of the stems converts to the render rate in spans into a scratch file (`stem_evidence::converted`). At the render rate, the stored sum is the sum. The sum at the rate of the stems is freed after the conversion.
+  - `finish_evidence` reads the sum in blocks of 65,536 frames for its fingerprint and its comparison with the mix. `foundation::propose` reads the sum in windows of 2 s.
+  - The refinement adds the negated vocal to the stored sum in spans of 65,536 frames. The stored sum is then the accompaniment. Each passage reads the accompaniment.
+  - In the browser engine, the buffer of the held mix waits empty until the mix reads back into it. The buffer of the sum is removed.
+- Reason: For each frame, `x + -y` equals `x - y` in IEEE arithmetic, so the accompaniment in the file has the frames of the accompaniment in memory. Each measure reads its frames in the order of the whole buffer, so each sum has the same value.
+- Alternatives and tradeoffs: The source analysis and `set::prepare` from scratch: the planner then holds no buffer of the mix length. It is the next part of step 5 of the order of work.
+- Evidence:
+  - The plan of the 29.9-minute file with two threads: the `stems` stage peaks at 157.6 MB of live bytes against 839.4 MB, and the `focus` stage at 690.5 MB against 709.7 MB. The planner peaks at 738.3 MB in the `condition` stage with each build. The planner took 3,653.3 billion instructions against 3,654.0 billion with the counting allocator, and 3,655.4 billion against 3,653.2 billion in the run of its plan.
+  - The macOS footprint of the planner is 1,131.5 MB and 1,142.5 MB in two runs, against 901.2 MB and 1,139.8 MB. The live bytes compare the builds.
+  - The open scratch files of the planner peak at 3,947.4 MiB with each build, in `set::prepare`. At the end of the conversion of the sum, the stem analysis holds 2,578.1 MiB: the mix, the sum at the rate of the stems, the vocal at the render rate and the sum at the render rate. With D245, it peaks at 2,524.7 MiB in the vocal stage.
+  - The plan of track-e took 579.33 and 579.26 billion instructions against 578.94 and 578.91 billion (+0.06%). The eight confirmation sets took 16,175.4 against 16,173.7 billion (+0.01%).
+  - The browser set of track-e peaks at 125.2 MiB of linear memory with each build, in the vocal stage. The `stems` stage reaches 118.5 MiB of live bytes against 110.8 MiB, with the buffers of the conversion. The set took 157.07 and 157.00 s of CPU time against 156.96 and 156.96 s.
+  - The plans of the 29.9-minute file and of track-e, the 48 reports and the browser outputs are identical.
+- Rule and code references: `the_accompaniment_in_place_is_the_sum_minus_the_vocal` (`src/refinement.rs`); `each_bell_of_a_round_gives_the_focus_of_a_round_of_its_own` (`src/refinement.rs`); `stems_in_blocks_of_any_length_give_one_evidence` (`src/stem_evidence.rs`); `a_stored_stem_converts_in_spans_to_the_frames_of_convert` (`src/stem_evidence.rs`); `sequential_stems_match_retained_stems_and_reconstruction_exactly` (`tests/stem_evidence.rs`).
+- Limits and counterexamples: The planner peaks in the `condition` stage with the mix, 689.9 MB. From the end of the `focus` stage to the `tone` stage, the planner holds the mix or the prefix. The conversion of the sum holds two buffers of 524,288 frames: 7.7 MiB in the browser engine.
+- Verification: `cargo test --release` passes for the engine and the Lambda crate, and `cargo clippy --all-targets` passes for the engine, the Lambda crate and the WASM crate.
+- Review condition: A change of the kernel of `resample`, of the windows of `foundation::propose`, or of the passages of the refinement.
+- Work reference: TODO.md, "Master recordings over 30 minutes".
+- Supersedes / superseded by: Supersedes the buffer of the sum of D245. Extends D145, D234 and D245.
+
+## D247: Mix measures from scratch storage
+
+- Recorded: 2026-10-28.
+- Origin: Measurement. With D246 and two threads, the plan of the 29.9-minute file peaks at 738.3 MB of live bytes in the `condition` stage. The source analysis, the source condition and the compressor plan read the mix, 689.9 MB, whole (a private record).
+- Basis: Measurement; no listening.
+- Status: Accepted. Implemented in `set::prepare_mix`, `pipeline::analyze_source_read`, `MetricsScan`, `spectrum_read`, `selection::window_levels_read`, `source_condition::measure_read`, `compressor::plan_with` and `compressor::Search::new`. Not deployed.
+- Decision:
+  - At the start of `set::prepare`, a held mix goes to a scratch file, and its buffer is freed.
+  - The source analysis reads the mix in blocks of 65,536 frames. One pass gives the finite check, the fingerprint, the metrics, the temporal analysis and the waveform. The spectrum reads one batch of hops at a time, the stereo analysis reads in spans, and the window levels read 64 windows at a time.
+  - The source condition reads the mix in blocks of 65,536 frames for the DC offset, and in FFT windows for the bandwidth.
+  - The compressor plan takes the temporal analysis of the source. Its search reads the mix in spans of 6,000 blocks of 10 ms.
+  - An aligned mix and the prefix read the held mix back into one buffer.
+  - In the browser engine, the held mix stays in its buffer until the prefix, as with D246.
+- Reason: Each measure reads its frames in the order of the whole buffer, with the frames before each span that it needs, so each result is the same. The temporal analysis of the compressor plan is the temporal analysis of the source: the same function of the same frames. In the browser engine, when the mix goes to scratch storage before the source analysis, the render of the last family grows the linear memory by 5.5 MiB with the same live bytes. The linear memory of a module never shrinks, and small allocations can split a freed buffer (D235).
+- Alternatives and tradeoffs: The prefix in spans from the stored mix, with `compressor::Stream`, `render_blocks::Upsample` and `analysis::Scan`: the `condition` and `audibility` stages then hold no buffer of the mix length. The renders of the plan in scratch storage: the `level`, `width` and `attack` stages then hold no render. These are the next parts of step 5 of the order of work.
+- Evidence:
+  - The plan of the 29.9-minute file with two threads: the `mix` stage peaks at 34.7 MB of live bytes against 713.9 MB, and the `condition` stage at 703.9 MB against 738.3 MB. The planner peaks at 725.0 MB in the `read` stage. It took 3,651.0 billion instructions against 3,654.6 billion with the counting allocator (−0.10%), and 3,650.7 billion against 3,655.5 billion in the run of its plan (−0.13%). Its macOS footprint was 1,059.0 MB and 1,111.5 MB against 902.1 MB and 897.0 MB. With D246, the footprint of one build was 901.2 MB and 1,139.8 MB in two runs.
+  - The plan of track-e took 578.64 and 578.79 billion instructions against 579.35 and 579.46 billion (−0.12%). The eight confirmation sets took 16,172.0 against 16,177.0 billion (−0.03%).
+  - With the counting allocator, the plan of track-e peaks at 109.8 MB of live bytes with each build, in the `attack` stage, and its `mix` stage at 27.6 MB against 108.7 MB. Its macOS footprint without the counting allocator was 243.6 and 245.9 MB against 220.5 and 220.4 MB.
+  - The open scratch files of the planner peak at 3,947.4 MiB with each build, in `set::prepare`.
+  - The browser set of track-e peaks at 125.25 MiB of linear memory with each build, and took 157.59 and 157.41 s of CPU time against 157.09 and 157.25 s (+0.2%). With the held mix in scratch storage before the source analysis, it peaks at 130.75 MiB.
+  - The plans of the 29.9-minute file and of track-e, the 48 reports and the browser outputs are identical.
+- Rule and code references: `a_stored_mix_gives_the_measures_of_the_mix` (`src/pipeline.rs`); `a_stored_recording_gives_the_plan_of_the_recording` (`src/compressor.rs`); `hops_on_several_cores_match_the_sequential_spectrum` (`src/lib.rs`); `a_held_mix_gives_the_plan_of_the_whole_mix_and_returns_to_its_caller` (`src/set.rs`).
+- Limits and counterexamples: The planner peaks at 725.0 MB in the `read` stage, with the mix. The `condition` stage reads the mix back for the prefix, and the `level`, `width` and `attack` stages each hold a render of 689.9 MB. In the browser engine, the `mix` and `condition` stages hold the mix, as with D246.
+- Verification: `cargo test --release` passes for the engine and the Lambda crate, and `cargo clippy --all-targets` passes for the engine, the Lambda crate and the WASM crate.
+- Review condition: A change of the blocks of the source analysis, of the FFT of the bandwidth, of the search of the compressor plan, or of the allocator of the browser engine.
+- Work reference: TODO.md, "Master recordings over 30 minutes".
+- Supersedes / superseded by: Extends D145, D234 and D246.
+
+## D248: Renders of the plan in scratch storage
+
+- Recorded: 2026-10-28.
+- Origin: Measurement. With D247 and two threads, the `level`, `width` and `attack` stages of the plan of the 29.9-minute file each hold a render of 689.9 MB. They peak at 713.3, 722.1 and 714.8 MB of live bytes (a private record).
+- Basis: Measurement; no listening.
+- Status: Accepted. Implemented in `audibility::peak_control`, `audibility::Prefix::ratios`, `render_blocks::render_peak_control_into`, `render_blocks::fit_true_peak_stored`, `dsp::Oversampler::peak_core_from`, `dsp::Oversampler::peak_scan_core`, `dsp::Oversampler::peak_after_core`, `dsp::loudness_read`, `analysis::blocks_read` and `scratch::Pcm::write_at`. Not deployed.
+- Decision:
+  - The probes of the audibility point, the base render and the attack render of `set::prepare` go to scratch files.
+  - A segmented render writes the cores of each batch of segments to its scratch file in turn.
+  - The true-peak fit of a stored render reads it in spans of 1,048,576 frames, with 64 frames on each side for the interpolator. The scan of each span starts from the sample peak of the whole render.
+  - The local correction lowers each group of frames over the ceiling in a window of the render, and writes the window back. The trim writes each span back with its gain.
+  - The loudness, the 10 ms blocks, the stereo analysis and the audibility ratios read the stored render in spans.
+  - The scratch writer converts pieces of 65,536 frames to bytes.
+- Reason: Each span gives the true peak of its core from the same 4x points as the whole render, so the largest value of the spans is the true peak of the render. A margin of 64 frames is a multiple of the block of 32 frames, so each span keeps the blocks of the whole scan. The scan skips each block whose bound is at most the running peak. A start at the sample peak of the whole render gives each span the skips of the whole scan. Groups of frames over the ceiling more than 4,096 frames apart lower independently, because the passes of the correction reach about 624 frames.
+- Alternatives and tradeoffs: The first form of the stored fit scanned the render three times, started the scan of each span from the sample peak of the span, and used a margin of 48 frames. With the counting allocator, the plan of the 29.9-minute file took 6.2% more instructions than with D247. The sample peak can come from the commit of each segment, and the loudness and the blocks can read the render in one pass. These changes can remove a part of the remaining 0.5%.
+- Evidence:
+  - The plan of the 29.9-minute file with two threads: the `level` stage peaks at 61.4 MB of live bytes against 713.3 MB, the `width` stage at 34.4 MB against 722.1 MB, and the `attack` stage at 698.7 MB against 714.8 MB. With the writes in pieces, the `stems` stage peaks at 149.8 MB against 157.6 MB. The planner peaks at 725.0 MB in the `read` stage with each build.
+  - With the counting allocator, the plan of the 29.9-minute file took 3,668.6 billion instructions against 3,649.6 billion (+0.52%). Its macOS footprint was 1,070.1 MB against 903.5 MB.
+  - The plan of track-e took 581.60 and 581.53 billion instructions against 578.63 and 578.65 billion (+0.51%). The eight confirmation sets took 16,212.9 against 16,179.3 billion (+0.21%).
+  - The browser set of track-e peaks at 125.25 MiB of linear memory with each build. It took 158.02 and 157.62 s of CPU time against 157.99 and 157.57 s (+0.03%), with 682.4 MiB of scratch files with each build.
+  - The open scratch files of the planner, sampled every 0.25 s, peak at 4,605.3 MiB against 3,947.4 MiB, in the `attack` stage, with four files against three. The base render and the attack render each take a scratch file of 658 MiB. In the run of its plan, the planner took 3,667.9 billion instructions against 3,647.9 billion (+0.55%).
+  - The plans of the 29.9-minute file and of track-e, the 48 reports and the browser outputs are identical.
+- Rule and code references: `a_stored_render_gives_the_true_peak_fit_of_the_render_in_memory` (`src/render_blocks.rs`); `the_ratios_of_a_stored_prefix_equal_those_of_the_whole_prefix` (`src/audibility.rs`); `a_held_or_stored_mix_gives_the_plan_of_the_whole_mix` (`src/set.rs`).
+- Limits and counterexamples: The `attack` stage reads the held mix back at its end, and the `tone` stage measures the mix whole. They peak at 698.7 and 705.1 MB. The `condition` and `audibility` stages hold the mix for the prefix. The reads and writes of the stored renders take 0.5% more instructions. The planner uses 45% of its temporary storage, against 39%.
+- Verification: With D248 to D250, `cargo test --release` passes for the engine and the Lambda crate, and `cargo clippy --all-targets` passes for the engine, the Lambda crate and the WASM crate.
+- Review condition: A change of the interpolator of the true-peak scan, of its block of 32 frames, or of the reach of the local true-peak correction.
+- Work reference: TODO.md, "Master recordings over 30 minutes".
+- Supersedes / superseded by: Extends D145, D234, D240 and D247.
+
+## D249: Prefix of the plan from the mix
+
+- Recorded: 2026-10-28.
+- Origin: Measurement. With D248 and two threads, the `condition` and `audibility` stages of the plan of the 29.9-minute file peak at 703.9 and 715.1 MB of live bytes. Before the prefix of Essential, `set::prepare` reads the held mix back into one buffer of 689.9 MB (a private record).
+- Basis: Measurement; no listening.
+- Status: Accepted. Implemented in `set::stream_prefix` and `set::prepare_mix`. Not deployed.
+- Decision:
+  - The prefix of Essential passes once through its compressor (`compressor::Stream`) in pieces of 65,536 frames of the mix, the aligned mix or the held mix in scratch storage.
+  - Each piece goes to the 4x prefix (`render_blocks::Upsample`), to the onsets of the attack choice (`analysis::Scan`) and, with a compressor, to the prefix in scratch storage.
+  - A set without a compressor takes the mix as its prefix: the ratios read the mix in spans.
+- Reason: `compressor::Stream`, `render_blocks::Upsample` and `analysis::Scan` give the frames and the analysis of the whole prefix (D243, D247). One pass over the mix gives the three outputs, so the prefix needs no buffer of the mix.
+- Alternatives and tradeoffs: The tone stage still measures the mix whole, and the `read` stage reads it. D250 keeps the mix in scratch storage from the read.
+- Evidence:
+  - The plan of the 29.9-minute file with two threads: the `condition` stage peaks at 54.8 MB of live bytes against 703.9 MB, and the `audibility` stage at 61.4 MB against 715.1 MB. The planner peaks at 725.0 MB in the `read` stage with each build.
+  - With the counting allocator, the plan of the 29.9-minute file took 3,666.4 billion instructions against 3,668.6 billion in the measurement of D248 (−0.06%). Its macOS footprint was 1,132.6 MB against 1,070.1 MB.
+  - The plan of track-e took 581.36 and 581.44 billion instructions against 581.46 and 581.44 billion with D248 in the same run (−0.01%). The eight confirmation sets took 16,245.7 billion instructions against 16,212.9 billion in the measurement of D248 (+0.20%).
+  - The browser set of track-e peaks at 125.25 MiB of linear memory with each build. It took 155.45 and 157.22 s of CPU time against 158.13 and 157.29 s with D248 in the same run.
+  - The open scratch files of the planner, sampled every 0.25 s, peak at 4,605.3 MiB with each build, in the `attack` stage, with four files. In the run of its plan, the planner took 3,668.4 billion instructions against 3,667.9 billion in the measurement of D248 (+0.01%).
+  - The plans of the 29.9-minute file and of track-e, the 48 reports and the browser outputs are identical to those of D248.
+- Rule and code references: `a_streamed_prefix_is_the_prefix_of_the_whole_mix` and `a_held_or_stored_mix_gives_the_plan_of_the_whole_mix` (`src/set.rs`).
+- Limits and counterexamples: The `read` stage reads the mix whole and peaks at 725.0 MB. The `focus` stage reads the held mix back for `set::prepare`, and the `attack` stage reads it back for the `tone` stage. The `focus`, `attack` and `tone` stages peak at 690.5, 698.7 and 705.1 MB.
+- Verification: With D248 to D250, `cargo test --release` passes for the engine and the Lambda crate, and `cargo clippy --all-targets` passes for the engine, the Lambda crate and the WASM crate.
+- Review condition: A change of `compressor::Stream`, of `render_blocks::Upsample`, of `analysis::Scan`, or of the prefix of the plan.
+- Work reference: TODO.md, "Master recordings over 30 minutes".
+- Supersedes / superseded by: Extends D145, D234, D243 and D248.
+
+## D250: Mix of the plan in scratch storage from the read
+
+- Recorded: 2026-10-28.
+- Origin: Measurement. With D249 and two threads, the plan of the 29.9-minute file peaks at 725.0 MB of live bytes in the `read` stage. The `focus`, `attack` and `tone` stages hold the mix of 689.9 MB and peak at 690.5, 698.7 and 705.1 MB.
+- Basis: Measurement; no listening.
+- Status: Accepted. Implemented in `audio_io::StoredSource`, `audio_io::read_stored`, `resample::convert_stored`, `stem_evidence::analyze_set_stored`, `set::prepare_stored`, `compressor::glue_settings_read`, `refinement::focus_change_db_read`, `stem_evidence::fingerprint_read` and `source::decode_stored` of the Lambda crate. Not deployed.
+- Decision:
+  - The set plan of the command line, the planner Lambda, `plan_phases` and `alloc_phases` read the mix into a scratch file at its render rate. A source above a render rate converts in spans of 524,288 frames.
+  - The stem analysis reads the stored mix in blocks for its finite check, its fingerprint and its masking frames.
+  - `set::prepare` reads the stored mix in blocks and spans. The glue settings and the change of each focus bell read it in spans.
+  - The planner Lambda writes `original.wav`, and measures the loudness, the waveform and the fingerprint, from the stored mix in pieces of 65,536 frames.
+  - The browser engine keeps its held mix (D234, D247).
+- Reason: Each read form gives the result of the measure of the whole mix: the stored mix has the frames of `Source::at_render_rate`, and each measure reads its frames in the order of the whole buffer. The WAV writer writes the blocks of 8,192 frames of `audio_io::write`.
+- Alternatives and tradeoffs: The browser engine reads its upload into its linear memory, and its stages hold the mix until the prefix. The planner reads the stored mix once more for each measure of the mix.
+- Evidence:
+  - The plan of the 29.9-minute file with two threads: the `read` stage peaks at 39.7 MB of live bytes against 725.0 MB, the `focus` stage at 19.9 MB against 690.5 MB, the `attack` stage at 61.4 MB against 698.7 MB, and the `tone` stage at 15.2 MB against 705.1 MB. The read of the mix holds 0.4 MB against 690.3 MB. The planner peaks at 289.6 MB in the `stem` vocals stage.
+  - With the counting allocator, the plan of the 29.9-minute file took 3,670.9 billion instructions against 3,666.4 billion (+0.12%). Its macOS footprint was 441.9 MB against 1,132.6 MB.
+  - The plan of track-e took 582.22 and 582.23 billion instructions against 581.36 and 581.44 billion (+0.14%). Its macOS footprint was 208.5 and 212.6 MB against 249.9 and 250.9 MB. The eight confirmation sets took 16,250.7 against 16,245.7 billion (+0.03%).
+  - The browser set of track-e peaks at 125.25 MiB of linear memory with each build. It took 155.64 and 155.58 s of CPU time against 155.45 and 157.22 s.
+  - The open scratch files of the planner, sampled every 0.25 s, peak at 4,605.3 MiB with each build, in the `attack` stage: the stored mix takes the place of the file of the held mix. In the run of its plan, the planner took 3,672.8 billion instructions against 3,668.4 billion (+0.12%). Its macOS footprint was 479.4 MB against 1,192.7 MB.
+  - The plans of the 29.9-minute file and of track-e, the 48 reports and the browser outputs are identical.
+- Rule and code references: `a_stored_source_is_the_source_at_its_render_rate` (`src/audio_io.rs`); `a_stored_mix_gives_the_evidence_of_the_whole_mix` (`src/stem_evidence.rs`); `a_held_or_stored_mix_gives_the_plan_of_the_whole_mix` (`src/set.rs`); `a_stored_recording_gives_the_glue_settings_of_the_recording` (`src/compressor.rs`); `the_change_of_a_focus_bell_over_a_stored_mix_is_that_of_the_mix` (`src/refinement.rs`); `a_stored_stem_converts_in_spans_to_the_frames_of_convert` (`src/stem_evidence.rs`).
+- Limits and counterexamples: The planner peaks at 289.6 MB in the `stem` vocals stage. In the `attack` stage, the stored mix, the prefix, the 4x prefix and one render take 4,605.3 MiB of scratch files, 45% of the temporary storage. The 4x prefix takes 2,631.6 MiB. The browser engine reads its upload into its linear memory, as with D247. The reads of the stored mix take 0.12% more instructions.
+- Verification: With D248 to D250, `cargo test --release` passes for the engine and the Lambda crate, and `cargo clippy --all-targets` passes for the engine, the Lambda crate and the WASM crate.
+- Review condition: A change of the reader of the source, of the resampler, or of a measure of the mix in the plan.
+- Work reference: TODO.md, "Master recordings over 30 minutes".
+- Supersedes / superseded by: Extends D145, D234, D247 and D249. Supersedes the held mix of D234 for the command line and the planner Lambda.
+
+## D251: 4x prefix of a long recording from the prefix as it is read
+
+- Recorded: 2026-10-28.
+- Origin: Measurement. With D243, the open scratch files of the `master` family of the 29.9-minute file peak at 5,265.4 MiB. The 4x prefix takes 2,631.6 MiB of the peak (a private record).
+- Basis: Measurement; no listening.
+- Status: Accepted. Implemented in `render_blocks::Upsampled`, `render_blocks::Up`, `render_blocks::upsampled_min_frames` and `treatment_render::Renderer`. Not deployed.
+- Decision:
+  - A prepared prefix of a recording of 1,800 s or more keeps its frames at the base rate only.
+  - Peak control and the own-point check read the 4x frames of the prefix from its base-rate frames. Each read upsamples a span of 16,384 base frames with the filter of `render_blocks::upsample_into`, and reads the radius of the filter on each side of the span.
+  - `MASTERING_UPSAMPLED_MIN_SECONDS` sets the limit for a measurement.
+- Reason: Each 4x frame of `upsample_into` comes from the base frames in the radius of its filter. A span of base frames with that radius on each side gives the 4x frames of the span.
+- Alternatives and tradeoffs: The 4x prefix in scratch storage takes four buffers of storage. The reads take 5.35% more instructions in the family of the 29.9-minute file, so a recording under 1,800 s keeps its 4x prefix.
+- Evidence:
+  - The `master` family of the 29.9-minute file with two threads, in ABBA order, with the 4x prefix in scratch storage and with `MASTERING_UPSAMPLED_MIN_SECONDS=0`: 4,027.0 and 4,025.5 billion instructions against 4,241.1 and 4,242.8 billion (+5.35%), and 316.6 and 300.2 s of user CPU time against 334.3 and 352.3 s. The macOS footprint was 868.0 and 868.3 MB against 836.1 and 851.5 MB.
+  - The open scratch files of the family, sampled every 1 s in two runs of each arm, peak at 5,252.9 and 5,229.3 MiB with the 4x prefix, and at 2,631.6 and 1,973.7 MiB on read. On read, the peak holds four and three files of 657.9 MiB.
+  - The eight confirmation sets took 16,244.5 billion instructions against 16,250.7 billion with D250 (−0.04%), and 17,452.2 billion with `MASTERING_UPSAMPLED_MIN_SECONDS=0` (+7.43%). The increase is 1.01% for track-f to 9.68% for track-c.
+  - The family records are identical apart from the times. The 48 reports of each arm are identical to those of D250.
+- Rule and code references: `upsampled_reads_give_the_frames_of_upsample_into` (`src/render_blocks.rs`); `a_prefix_without_its_4x_frames_gives_the_same_render` (`src/treatment_render.rs`).
+- Limits and counterexamples: The limit of 1,800 s is above the 29.9-minute file, so the family of that file keeps its 4x prefix. A recording of 45 minutes keeps a prefix of 988.8 MiB in place of 4,943.8 MiB of prefix files. The browser engine uses the same limit.
+- Verification: With D251, `cargo test --release` passes for the engine and the Lambda crate, and `cargo clippy --all-targets` passes for the engine, the Lambda crate and the WASM crate.
+- Review condition: A change of `render_blocks::upsample_into`, of peak control, or of the own-point check.
+- Work reference: TODO.md, "Master recordings over 30 minutes".
+- Supersedes / superseded by: Extends D145, D230 and D243.
+## D252: 4x prefix of the plan from the prefix as it is read
+
+- Recorded: 2026-10-28.
+- Origin: Measurement. With D250, the open scratch files of the plan of the 29.9-minute file peak at 4,605.3 MiB in the `attack` stage. The 4x prefix takes 2,631.6 MiB of the peak (a private record).
+- Basis: Measurement; no listening.
+- Status: Accepted. Implemented in `set::stream_prefix`, `set::prepare_mix`, `audibility::Prefix` and `scratch::Shared`. Not deployed.
+- Decision:
+  - The prefix of the plan of a recording of 1,800 s or more keeps no 4x frames (`render_blocks::upsampled_min_frames`, D251).
+  - The audibility point, the base render and the attack render read the 4x frames from the prefix as they render (`render_blocks::Up`). The prefix is the compressed prefix in scratch storage, the aligned mix or the mix.
+  - The ratios of peak control and the 4x frames read the prefix in turn (`scratch::Shared`).
+- Reason: The 4x frames of D251 come from the frames of the prefix at the base rate. The plan reads the same 4x frames from the prefix that the 4x prefix holds.
+- Alternatives and tradeoffs: The reads take 10.8% more instructions in the plan of the 29.9-minute file, so a recording under 1,800 s keeps its 4x prefix.
+- Evidence:
+  - The plan of the 29.9-minute file with two threads, in ABBA order, with the 4x prefix in scratch storage and with `MASTERING_UPSAMPLED_MIN_SECONDS=0`: 3,675.6 and 3,680.7 billion instructions against 4,071.8 and 4,075.6 billion (+10.8%). The open scratch files, sampled every 0.25 s, peak at 4,605.3 MiB with the 4x prefix, and at 2,536.2 and 2,564.2 MiB on read, with four files: the stored mix, the prefix and two renders.
+  - With the counting allocator and `MASTERING_UPSAMPLED_MIN_SECONDS=0`, the `audibility`, `level` and `attack` stages peak at 61.7 MB of live bytes against 61.4 MB with D250, and the `width` stage at 35.0 MB against 34.3 MB. The planner peaks at 289.6 MB in the `stem` vocals stage.
+  - The eight confirmation sets with `MASTERING_UPSAMPLED_MIN_SECONDS=0` took 17,825.0 billion instructions against 17,452.2 billion with D251 and the same limit (+2.14%). The 48 reports are identical to those of D251.
+  - The plans of each arm are identical.
+- Rule and code references: `a_held_or_stored_mix_gives_the_plan_of_the_whole_mix` (`src/set.rs`): with no 4x prefix, the whole, the held and the stored mix give the plan of the whole mix.
+- Limits and counterexamples: The limit of 1,800 s is above the 29.9-minute file, so the plan of that file keeps its 4x prefix. A recording of 45 minutes keeps no 4x prefix of 3,955.1 MiB in the planner.
+- Verification: With D252, `cargo test --release` passes for the engine and the Lambda crate, and `cargo clippy --all-targets` passes for the engine, the Lambda crate and the WASM crate.
+- Review condition: A change of `render_blocks::upsample_into`, of peak control, or of the prefix of the plan.
+- Work reference: TODO.md, "Master recordings over 30 minutes".
+- Supersedes / superseded by: Extends D145, D248, D249 and D251.
+
+## D253: Candidate renders of a long recording in scratch storage
+
+- Recorded: 2026-10-28.
+- Origin: Measurement. With D240, the `master` family of the 29.9-minute file peaks at 756.1 MB of live bytes with two threads. The peak holds one candidate render of 689.9 MB from its peak control to its delivery.
+- Basis: Measurement; no listening.
+- Status: Accepted. Implemented in `treatment_render::RenderAudio`, `render_blocks::stored_render_min_frames`, `delivery`, `selection`, `low_end`, `distributed` and `set`. Not deployed.
+- Decision:
+  - A render of a recording of 1,800 s or more goes from peak control to a scratch file in pieces, and stays there to its delivery (`RenderAudio`, `Kept::Stored`). A shorter render stays in memory (`Kept::Held`).
+  - The true-peak fit, the loudness, the attack loss, the candidate measures, the restoration windows, the sub lift and the files of the cloud family read the stored render in spans.
+  - The set sink reads the stored render back at its delivery.
+  - `MASTERING_STORED_RENDER_MIN_SECONDS` sets the duration for measurement.
+- Reason: Each read in spans gives the measure of the render in memory: the measures add the frames of each span in the order of the buffer.
+- Alternatives and tradeoffs: The stored render takes a scratch file of 657.9 MiB at 29.9 minutes in place of a buffer, and its reads take 0.40% more instructions in the family.
+- Evidence:
+  - The `master` family of the 29.9-minute file with the plan of a private record, two threads, the measure profile (D227), with `MASTERING_STORED_RENDER_MIN_SECONDS=0` against the default, in ABBA order. Results: a private record.
+  - The family peaks at 74.9 MB of live bytes against 759.0 MB. Its macOS footprint is 247.7 and 217.6 MB against 880.7 and 880.7 MB.
+  - It takes 4,041.1 and 4,041.2 billion instructions against 4,024.1 and 4,025.3 billion (+0.40%).
+  - The open scratch files peak at 5,263.2 MiB with both limits.
+  - With both `MASTERING_STORED_RENDER_MIN_SECONDS=0` and `MASTERING_UPSAMPLED_MIN_SECONDS=0`, the family peaks at 74.9 MB of live bytes, with a footprint of 235.0 MB, 4,255.9 billion instructions and 2,631.6 MiB of open scratch files.
+  - The family records of the nine runs are identical, apart from the times.
+  - The eight confirmation sets with `MASTERING_STORED_RENDER_MIN_SECONDS=0` give the 48 reports of the default, with the same WAV hashes, and take 16,285.8 billion instructions against 16,250.9 billion (+0.21%).
+- Rule and code references: `a_stored_render_gives_the_render_in_memory` (`src/treatment_render.rs`).
+- Limits and counterexamples: At the default of 1,800 s, the 29.9-minute file keeps its renders in memory. The browser engine renders up to five minutes, so its renders stay in memory.
+- Verification: With D253, `cargo test --release` passes for the engine and the Lambda crate, and `cargo clippy --all-targets` passes for the engine, the Lambda crate and the WASM crate.
+- Review condition: A change of a measure of a candidate render, or of the duration limit of the cloud.
+- Work reference: TODO.md, "Master recordings over 30 minutes".
+- Supersedes / superseded by: Extends D145, D232, D240 and D251.
+
+## D254: Source of a cloud family in scratch storage from the decode
+
+- Recorded: 2026-10-28.
+- Origin: Measurement. The family Lambda decodes the source into memory, one buffer of 689.9 MB at 29.9 minutes, and the renderer then copies it to a scratch file (D232).
+- Basis: Measurement; no listening.
+- Status: Accepted. Implemented in `treatment_render::RenderSource::Stored`, `audio_io::StoredSource`, `distributed::render_family_continued`, `set::prepare_stored`, the family Lambda, `family_local` and `family_time`. Not deployed.
+- Decision:
+  - The family Lambda, `family_local` and `family_time` decode the source into a scratch file at its render rate.
+  - The fingerprint check and the source analysis of the family read the scratch file in spans, and the renderer takes the file (`RenderSource::Stored`).
+  - A set of a stored source prepares it with `set::prepare_stored`, and its versions render in turn.
+- Reason: The renderer reads its source from a scratch file since D232. The stored source gives it the same frames without the buffer.
+- Alternatives and tradeoffs: The versions of a set of a stored source render in turn, in place of beside each other.
+- Evidence:
+  - The `master` family of the 29.9-minute file, two threads, the measure profile, with D254 against D252, in ABBA order.
+  - The family allocates no buffer for the source. With D252, the first allocation of 690.1 MB of live bytes is the read of the source. The family peaks at 759.0 MB of live bytes against 756.1 MB: the peak holds a candidate render (D253).
+  - The family takes 4,035.0, 4,025.7, 4,024.1 and 4,025.3 billion instructions against 4,028.6 and 4,048.3 billion. Its macOS footprint is 872.7 to 884.9 MB against 876.6 and 863.5 MB.
+  - The plan of the 29.9-minute file takes 3,685.6 and 3,685.7 billion instructions against 3,679.0 and 3,680.0 billion (+0.18%), and the four plans are identical.
+  - The browser set of track-e, in ABBA order: the linear memory peaks at 125.25 MiB and the scratch files at 682.4 MiB with both builds, and the four WAVs are identical.
+  - The eight confirmation sets give the 48 reports of D252, with the same WAV hashes, and take 16,250.9 billion instructions against 16,253.5 billion.
+- Rule and code references: `an_owned_source_gives_the_set_of_a_borrowed_source` and `a_family_continued_after_its_time_limit_gives_the_family_without_one` (`tests/set.rs`).
+- Limits and counterexamples: With the default limit of D253 at 29.9 minutes, the family holds each candidate render in memory, so its peak of live bytes stays at one buffer.
+- Verification: With D254, `cargo test --release` passes for the engine and the Lambda crate, and `cargo clippy --all-targets` passes for the engine, the Lambda crate and the WASM crate.
+- Review condition: A change of the decode of the family Lambda, or a Lambda report of the family near its memory.
+- Work reference: TODO.md, "Master recordings over 30 minutes".
+- Supersedes / superseded by: Extends D145, D232 and D250.
+
+## D255: Finalizer of a long recording from scratch storage
+
+- Recorded: 2026-10-28.
+- Origin: Measurement. With D233, the finalizer of the four families of the 29.9-minute file peaks at 778.8 MB of live bytes: one buffer of 689.9 MB and 88.9 MB of other allocations. The buffer holds the source, then the float32 render of each version.
+- Basis: Measurement; no listening.
+- Status: Accepted. Implemented in `distributed::finalize_set`, `pipeline::measure_mix_read`, `metrics_read`, `adjust::measure_read`, `set::matched_residual_db_of_wav_read` and the finalizer of the Lambda crate. Not deployed.
+- Decision:
+  - `distributed::finalize_set` takes a `RenderSource`. The finalizer Lambda, `finalize_local` and `finalize_alloc` give it the source in scratch storage from the decode (`source::decode_stored`, `audio_io::read_stored`).
+  - The fingerprint, the metrics and the stereo image of the source read it in blocks and batches.
+  - The float32 render of each version goes to a scratch file (`audio_io::read_stored`). Its metrics, its stereo image, its control measures and its residual against each accepted version read the scratch file in blocks and batches.
+- Reason: Each read form gives the result of the measure of the whole buffer: `MetricsScan` adds the frames in the order of the buffer, the stereo image and the spectrum read the frames of their batches, and the residual reads the frames at the place of each block of the WAV.
+- Alternatives and tradeoffs: The source and the render of each version take a scratch file of 657.9 MiB at 29.9 minutes in place of a buffer. The reads take 3.2% more instructions.
+- Evidence:
+  - The four families of the 29.9-minute file with D252, rendered with two threads. The finalizer tools use the release profile of the Lambda crate, with D254 and with D255.
+  - The finalizer peaks at 97.5 MB of live bytes against 779.2 MB. Its macOS footprint is 166.9 and 196.5 MB against 857.0 and 861.1 MB.
+  - In ABBA order, the finalizer takes 554.2 and 554.4 billion instructions against 537.3 and 537.2 billion (+3.2%), and 67.8 and 72.4 s of user CPU time against 68.2 and 69.8 s.
+  - The open scratch files, sampled every 0.25 s, hold one file of 657.9 MiB at most: the source, then the render of each version. The family files take 4,605.3 MiB.
+  - The six manifests are identical.
+- Rule and code references: `worker_plan_replays_the_native_family_and_rejects_wrong_source` (`tests/set.rs`): the finalizer of a stored source gives the manifest of the source in memory.
+- Limits and counterexamples: In the Lambda, the source in scratch storage waits beside the family files from their download to the measures of the source: 5,263.2 MiB of the 10,240 MiB of temporary storage at 29.9 minutes (51%), against 4,605.3 MiB (45%).
+- Verification: With D255, `cargo test --release` passes for the engine and the Lambda crate, and `cargo clippy --all-targets` passes for the engine, the Lambda crate and the WASM crate.
+- Review condition: A change of a measure of the finalizer, or a Lambda report of the finalizer near its memory or its temporary storage.
+- Work reference: TODO.md, "Master recordings over 30 minutes".
+- Supersedes / superseded by: Extends D145, D233 and D250.
+
+## D256: Upload of each Lambda from its file
+
+- Recorded: 2026-10-28.
+- Origin: Measurement. The planner, family, finalizer and adjust Lambdas read the upload into memory and decode it from its bytes. The decode of the upload of the 29.9-minute file, 398.0 MB of FLAC, peaks at 400.9 MB of live bytes. With D250, the plan of that file peaks at 289.6 MB.
+- Basis: Measurement; no listening.
+- Status: Accepted. Implemented in `source::decode_blocks_from`, `source::decode_stored_file`, `source::decode_stored_file_with_sha256`, `source::decode_file` and `read_upload` of the Lambda crate. Not deployed.
+- Decision:
+  - Each Lambda writes the upload to a file in `/tmp` as its chunks arrive (`read_upload`).
+  - The decode reads the file in chunks of 256 KiB. The file goes after the decode.
+  - The planner takes the SHA-256 of the upload as the decode reads the file.
+  - `planner_local`, `family_local`, `finalize_local` and `finalize_alloc` decode the file of the upload.
+- Reason: The decoder takes the upload one chunk at a time. Each chunk of the file holds the bytes of the same chunk of the upload, so the decode gives the same frames.
+- Alternatives and tradeoffs: The upload takes its size in temporary storage until the end of its decode. A decode of the object stream runs in the async task of the Lambda. The file keeps the decode synchronous.
+- Evidence:
+  - `source_alloc` with the upload of the 29.9-minute file (398.0 MB, from `soundkit_cloud_source`) and with the upload of stress recording 1 (25:51, 168.0 MB), in ABBA order. From the file, the decode peaks at 2.9 MB of live bytes against 400.9 and 170.9 MB from the bytes. The macOS footprint is 6.6 MB against 404.9 MB, and 5.6 and 6.4 MB against 174.1 and 173.6 MB.
+  - With the fingerprint of the stored source, the runs took 31.06 and 31.33 billion instructions against 31.40 and 30.92 billion, and 23.33 and 23.50 billion against 23.81 and 23.42 billion.
+  - The fingerprints of the stored source are identical.
+- Rule and code references: `an_upload_read_in_chunks_gives_the_source_of_its_bytes`.
+- Limits and counterexamples: The decode keeps its limits of 600,000,000 bytes and 30 minutes. Until the end of the decode, the upload file and the source in scratch storage are on disk together: 398.0 MB and 689.9 MB at 29.9 minutes. The adjust Lambda decodes the file into memory.
+- Verification: `cargo test --release` and `cargo clippy --all-targets` pass for the Lambda crate.
+- Review condition: A change of the SoundKit decoder, of the upload format, or of the limits of the upload.
+- Work reference: TODO.md, "Master recordings over 30 minutes".
+- Supersedes / superseded by: Extends D145, D250, D254 and D255.
+
+## D257: ADJUST of a long recording from scratch storage
+
+- Recorded: 2026-10-28.
+- Origin: Measurement. ADJUST of the `master` version of the 29.9-minute file has a macOS footprint of 1,539 to 1,546 MB with D254, with two threads: the source, the render of the family and the render read again in `adjust::finalize`. The ADJUST Lambda runs in the family function, with 3,008 MB.
+- Basis: Measurement; no listening.
+- Status: Accepted. Implemented in `adjust::render_in`, `adjust::finalize`, `adjust::VersionFacts::of_read`, `distributed::Store::read_stored`, `treatment_render::RenderSource::Lent`, the command line `adjust` and the ADJUST Lambda. Not deployed.
+- Decision:
+  - `adjust::render_in` and `adjust::render` take a `RenderSource`. The ADJUST Lambda and the command line give them the source in scratch storage from the decode (`source::decode_stored_file`, `audio_io::read_stored`).
+  - The family of the request takes the source on loan (`RenderSource::lend`, `RenderSource::Lent`), and the measures of the result then read it.
+  - The audibility point of a louder request reads the prepared prefix and its 4x frames from scratch storage (`Renderer::prepared_frames`, `audibility::point_on`). The temporal analysis of the source reads it in blocks (`analysis::Scan`).
+  - The render of the version comes from the store as stored frames (`Store::read_stored`). Its facts, its mono fold-down loss and the medium report read it in blocks and batches.
+- Reason: Each read form gives the result of the measure of the whole buffer, as in D255. The prepared prefix gives the prefix of `Renderer::prefix` (D243, D251).
+- Alternatives and tradeoffs: The source takes a scratch file of 657.9 MiB for the whole request at 29.9 minutes. With the limits at their defaults, ADJUST takes 0.5% and 0.75% more instructions on Streaming and on the Loudness step, 0.06% more on Mono, and 0.1% fewer on Radio.
+- Evidence:
+  - ADJUST of `master` of the 29.9-minute file, with the manifest of the finalizer of D255, two threads, the measure profile (D227), in ABBA order against D254.
+  - One Loudness step up: a macOS footprint of 856.5 and 856.6 MB against 1,537.1 and 1,547.7 MB, and 2,409.1 and 2,411.2 billion instructions against 2,392.0 and 2,391.9 billion.
+  - Streaming: 832.0 and 860.4 MB against 1,538.8 and 1,543.0 MB, and 1,088.1 and 1,086.5 billion instructions against 1,080.9 and 1,083.3 billion.
+  - Radio: 869.7 MB against 1,529.4 MB, and 5,814.3 billion instructions against 5,821.2 billion. Mono: 857.9 MB against 1,543.0 MB, and 6,413.7 billion instructions against 6,409.6 billion.
+  - With `MASTERING_UPSAMPLED_MIN_SECONDS=0` and `MASTERING_STORED_RENDER_MIN_SECONDS=0`, the louder request has a footprint of 211.0 MB against 1,559.5 MB, for 2,558.8 billion instructions against 2,395.0 billion (+6.8%). Its open files peak at 2,467.1 MiB against 3,289.5 MiB.
+  - The results, the full records and the WAVs are identical, apart from the times.
+- Rule and code references: `an_adjust_request_takes_its_reference_from_the_record_of_its_set` (`tests/set.rs`): ADJUST of a stored source gives the result of the source in memory. `the_point_of_a_prepared_prefix_is_the_point_of_the_whole_prefix` (`src/treatment_render.rs`).
+- Limits and counterexamples: With the limits at their defaults, the family of the request holds its render in memory at 29.9 minutes (D253), so the footprint stays near one buffer. The open files peak at 4,605.3 MiB against 3,947.4 MiB of the 10,240 MiB of temporary storage: the source in scratch storage. The Mono-safe preset is withdrawn on this file; the read of its source falls from 696.9 MB to 6.7 MB.
+- Verification: With D257, `cargo test --release` passes for the engine and the Lambda crate, and `cargo clippy --all-targets` passes for the engine, the Lambda crate and the WASM crate.
+- Review condition: A change of a measure of the ADJUST result, or a Lambda report of ADJUST near its memory or its temporary storage.
+- Work reference: TODO.md, "Master recordings over 30 minutes".
+- Supersedes / superseded by: Extends D145, D253, D254 and D255. Replaces the decode into memory of the adjust Lambda that D256 states.
+
+## D258: Time limit and continuation of ADJUST
+
+- Recorded: 2026-10-28.
+- Origin: Measurement. ADJUST of the `master` version of the 29.9-minute file with D254, two threads: Mono took 711.5 s and 758.6 s of CPU time, Radio 443.4 s and 599.8 s of CPU time. Lambda takes 0.9 to 1.9 s for each CPU-second of this computer: 680 to 1,440 s for Mono, against a Lambda timeout of 900 s. An ADJUST invocation had no deadline, so a request past the timeout left no result.
+- Basis: Measurement; no listening.
+- Status: Accepted. Implemented in `adjust::render_continued`, the ADJUST Lambda and the control Lambda. Not deployed.
+- Decision:
+  - `adjust::render_continued` keeps the candidate ladders of the request to a deadline (`selection.time-limit.v1`) and continues the request of a resume record (`distributed::Resume`, D225). A version that stops at the deadline gives the result `time-limit` and the record.
+  - The ADJUST Lambda renders to the deadline of its invocation less 240 s (`ADJUST_RESERVE`): the measures of the result and the upload of its WAV.
+  - A request that stops at its time limit writes its record at `adjust/{id}.resume-{n}.json` and invokes the family function again, while the invocation adds trials and within the 8 invocations of a family. The last invocation writes the result.
+  - The control adds one timeout of 900 s to the status of a request for each continuation that a record starts.
+- Reason: After the family of the request, `adjust::finalize` took 11 to 15 s at 29.9 minutes, and 87 to 92 s for a louder request with its audibility point. At 1.9 s of Lambda time for each second, that is up to 175 s. The WAV of 517 MB takes 17 s at 30 MB/s.
+- Alternatives and tradeoffs: A continuation decodes the upload again and renders the family again, with the failed trials of the record in place of their renders. Without a continuation, a request that stops gives `time-limit`.
+- Evidence: `an_adjust_request_continued_after_its_time_limit_gives_the_result_without_one` (`tests/set.rs`): a request past its deadline gives `time-limit` and a record, and the continuation of the record gives the result without a time limit. `an_adjust_request_continues_from_its_record_under_adjust` and `the_render_deadline_keeps_the_upload_reserve`, and `each_continuation_of_an_adjust_request_adds_a_timeout`.
+- Rule and code references: `selection.time-limit.v1` (D214), D225.
+- Limits and counterexamples: The app gives the words of a failed change to a `time-limit` result. The reserve comes from the measures at 29.9 minutes. A Lambda run of a long ADJUST request has not been made.
+- Verification: `cargo test --release` passes for the engine and the Lambda crate, and `cargo clippy --all-targets` passes for the engine, the Lambda crate and the WASM crate.
+- Review condition: A Lambda report of ADJUST, or a limit of the source above 30 minutes.
+- Work reference: TODO.md, "Master recordings over 30 minutes".
+- Supersedes / superseded by: Extends D214, D225 and D257.
+
+## D259: Float32 render of each version read in its file
+
+- Recorded: 2026-10-28.
+- Origin: Measurement. With D255 and D257, the finalizer and ADJUST copy the float32 render of each version from its file to a scratch file before its measures: 657.9 MiB for each version at 29.9 minutes. With D255, the finalizer took 3.2% more instructions.
+- Basis: Measurement; no listening.
+- Status: Accepted. Implemented in `audio_io::read_render`, `scratch::Offset`, `scratch::Pcm::holding`, `distributed::finalize_measured` and `distributed::Directory::read_stored`. Not deployed.
+- Decision:
+  - `audio_io::read_render` reads a float32 render in the form of `audio_io::write` in place: the file starts with the header of the encoder for its frames, and its frames follow the header. The measures read the frames in the file (`scratch::Offset`).
+  - It checks the frames as `read_stored` does: three seconds or more, and finite samples.
+  - A file in another form, or at a rate that is not a render rate, goes to scratch storage (`read_stored`).
+  - The finalizer and the directory store of ADJUST read each render with it.
+- Reason: The float32 render of a version holds the frames of the render at the render rate as little-endian pairs, the layout of a scratch file. The header of the encoder holds the frame count, so a file whose header and length agree holds those frames.
+- Alternatives and tradeoffs: The finalizer reads each render file once for the check of its samples. The file stays open while the measures read it.
+- Evidence:
+  - The four families of the 29.9-minute file, as in D255. The finalizer tools use the release profile of the Lambda crate and two threads, in ABBA order against D255.
+  - The finalizer takes 537.2 and 537.2 billion instructions against 556.2 and 556.0 billion (−3.4%), and 537.0 and 538.1 billion in a second pair. The manifests are identical.
+  - With two threads, the finalizer peaks at 40.8 MB of live bytes with D255 and with D259. The scratch files hold the source, and no copy of a render.
+  - ADJUST of `master`, with the measure profile, in ABBA order against D257: one Loudness step up takes 2,411.7 and 2,405.1 billion instructions against 2,414.1 and 2,413.1 billion, and Streaming 1,086.9 and 1,080.2 billion against 1,087.0 and 1,085.2 billion. The results, the full records and the WAVs are identical. The open files peak at 4,605.3 MiB with both builds, in the family of the request.
+- Rule and code references: `a_float32_render_is_read_in_its_file` (`src/audio_io.rs`).
+- Limits and counterexamples: Without D260, the finalizer Lambda holds the source beside the family files, and its temporary storage peaks at 5,263.2 MiB with D259 as with D255.
+- Verification: `cargo test --release` passes for the engine and the Lambda crate, and `cargo clippy --all-targets` passes for the engine, the Lambda crate and the WASM crate.
+- Review condition: A change of the float32 WAV writer or of the scratch file layout.
+- Work reference: TODO.md, "Master recordings over 30 minutes".
+- Supersedes / superseded by: Extends D255 and D257.
+
+## D260: Source of the finalizer measured before the family files
+
+- Recorded: 2026-10-28.
+- Origin: Measurement. The finalizer Lambda decodes the source into scratch storage, downloads the family files and then measures the source. At 29.9 minutes, the source (657.9 MiB) and the family files (4,605.3 MiB) take 5,263.2 MiB of the 10,240 MiB of temporary storage together (D255).
+- Basis: Measurement; no listening.
+- Status: Accepted. Implemented in `distributed::SetSource`, `distributed::finalize_measured`, the finalizer Lambda, `finalize_local` and `finalize_alloc`. Not deployed.
+- Decision:
+  - `distributed::SetSource::of` takes the measures of the source that the finalizer uses: its frames, its fingerprint, its metrics and its stereo image. It checks the source against the plan. The source goes after the measures.
+  - `distributed::finalize_measured` completes the set from these measures. `finalize_set` is `finalize_measured` of `SetSource::of`.
+  - The finalizer Lambda measures the source before it downloads the family files. `finalize_local` and `finalize_alloc` measure it before they link the family files.
+- Reason: The finalizer frees the source after its measures (D233), and no later step reads it.
+- Alternatives and tradeoffs: A plan whose family count differs from the results is an error after the measures of the source, in place of before them.
+- Evidence:
+  - `finalize_local` with the four families of the 29.9-minute file, two threads, the files of its folder (`du`) and its open scratch files every 0.25 s.
+  - With D259 and D260, the temporary storage peaks at 4,605.3 MiB, the family files, against 5,263.2 MiB with D255 and with D259 alone.
+  - The runs take 537.1 and 537.3 billion instructions against 538.1 and 537.0 billion with D259. The manifests are identical.
+- Rule and code references: `worker_plan_replays_the_native_family_and_rejects_wrong_source` (`tests/set.rs`): the measures of the source before the family files give the manifest of `finalize_set`, and the source of another plan is an error.
+- Limits and counterexamples: The decode of the upload holds the upload file and the source together: 379.6 MiB and 657.9 MiB at 29.9 minutes. The family files grow with the duration: 4,605.3 MiB at 29.9 minutes.
+- Verification: `cargo test --release` passes for the engine and the Lambda crate, and `cargo clippy --all-targets` passes for the engine, the Lambda crate and the WASM crate.
+- Review condition: A step of the finalizer that reads the source after the downloads.
+- Work reference: TODO.md, "Master recordings over 30 minutes".
+- Supersedes / superseded by: Extends D233, D255 and D259.
+
+## D261: Timeout of each stage of a cloud job from its own start
+
+- Recorded: 2026-10-28.
+- Origin: Analysis for TODO.md, "Master recordings over 30 minutes". The status of the control Lambda reported "Cloud planning timed out." 900 s after the dispatch, and "Cloud mastering timed out." 1,500 s after the dispatch and 900 s more for each continuation of a family. The dispatch starts the stems function of a job that the cloud splits, so the split and the plan had one window of 900 s. With two threads, the plan of the 45-minute file takes 565.4 CPU-s on this computer. At 0.9 to 1.9 s of Lambda time for each CPU-second, that is 509 to 1,074 s.
+- Basis: Analysis of the Lambda timeouts; no listening.
+- Status: Accepted. Implemented in `control::stage_timed_out`, `control::App::status`, `control::App::renew_seat` and the planner Lambda (`planning.json`). Not deployed.
+- Decision:
+  - A job times out when the stage that started last passes its Lambda timeout of 900 s and 60 s for its start (`STAGE_SECONDS`, `START_SECONDS`).
+  - The starts are the dispatch, the start record of the planner (`planning.json`), the plan (`plan.json`) and the resume record of each continuation of a family.
+  - The planner writes `planning.json` with the time of its start before it reads the upload.
+  - A poll in the planning stage and in the render stage renews the seat of the job after `SEAT_SECONDS` from the dispatch.
+- Reason: A stage of a job runs for at most its Lambda timeout. A window from the dispatch reports a timeout while a later stage still runs, and the job leaves its seat while its families are billed.
+- Alternatives and tradeoffs: A window that scales with the duration of the recording needs the Lambda time of each stage, and no Lambda report gives it at 30 minutes or more. A job that stops in a stage reports its timeout 960 s after the start of that stage: a split job that stops in its planner reports it up to 1,860 s after the dispatch, against 900 s.
+- Evidence: `a_job_times_out_after_the_stage_that_started_last`.
+- Rule and code references: `control::stage_timed_out`.
+- Limits and counterexamples: The finalization keeps its window of 1,500 s from `finalizing.json`. ADJUST keeps `adjust_timeout` (D258). A stage that Lambda retries after an error starts again without a new start record, except the planner.
+- Verification: `cargo test --release` and `cargo clippy --all-targets -- -D warnings` pass for the Lambda crate.
+- Review condition: A Lambda report of a stage near its timeout, or a change of a Lambda timeout.
+- Work reference: TODO.md, "Master recordings over 30 minutes".
+- Supersedes / superseded by: Extends D225 and D258.
+
+## D262: Cloud Lambdas for sources of up to 45 minutes
+
+- Recorded: 2026-10-28.
+- Origin: Measurement, a private record, for step 8 of the order of work. With two threads, the live bytes of each cloud stage of a 45-minute file peak at 14% of the 3,008 MB of a Lambda or less, and the temporary storage at 68% of its 10,240 MiB or less. With the usable stem evidence of the aligned stems of D263, the macOS footprint of each stage peaks at 22% of the memory of a Lambda or less, and the temporary storage at the same 68%.
+- Basis: Measurement; no listening.
+- Status: Accepted. Implemented in `source::MAX_SECONDS`, `source::MAX_BYTES`, the upload checks of the control Lambda, `UPLOAD_RESERVE`, `ADJUST_RESERVE` and `FAMILY_INVOCATIONS` of the Lambda crate. Not deployed.
+- Decision:
+  - The Lambdas decode a source of up to 2,700 s (`source::MAX_SECONDS`), from an upload of up to 900 MB. The control Lambda accepts an upload of up to 900 MB and Opus stems of up to 90 MB.
+  - A family invocation keeps 180 s for its uploads after its renders, against 120 s: the delivered and the float32 WAVs of three 45-minute versions are 5.4 GB, 180 s at 30 MB/s.
+  - An ADJUST invocation keeps 360 s after its render, against 240 s: the measures of a louder result at 45 minutes take up to 263 s on Lambda, and its WAV of 778 MB takes 26 s at 30 MB/s.
+  - A family or an ADJUST request continues within 12 invocations, against 8: a `master` that falls back through each ladder at 45 minutes takes up to 7,240 s of Lambda time, and an invocation has 720 s for its renders.
+- Reason: At 45 minutes, the memory and the storage of each stage are under the limits of its Lambda. The reserves and the invocations scale with the duration of the recording.
+- Alternatives and tradeoffs:
+  - 60 minutes puts the four family files of the finalizer at about 9,230 MiB, 90% of its temporary storage.
+  - The planner Lambda has no time limit. With two threads, the plan of the 45-minute file takes 565.4 CPU-s on this computer, 509 to 1,074 s at 0.9 to 1.9 s of Lambda time for each CPU-second, and 492 to 729 s at the 0.87 to 1.29 s of the planner of regression mix 2. With four threads, the plan takes 0.79 of the wall time of two threads.
+  - A recording of 30 minutes or less renders 60 s less in each family invocation and 120 s less in each ADJUST invocation.
+- Evidence: a private record.
+- Rule and code references: `flac_upload_limit_covers_the_longest_source_of_48k_stereo_pcm24`, `the_render_deadline_keeps_the_upload_reserve` and `a_family_continues_while_it_adds_trials_within_its_invocations`.
+- Limits and counterexamples: The site accepts a recording of up to 30 minutes for the cloud (bitneedle-app `web/js/mastering.mjs`), and the whole-track stems worker of stemsplits accepts up to 1,800 s (`deploy/aws/wholetrack/src/main.rs`). A cloud job over 30 minutes needs both changes, and a Lambda report of the planner. The stems of the first measurement give stem evidence that is not usable ("Stems of the long files"); with usable stem evidence, the plan JSON of the 45-minute file is 9.2 MB, and the finalizer peaks at 285.2 MB of live bytes.
+- Verification: `cargo test --release` and `cargo clippy --all-targets -- -D warnings` pass for the Lambda crate.
+- Review condition: A Lambda report of a stage at 30 minutes or more, or a change of the limits of a Lambda.
+- Work reference: TODO.md, "Master recordings over 30 minutes".
+- Supersedes / superseded by: Extends D225, D256 and D258.
+
+### Updates
+
+- 2026-10-29: Review at 45 minutes with the de-esser key and the low-mid key. The measures of ADJUST (`adjust::finalize`) take 8.0 to 102.4 s on the M1 computer. At 1.9 s of Lambda time for each second, the longest take 195 s, and with the upload of the delivered WAV an invocation needs 221 s of the 360 s of `ADJUST_RESERVE`. `ADJUST_RESERVE` stays at 360 s. With D277, the macOS footprint of each stage is 919.2 MB or less, 31% of the 3,008 MB of a Lambda, against 1,379.8 MB (46%) before D277.
+- 2026-10-29: With D278, ADJUST at 45 minutes with both keys peaks at 696.5 MB of macOS footprint, and each stage at 23% of the 3,008 MB of a Lambda or less (a private record).
+
+## D263: Plan of a long recording in two invocations
+
+- Recorded: 2026-10-28.
+- Origin: Measurement, a private record, for step 8 of the order of work. The planner Lambda has no time limit and no continuation (D262). With usable stem evidence and two threads, the plan of the 45-minute file takes 452.9 to 457.0 CPU-s on this computer. With the Opus decode of its stems, that is an estimated 429 to 914 s of Lambda time, against a Lambda timeout of 900 s. The stems of the earlier measurements at 45 minutes give stem evidence that is not usable ("Stems of the long files").
+- Basis: Measurement; no listening.
+- Status: Accepted. Implemented in `stem_evidence::Evidence::stored`, `stem_evidence::Evidence::from_stored`, `static_text`, the planner Lambda (`planner::splits`) and the invoke permission of the planner role. Not deployed.
+- Decision:
+  - The plan of a source of 1,800 s or more runs in two invocations of the planner Lambda (`SPLIT_SECONDS`). The first decodes the upload and the stems, measures the stem evidence and stores it at `{job}/evidence.json`. The second decodes the upload again, reads the evidence and prepares the plan.
+  - The first invocation stores the evidence only when its JSON reads back as the same evidence (`Evidence::stored`). It prepares the plan itself from other evidence.
+  - The request of the second invocation holds the SHA-256 of the evidence object and the stem records of the plan. The second invocation checks the object against the SHA-256.
+  - The stored evidence holds the masked depth of each frame of the low-mid key and the automatic focus proposals, which the evidence of a plan record leaves out.
+  - Each invocation writes the start record of the planner (`planning.json`), so the planning stage times out 960 s after the start of the invocation that started last (D261).
+- Reason: The two invocations take an estimated 134 to 286 s and 303 to 642 s of Lambda time at 45 minutes, each under the Lambda timeout. The plans from the stored evidence are identical to the direct plans: the eight confirmation mixes, the 29.9-minute file and the 45-minute file.
+- Alternatives and tradeoffs:
+  - The second invocation decodes the upload again: 3.5 s on this computer at 45 minutes. The two invocations take 0.19% to 0.21% more instructions than the direct plan. The stored evidence is 1.8 MB at 45 minutes.
+  - A planner with four vCPUs (7,076 MB) took 0.79 of the wall time of two threads at 45 minutes, without a bound on its time, and costs 2.35 times the memory of each second.
+  - A source under 1,800 s keeps one invocation: with the aligned stems, the plan of the 29.9-minute file takes 284.7 CPU-s on this computer, an estimated 271 to 571 s with the Opus decode of its stems (about 16 CPU-s).
+- Evidence: a private record and "Plan in two invocations (D263)".
+- Rule and code references: `a_plan_from_stored_evidence_is_the_plan_from_the_evidence` (`tests/stem_evidence.rs`), `a_source_of_thirty_minutes_or_more_plans_in_two_invocations` and `the_second_invocation_of_a_plan_takes_the_stored_evidence`, `a_text_is_allocated_once` (`src/static_text.rs`).
+- Limits and counterexamples: Evidence with a non-finite number reads back as other evidence, and its plan stays in one invocation. A second invocation of another deployment can fail to read the evidence of the first. Each distinct text of the stored evidence stays allocated for the life of the process (`static_text`). The estimates leave out the transfers to and from S3, and no Lambda report gives the planner at 30 minutes or more.
+- Verification: `cargo test --release` and `cargo clippy --all-targets -- -D warnings` pass for the engine and the Lambda crate, and the WASM clippy passes.
+- Review condition: A Lambda report of the planner at 30 minutes or more, or a change of the Lambda timeout.
+- Work reference: TODO.md, "Master recordings over 30 minutes".
+- Supersedes / superseded by: Extends D261 and D262.
+
+## D264: Control reads of the plan and the stage objects
+
+- Recorded: 2026-10-28.
+- Origin: Measurement, a private record. Before D264, the control Lambda read each JSON object of a job into a `serde_json::Value`, up to 2,000,000 bytes. The plan of track-f is 2,209,162 bytes, so each status poll of its cloud job in the render stage gave the error "Mastering object is too large". At 45 minutes, the plan is 9,154,909 bytes and the manifest 4,540,332 bytes.
+- Basis: Measurement; no listening.
+- Status: Accepted. Implemented in `App::plan`, `App::exists`, `App::get_parsed`, `PlanSummary`, `JSON_BYTES` and `PLAN_BYTES` of the control Lambda. Not deployed.
+- Decision:
+  - The control reads a plan of up to 64,000,000 bytes (`PLAN_BYTES`) into `PlanSummary`: the SHA-256 of the source PCM and the ID of each family.
+  - The control checks `dispatched.json`, `plan.json`, the record of each family and `finalizing.json` with a HEAD request, without their bodies.
+  - The control reads other JSON objects of up to 5,000,000 bytes (`JSON_BYTES`) into a value. The status of a complete job carries the manifest, a Lambda reply holds at most 6 MB, and the escapes of the reply add 7.5% to the manifest of the 45-minute file.
+- Reason: The summary of the 45-minute plan takes less than 1 KB, against 90.6 MB for its value, in a control Lambda of 256 MB. The status poll of a job in the render stage reads the plan, and each check of a family record reads no body.
+- Alternatives and tradeoffs:
+  - A plan that holds the de-esser key once: the 15 specs of the 45-minute plan each hold the same key of 520 KB. This changes the plan format of the planner, the families, the finalizer, ADJUST and the browser engine.
+  - The manifest from a signed link in the status reply: this changes the app.
+  - A higher limit for each value: the value of the 45-minute plan takes 90.6 MB, and each status poll in the render stage reads it.
+- Evidence: a private record.
+- Rule and code references: `the_summary_of_a_plan_keeps_its_source_and_its_family_ids`.
+- Limits and counterexamples: A manifest over 5,000,000 bytes stops the status of its job. The manifest grows with the keyed share of the de-esser frames: 5.1% at 45 minutes and 7.4% for track-f. Each status poll in the render stage reads the whole plan from S3: 9.2 MB at 45 minutes. A HEAD request of a missing object gives 404 only with `s3:ListBucket`, which the control role holds.
+- Verification: `cargo fmt --check`, `cargo test --release` and `cargo clippy --all-targets -- -D warnings` pass for the Lambda crate.
+- Review condition: A manifest over 4,000,000 bytes, a change of the plan format, or a change of the memory of the control Lambda.
+- Work reference: TODO.md, "Master recordings over 30 minutes".
+- Supersedes / superseded by: Extends D262. D265 replaces the read of the manifest.
+
+## D265: Status reply in gzip and the manifest as text
+
+- Recorded: 2026-10-28.
+- Origin: Measurement, a private record. The site accepts a recording of up to 30 minutes for the cloud. At 29.7 minutes with the sibilance of track-f, the manifest is 7,802,553 bytes: over the 5,000,000 bytes that D264 reads into a value. Its status reply before D265 is 8,583,781 bytes, over the 6,291,456 bytes of a Lambda reply, and peaks at 250.9 MB of live bytes in a control Lambda of 256 MiB.
+- Basis: Measurement; no listening.
+- Status: Accepted. Implemented in `accepts_gzip`, `compressed`, `Manifest`, `Complete`, `App::manifest`, `App::handle` and `MANIFEST_BYTES` of the control Lambda. Not deployed.
+- Decision:
+  - The control sends a reply body of 100,000 bytes or more (`GZIP_BYTES`) in gzip at level 1 to a request whose `accept-encoding` holds `gzip` without a quality of 0. The reply holds the base64 of the gzip, `isBase64Encoded` and `content-encoding: gzip`.
+  - The control reads a manifest of up to 12,000,000 bytes (`MANIFEST_BYTES`). It reads the ID and the WAV file of each version, and the status of a complete job carries the text of the manifest.
+  - The ADJUST action checks its parent against the versions of the same read.
+- Reason: At 29.7 minutes, the reply is 2,720,852 bytes and peaks at 31.2 MB of live bytes. Each reply with D265 is 0.35 to 0.38 times the bytes of its manifest, so the reply of a manifest of 12,000,000 bytes is about 4.6 MB. A browser decodes a gzip body in `fetch`, and the app keeps its reads. An ADJUST request polls the status every 3 s, and each poll carries the manifest.
+- Alternatives and tradeoffs:
+  - A manifest that holds the de-esser key and the low-mid key once: at 29.7 minutes, the four versions and the reference and the record of ADJUST each hold both keys, 1,131,309 bytes. This changes the app, which reads the spec of each version from the manifest.
+  - A status without the manifest after the first read, or the manifest from a signed link: this changes the app.
+  - Gzip at level 6 makes the gzip of the 45-minute manifest 1.16 times smaller than level 1, in 5.2 times the time on this computer.
+- Evidence: a private record.
+- Rule and code references: `a_large_reply_goes_in_gzip_to_a_request_that_accepts_it` and `the_status_of_a_complete_job_carries_the_text_of_its_manifest`.
+- Limits and counterexamples: A request without `gzip` in its `accept-encoding` gets the body as text, and a reply over 6,291,456 bytes fails in Lambda. The text of the manifest goes to the app as the finalizer wrote it, without the checks of a value. A manifest of up to 12,000,000 bytes that gzip compresses less than 2.5 times gives a reply over 6,291,456 bytes. No Lambda report gives the time of the gzip on the control.
+- Verification: `cargo fmt --check`, `cargo test --release` and `cargo clippy --all-targets -- -D warnings` pass for the Lambda crate.
+- Review condition: A manifest over 9,000,000 bytes, a reply over 4,000,000 bytes, or a change of the memory of the control Lambda.
+- Work reference: TODO.md, "Master recordings over 30 minutes".
+- Supersedes / superseded by: Extends D264, and replaces its read of the manifest.
+
+### Updates
+
+- 2026-10-29: Review after D276. At 45 minutes with speech added to the mix and to the vocal stem, the manifest with each key in its specs is 10,360,190 bytes, and 16,354,307 bytes with the low-mid key as well: over the 9,000,000 bytes of the review condition, and the second over `MANIFEST_BYTES`. Gzip at level 1 makes the measured manifests 3.39 to 3.88 times smaller, against 3.50 to 3.55 here. With D276, these manifests are 2,810,691 and 3,935,051 bytes, and the gzip of the larger one with base64 is 1,410,640 bytes. `MANIFEST_BYTES` stays at 12,000,000, and the size check of the control takes the ratio of 3.39.
+
+## D266: Worker plan with shared keys
+
+- Recorded: 2026-10-28.
+- Origin: Measurement, a private record. A worker plan holds 15 specs, and before D266 each spec held the de-esser key, the low-mid key and the focus envelopes of the plan. At 29.7 minutes with the sibilance of track-f, the plan is 17,675,544 bytes, and its specs hold one distinct de-esser key of 482,055 bytes and one distinct low-mid key of 649,254 bytes. The control Lambda reads the plan at each status poll in the render stage, every 2.5 s.
+- Basis: Measurement; no listening.
+- Status: Accepted. Implemented in `distributed::share_specs`, `distributed::expand_spec`, `distributed::expand_specs`, `InputPlan::read`, `set::WorkerPlan::to_json`, `adjust::worker_plan`, `adjust::Base::of_plan`, the planner Lambda, `planner_local`, a private record and the `plan_set` call of the browser engine. Not deployed.
+- Decision:
+  - A worker plan of schema `mastering.worker-plan.9` holds each distinct value of the `deesser`, `low_mid` and `focus_envelopes` fields of its specs once, in `shared`. Each spec holds `{"shared": index}` in place of the value. An empty field stays in its spec.
+  - The specs of a plan are the reference of each family, and the spec of each candidate and of each speculative base.
+  - Each reader puts the shared values back before it uses a spec: a family, the finalizer and the base of ADJUST.
+  - The base of ADJUST also takes a plan of schema `mastering.worker-plan.8` (`FULL_PLAN_SCHEMA`), so a set made before D266 keeps its ADJUST requests.
+- Reason: The shared plans are 0.072 to 0.207 times the bytes of the full plans: 1,279,614 bytes at 29.7 minutes and 776,435 bytes at 45 minutes. The families and the manifest of track-f are the same from the shared plan, from the full plan and before D266, and the `essential` family at 29.7 minutes is the same from each plan.
+- Alternatives and tradeoffs: A family that keeps the specs with `{"shared": index}` and puts the values in at each use holds fewer bytes, but each decode, hash and copy of a spec into a family record then takes the shared values. With D266, a family holds the same specs as before D266.
+- Evidence: a private record.
+- Rule and code references: `a_plan_with_shared_keys_gives_the_families_of_the_full_plan` (`tests/stem_evidence.rs`).
+- Limits and counterexamples: A family, a finalizer or an ADJUST request of an earlier deployment refuses a plan of schema 9, and a family of D266 refuses a plan of schema 8: a cloud job that plans before a deploy and renders after it fails. The footprint of a family from each plan differs within the spread of the runs. The manifest keeps the keys of each version spec, which the app reads. The set renderer of the browser engine and the native set renderer take the typed plan without its JSON, so their memory stays as it was.
+- Verification: `cargo fmt --check`, `cargo test --release` and `cargo clippy --all-targets -- -D warnings` pass for the engine and the Lambda crate, and the WASM clippy passes.
+- Review condition: A new field of a spec that each spec of a plan holds, or a change of the readers of a plan.
+- Work reference: TODO.md, "Master recordings over 30 minutes".
+- Supersedes / superseded by: Extends D264.
+
+## D267: Peak control criterion from the album pairs
+
+- Recorded: 2026-10-28.
+- Origin: TODO.md, "Peak control criterion" and "Peak control at the loudness of Full" (D127, D168, D223). At the loudness of Full, short gain dips and Pro-L 2 lower the masked NMR of peak control and raise the NMR under 510 Hz.
+- Basis: Measurement and the pair prior of D177; no listening, owner decision of 2026-10-16.
+- Status: Accepted. The engine is unchanged. A private record takes `DIP_FAST=limiter`.
+- Decision:
+  - A change of peak control trades neither ratio for the other. Against the prefix at the target of Full, on each of the seven confirmation tracks of the run, the change raises the total masked NMR, the NMR under 510 Hz and the gain span each by less than 0.5 dB, and the energy attack loss P90 by less than 0.2 dB. It lowers the total masked NMR by 0.5 dB or more on four or more of the tracks.
+  - No form of the run passes. Full keeps its peak control, and the two-stage design of D168 stays out of the engine.
+- Reason:
+  - The run measures each album master and each render against its mix through the best static stereo filter. At the loudness of each master, the total masked NMR of Full is under the master on five of seven tracks, by 6.14 to 11.39 dB. The NMR under 510 Hz of Full is over the master on four tracks, by 0.66 to 4.00 dB. The masters change the level of blocks of 100 ms by 0.14 to 0.76 dB (the gain span), and Full by 0.67 to 2.10 dB. The album pairs give no case for a lower total NMR with a higher NMR under 510 Hz or a larger gain span.
+  - The dips without a slow stage raise the NMR under 510 Hz against Full on each track, by 0.76 to 4.55 dB, and Pro-L 2 Transparent by 1.61 to 3.37 dB. With a slow stage and a clip budget, the dips raise it on track-e by 0.53 dB or more.
+  - Under the limiter of the engine, a slow stage of 200 to 1,000 ms lowers the NMR under 510 Hz on six or seven tracks, and raises the gain span on each track by 0.71 dB or more. The masked NMR fits a gain to each block of 0.34 s, so a gain change that the fit follows is not in its noise. The compression style of each version sets the movement of its gain (D202), and a slow stage of peak control adds a movement of its own.
+- Alternatives and tradeoffs:
+  - A slow stage of 200 ms at 0.5 of its depth under the limiter of the engine lowers the total NMR by 0.76 to 1.25 dB on four tracks and raises it by 0.12 dB on track-e. Its gain span is 1.98 to 2.92 dB over Full, and its ducked share 1.1 to 14.2 points over Full.
+  - The dip of 0.1 ms without a clip budget lowers the total NMR by 2.09 to 4.44 dB.
+- Evidence: The peak control criterion run; its result files; a private record.
+- Rule and code references: a private record (`DIP_FAST=limiter`), a private record (`PAIR_WRITE`), a private record.
+- Limits and counterexamples:
+  - Seven tracks and one version, and the album masters of one engineer.
+  - The measure of a master against its mix holds each stage of the master. The share of peak control in it is unknown.
+  - The masked NMR has no calibration against listening on this material (D127).
+  - The slow stage of the probe is one form of a slow stage, with a lookahead of its length. The envelope of Pro-L 2 is unknown.
+- Verification: The run record. With `DIP_FAST=limiter`, the clip budget of 1.5 dB and no slow stage, the probe gives the values of Full against the prefix within 0.01 dB.
+- Review condition: A form of peak control that passes the criterion, or a listening result that hears peak control (D168).
+- Work reference: TODO.md, "Peak control at the loudness of Full".
+- Supersedes / superseded by: Answers the review condition of D168, which D223 met.
+
+## D268: The math library of each target
+
+- Recorded: 2026-10-28.
+- Origin: TODO.md, "Identical WAVs on each target" and "Cloud and local parity"; the review condition of D045, a full native and WASM set that differs in a delivered WAV.
+- Basis: Measurement; no listening.
+- Status: Accepted. The engine is unchanged.
+- Decision:
+  - The native engine, the browser engine and the Lambdas keep the math library of their platform and the SIMD paths of rustfft.
+  - The WAVs of one set can differ between two targets in the last steps of 24 bits. A comparison of two targets compares the decisions of the set: the versions, the candidates, the statuses, the labels, the measured names and each field of each spec that is not a number.
+- Reason:
+  - On the nine regression mixes at 1.14.0, the native and the WASM sets make the same decisions. 7 of the 36 WAVs are identical. The other 29 differ by 1 to 8 steps of 24 bits, at residuals of −197.2 to −122.3 dB against the native WAV.
+  - Identical WAVs need one implementation of each function of the math library in the engine (284 lines of `src/`), `mel_spec`, rustfft and realfft. The scalar FFT takes 3.0% more instructions natively and 2.3% more CPU time in the browser engine on track-d, and `libm` in place of the math library of macOS adds about 1.7% to the native time.
+  - The app compares the hash of a WAV with the record of the same job: a download against its record, and the preview of a cloud job against its final master (bitneedle-app `web/js/mastering.mjs`).
+- Alternatives and tradeoffs: One scalar FFT and one math library on each target: the same WAVs on each target, for the time above.
+- Evidence: The native and WASM parity run; the cloud deployment of `8d18e85`, where the WAVs of `master` and `bold` from the planner Lambda and from `planner_local` differ and `essential` and `open` are identical.
+- Rule and code references: None.
+- Limits and counterexamples: Nine mixes with their stems. The math library of the planner Lambda is glibc. No run on a Linux host gives the plans of one source from glibc and from macOS, so the cause of the cloud and local difference is unchecked.
+- Verification: The run records.
+- Review condition: A reader that compares the WAVs or the hashes of two targets, or a set whose decisions differ between two targets.
+- Work reference: TODO.md, "Identical WAVs on each target".
+- Supersedes / superseded by: Answers the review condition of D045 on WAV equality.
+
+## D269: Families started by the Essential family
+
+- Recorded: 2026-10-28.
+- Origin: TODO.md, "Reference render of the cloud families"; the review condition of D196, a form that saves Lambda time.
+- Basis: Measurement; no listening.
+- Status: Accepted. Implemented in the planner Lambda (`planner::family_starts`), the family Lambda (`FamilyStore`, `start_families`, `started_family`, `starts_compared` and `reference_key`), the stage time of the control (D261) and the stack setting `SharedReference` (`MASTER_AWS_SHARED_REFERENCE` of), whose default is `on`. The engine is unchanged. The deployed stack runs the families of D196.
+- Decision:
+  - With `SharedReference` at `on`, the planner starts the family without a reference spec, Essential. Its request names the families that compare with its first render (`starts`).
+  - When the Essential family publishes its reference record (`distributed::Store::publish_reference`), the family Lambda writes the record to `families/reference.json` in the job. It then starts each family of `starts`, with the key of the record (`reference_key`). This occurs before the Essential family writes its WAV.
+  - A family that starts with the key reads the record before its render and takes the reference from it (D196). A record without a reference, or a record of another spec, makes the family render the reference itself.
+  - An Essential family that gives no record before its end starts the families without the key. Each of them then renders the reference itself.
+  - A continuation of a family keeps the key. A continuation of the Essential family starts no families.
+  - The families stage of the control times out at the Lambda timeout from the latest of the plan, the record and the resume records (D261).
+  - With `off`, the planner starts each family, and each family renders the reference itself (D196).
+- Reason:
+  - On track-h with engine 1.14.0, one family at a time with two threads, the four families take 88.13 and 93.35 s with the record and 188.19 and 190.17 s without it. Their CPU time falls from 291.53 and 297.54 to 134.67 and 141.06 CPU-s. Each family gives the same WAVs.
+  - The Essential family wrote the record 0.86 and 0.96 s before its end. When it starts the other families at its record, the last family ends 66.99 and 71.01 s after the start of the Essential family, against 68.66 and 68.86 s when the families start at the same time.
+  - The critical path of the job adds the start of a family and the invocation of the family Lambda. The start takes 0.8 s at 3:13 and 6.2 to 6.5 s at 25:51 on this computer with two threads (D196, 2026-10-27).
+  - On Lambda, at 1.6 to 2.6 times the wall time of this computer, the families of track-h take 152 to 265 s less for each job. At 3,008 MB that is $0.006 to $0.010.
+- Alternatives and tradeoffs:
+  - Each family renders the reference (D196): three families each spend the Lambda time of the reference render.
+  - The Essential family starts the other families when its reference render has about the start of a family left: the critical path keeps its length. The start needs an estimate of the rest of the render. The estimate saves at most the start of a family, 1.3 to 2.2 s at 3:13 on Lambda. The time of a render on Lambda is 1.6 to 2.6 times the time of this computer, so the reference render of track-h takes about 53 to 86 s there. That range of 33 s is 15 to 25 times the start of a family on Lambda.
+  - The families start with the plan and wait for the record: Lambda bills the wait (D196).
+- Evidence: the software speed run and a private record.
+- Rule and code references: None.
+- Limits and counterexamples: One track at 3:13, and two passes. The run starts each family alone on this computer, and Lambda runs the families at the same time on their own vCPUs. The run leaves out the invocation and the read of the upload from S3, and no cloud run measures the form. When the Essential family fails before its record, the other families do not start. The job then fails in each form, because the finalizer needs each family. An Essential family that Lambda retries after its record starts the families again, as a retried planner does, and each family writes the same files.
+- Verification: `planner::tests::essential_starts_the_families_that_compare_with_its_reference` and `tests::essential_starts_each_family_with_the_reference_record` of the Lambda crate. The run gives the same WAVs in the two forms.
+- Review condition: A cloud run in which a job with `on` takes longer than a job with `off` by more than the start of a family and an invocation; a plan whose families compare with a render other than the first render of Essential.
+- Work reference: TODO.md, "Reference render of the cloud families".
+- Supersedes / superseded by: Answers the review condition of D196 on Lambda time. Changes "The family Lambda renders its own reference" of D196.
+
+## D270: Reference record of a cloud set in its Essential version record
+
+- Recorded: 2026-10-29.
+- Origin: TODO.md, "Deploy order of D217": the `adjust_version` job of the browser engine of 1.14.0 refuses a base with `record`, and the site keeps the manifest of a cloud set as its summary.
+- Basis: Measurement and the code of the site (bitneedle-app `web/js/mastering.mjs` and `web/js/workers/mastering.worker.mjs`); no listening.
+- Status: Accepted. Implemented in `adjust::VERSION_REFERENCE_FIELD`, `adjust::Base::with_versions_record`, `adjust::render`, `distributed::finalize_set`, the ADJUST job of the browser engine (`adjust_run`) and the ADJUST action of the family Lambda. Not deployed.
+- Decision:
+  - The finalizer puts the reference record of the set in the Essential version record of the manifest, as `reference_record`. The base of the manifest (`adjust`) keeps no record.
+  - A request takes the record of its base. When the base has none, the request takes the record of the Essential version record, then `adjust.record` of an earlier manifest, then `reference_record` of a family result.
+  - `master set` and a set made in the browser keep the record in their base (D217).
+  - The site and the cloud stack can deploy in either order.
+- Reason:
+  - The site gives the browser engine `set.summary.adjust` as the base of a request. The base of 1.14.0 takes no unknown field, and the engine of 1.14.0 refuses the manifest of D217 with "unknown field `record`".
+  - The site keeps each version record of the manifest whole (`{ ...record, file }`). It gives the version records to the browser engine as JSON values, and the engine of 1.14.0 reads them field by field.
+  - On track-h, the ADJUST job of the browser engine of 1.14.0, run natively, delivers a Streaming request on `essential` from the manifest of D270. Its WAV is identical with and without `reference_record`.
+  - The site makes a request on a cloud set on the device when the cloud job is older than 23 hours, for a track of up to five minutes (`adjustMode`). So each cloud set of a new stack meets the browser engine of the site after one day.
+- Alternatives and tradeoffs:
+  - The deploy order of D217, the site before the cloud stack: a deploy of the stack alone stops each request on the device for each new cloud set.
+  - The record at the top of the manifest: the site gives the browser engine the base and the version records only, so the browser engine renders the reference until the site changes.
+- Evidence: a private record: `compat_adjust.rs`, built in a worktree of engine 1.14.0 at `7abfc1a`, and `results.json`. The manifest comes from the track-h plan of `planner_local`, the four families and `finalize_local`, with the engine of D270.
+- Rule and code references: None.
+- Limits and counterexamples: One track and one request. The check runs the job of the browser engine natively, not in WASM. A cloud set of the deployed stack holds no record, and its requests render the `essential` spec.
+- Verification: `worker_plan_replays_the_native_family_and_rejects_wrong_source` (`tests/set.rs`) checks the field of the manifest and the base without a record. `an_adjust_request_takes_its_reference_from_the_record_of_its_set` checks that a request on the Essential version record gives the result, the WAV and the `work` counts of the record of the family result.
+- Review condition: A site that gives the browser engine other parts of the manifest; a browser engine that refuses an unknown field of a version record.
+- Work reference: TODO.md, "Deploy order of D217".
+- Supersedes / superseded by: Changes the manifest of D217.
+
+### Updates
+
+- 2026-10-29: D271 removes `chosen_spec` from the record of the manifest when it equals the `spec` of the Essential version record, and the base of a request puts that `spec` back.
+
+## D271: Chosen spec of the reference record from the Essential version record
+
+- Recorded: 2026-10-29.
+- Origin: TODO.md, "Master recordings over 30 minutes", next steps: a manifest that holds the keys of a version once. In the manifest of the 29.7-minute file of a private record, the chosen spec of the reference record is a second copy of the spec of the Essential version.
+- Basis: Measurement; no listening.
+- Status: Accepted. Implemented in `distributed::CHOSEN_SPEC_FIELD`, `distributed::finalize_set` and `adjust::Base::with_versions_record`. Not deployed.
+- Decision:
+  - The finalizer removes `chosen_spec` from the `reference_record` of the Essential version record when it equals the `spec` of that version record.
+  - When a base takes the record of the Essential version record and the record has no `chosen_spec`, the base puts the `spec` of the version record in it. A `chosen_spec` of null stays null.
+  - A family result, `master set` and the base of a request keep the whole record.
+- Reason:
+  - On track-h and on the 29.7-minute file, the chosen spec of the record equals the spec of the Essential version record. The plan spec of the base (`adjust.reference`) differs from both in `initial_drive_db` and `tone`.
+  - The chosen spec holds the de-esser key and the low-mid key of the spec. The manifest of the 29.7-minute file falls from 7.80 MB to 6.56 MB (16.0%), and the manifest of track-h from 790,142 to 760,457 bytes (3.8%).
+  - The control reads a manifest of up to 12,000,000 bytes (`MANIFEST_BYTES`, D265). If the specs grow in proportion to the duration, a source of 45 minutes with the sibilance of track-f gives a manifest of about 11.5 MB, and about 9.6 MB with this change.
+  - The browser engine of 1.14.0 reads no `reference_record`. From the shorter manifest of track-h, its ADJUST job delivers the WAV of the manifest of D270.
+- Alternatives and tradeoffs:
+  - The de-esser key and the low-mid key of each version once in the manifest: the site gives the version records to the browser engine as they come, and the browser engine of 1.14.0 reads the spec of the parent version whole. The site would need a new browser engine before the cloud stack, the deploy order that D270 removes.
+  - A base without its plan spec (`adjust.reference`): the base of 1.14.0 needs the field.
+- Evidence: a private record: `results.json` and `adjust_now.rs`, the ADJUST job of the browser engine of this tree, run natively. On track-h, a Streaming request on `essential` gives the same WAV from the record of D270 and from the record of D271, and a request without a record gives a different WAV, as D217 records. The byte counts of the 29.7-minute file come from its manifest with the operation of the finalizer applied, not from a new run of the finalizer.
+- Rule and code references: None.
+- Limits and counterexamples: One track and one request. On that request, a record whose chosen spec is null, which reads as the plan spec, also gives the WAV of the whole record.
+- Verification: `worker_plan_replays_the_native_family_and_rejects_wrong_source` (`tests/set.rs`) checks that the manifest record omits the chosen spec and that the base takes the whole record again. `an_adjust_request_takes_its_reference_from_the_record_of_its_set` checks that a request on the shorter record gives the result, the WAV and the `work` counts of the whole record.
+- Review condition: A site or a browser engine that reads `chosen_spec` from a manifest.
+- Work reference: TODO.md, "Master recordings over 30 minutes".
+- Supersedes / superseded by: Changes the manifest of D270.
+
+## D272: Dials that the versions cover
+
+- Recorded: 2026-10-29.
+- Origin: TODO.md, "Remove the dials (D199)": the dials go when the presets or the versions cover them, and five dials have no preset.
+- Basis: Measurement and the pair prior of D177; no listening (owner rule: decisions by measurement).
+- Status: Accepted. Implementation: bitneedle-app `ca422bf` (branch `mastering-adjust-dials`) removes the Bass, Presence and Sibilance controls of the ADJUST panel. The app of the site sends the eight keys of `steps` in each step request, and `Steps` refuses an unknown field, so the engine and the cloud action keep each step.
+- Decision:
+  - A dial is covered when its measure has no gap of D198 on more than half the tracks in one direction, or when a preset gives each change that the gaps ask for.
+  - On engine 1.14.0 the versions cover the Bass dial (sub − bass: a gap on 1 of 8 tracks; bass − body: 3 of 8, 2 with the album master above and 1 under) and the Presence dial (presence − body: 2 of 8, both above).
+  - The versions cover the Sibilance dial. The album masters show no keyed cut, and the default versions cut no frame (D181). For a harsh vocal, the de-esser switch of the set cuts the keyed frames (D209).
+  - The Air dial stays: the album master is above every version in air − presence on 5 of 8 tracks.
+  - The Width dial stays: the album masters are narrower than every version from 2 to 12 kHz on 5 tracks, and wider from 500 Hz to 2 kHz on 5 tracks. The Mono preset returns a band to the width of the mix, and the album masters widen the mix in each band on 7 tracks.
+  - The Loudness and Compression dials stay: the album masters are quieter than the nearest version on 7 of 8 tracks, by 0.63 to 2.13 LU, with a crest 0.68 to 2.33 dB higher. Streaming and Radio set −14 and −23 LUFS, under each album master (−11.54 to −9.24 LUFS).
+  - The Peak level dial stays: at −0.5 dBTP, `master` decodes to up to +1.2 dBTP in the lossy codecs of the presets run, and only Streaming and Radio lower the ceiling, with the level.
+- Reason: D199 removes a dial when the presets or the versions cover it. D198 defines a gap as an album master move that no delivered version reaches within 0.5 dB, and its review condition is a gap on more than half the tracks in one direction. A dial whose measure meets neither condition offers an amount that a delivered version already gives within 0.5 dB on most tracks.
+- Alternatives and tradeoffs: Keep each dial until a preset covers it (D199 before this decision): the Bass and Presence dials then stay on the evidence that removes a style preset (D198). Remove each dial with no preset: the gaps of air, width and level stay without a request.
+- Evidence: a private record, and a private record. The decoded peaks: a private record.
+- Rule and code references: `adjust.steps.v1`; `adjust::Preset`.
+- Limits and counterexamples: One album and one engineer. The gap test uses the moves of the whole file. A covered dial also gives amounts beyond 0.5 dB on a single track: on track-h, the album master is 1.41 dB above the nearest version in presence − body.
+- Verification: Measurements only.
+- Review condition: A second album of pairs; a gap on more than half the tracks in one direction in the measure of a covered dial; the air of the versions (TODO.md).
+- Work reference: TODO.md, "Remove the dials (D199)".
+- Supersedes / superseded by: None. Applies D199.
+
+### Updates
+
+- 2026-10-29: Stage 8 of the capture plan, options after listening: More bass, Vocal forward, More room and Brighter. The options are the delivered versions, by their measured names (D165), and the Width and Air dials, which stay. With D198, the panel has no style preset. On the four capture sets of 1.14.0, `open` is Warm on each set, a version that brings the vocal and lead forward is on three sets, Bright is on the fourth, and a version that widens the stereo image is on each set.
+- 2026-10-29: Review after D273. In album mode, air − presence has a gap on 2 of 8 tracks, 1 with the album master above and 1 under. Without album regions, the versions keep the air moves of the single masters (D206), and the gap stays on 7 of 8 tracks. bitneedle-app sends no album regions, so the Air dial stays.
+
+## D273: Air of the versions in album mode
+
+- Recorded: 2026-10-29.
+- Origin: TODO.md, "Air of the versions": the review of D198 on engine 1.14.0 found a gap in air − presence on 7 of 8 tracks, with the album master above every version on 5 of them. In album mode the gap was on 6 of 8 tracks, 5 above.
+- Basis: Measurement and the album pairs of D177; no listening (owner rule: decisions by measurement). The criterion of D215: the sum of the errors of the five regions against the album masters falls in each version.
+- Status: Accepted. Implemented as `set.version-character.v3` in `character::wanted` and `character::plan`.
+- Decision:
+  - In album mode, the wanted air move of each version is 0 dB: each version keeps the air against presence of its mix.
+  - The other moves of album mode stay as in D215.
+  - Without album regions, each version takes the air move of its character (D206): −2.3 dB for `master` and `bold`, −1.0 dB for `essential` and −2.5 dB for `open`.
+- Reason: The air moves of the characters come from the single master of track-e, which lowers air against presence by 2.27 dB. The album master of the same track moves it by −0.24 dB, and the eight album masters move it by −0.69 to +1.17 dB, with a slope of +0.12 against the distance of each mix from the mean. In the album mode sets of the eight album mixes, the air error falls from 0.81 to 0.34 dB for `essential`, from 1.01 to 0.39 dB for `master`, from 0.90 to 0.53 dB for `bold` and from 1.02 to 0.38 dB for `open`. The sum of the errors of the five regions falls from 3.88 to 3.41, 5.36 to 4.75, 6.36 to 6.00 and 5.02 to 4.38 dB. The gap in air − presence falls from 6 of 8 tracks to 2 of 8, 1 above and 1 under.
+- Alternatives and tradeoffs: The air move of each character times a scale, in the simulation of the measured v2 sets. A scale of 0.5 gives gaps on 2 tracks above and 1 under, and air errors of 0.51 to 0.98 dB. A scale of 0.25 gives 1 above and 1 under, and 0.35 to 0.63 dB. The scale of 0 gives 0.35 to 0.57 dB. With a scale of 0.75 or more, the album air bound stops the moves of `master`, `bold` and `open` at the same −1.33 dB.
+- Evidence: The album air run.
+- Rule and code references: `set.version-character.v3`; `character::wanted`; `character::tests::an_album_track_takes_the_moves_of_the_album_mean_within_its_bounds`; `tests/set.rs`, `an_album_track_takes_the_moves_of_the_album_regions`.
+- Limits and counterexamples: One album and one engineer. The slope error changes from 0.32 to 0.73 dB to 0.30 to 0.79 dB, and the slope has a gap on 3 of 8 tracks in place of 2. The delivered loudness changes by −0.03 to +0.14 LU. `bold` of track-d takes the name Forward in place of Bright. `open` keeps the air of the mix against presence, and its air against body is under that of `master` by the difference of their presence moves.
+- Verification: `cargo test --release` passes. Each of the eight album mode sets delivers four versions, and each tone keeps a gain scale of 1.000.
+- Review condition: A second album with masters; an album whose masters lower air against presence on more than half the tracks.
+- Work reference: TODO.md, "Air of the versions".
+- Supersedes / superseded by: Replaces `set.version-character.v2`. Extends D215.
+
+## D274: Block length of the library FLAC copy
+
+- Recorded: 2026-10-29.
+- Origin: TODO.md, "FLAC copy packets (D060)": the library copy uses blocks of 240 frames (5 ms at 48 kHz) with fixed predictors, the packet form of the low-latency FLAC codec of SoundKit.
+- Basis: Measurement; no listening (the copy is lossless).
+- Status: Accepted. Implementation: SoundKit `95626f9` (branch `library-copy-320k`). The app build has SoundKit `74c1964`, with blocks of 5 ms. The native library audio policy of bitneedle-app gives the FLAC copy of the phone import blocks of 4,096 frames (`LIBRARY_PRESERVATION_FRAME_SIZE`).
+- Decision:
+  - The library copy uses blocks of 4,096 frames with `FlacProfile::Balanced`: one raw FLAC frame of 4,096 frames in each SoundKit-v2 packet.
+  - The profile stays `Balanced`.
+- Reason: On the eight album mixes as 24-bit copies, 4,096 frames make the copy 0.964 to 0.967 times the copy at 240 frames, and on 16 lossy imports as 16-bit copies 0.941 to 0.945 times. The SoundKit-v2 headers fall from 2.2% (24-bit) and 3.6% (16-bit) of the copy to under 0.3%. The WASM encode runs at 171 to 186 times real time on the M1 and adds 0.26 to 0.28 s for each minute of a source. At the upload rate of the measured cloud job (1.00 Mb/s), the smaller copy saves 3.4 to 3.7 s of upload for each minute, and it saves upload time at each rate under 13.0 to 13.9 Mb/s.
+- Alternatives and tradeoffs:
+  - 4,096 frames with `FlacProfile::Maximum` (the LPC search): 0.897 to 0.922 times the copy at 24 bits and 0.799 to 0.854 times at 16 bits, the size of FFmpeg FLAC at level 5 within 4%. It encodes at 31 to 38 times real time and adds 1.51 to 1.87 s for each minute of each import, also for a master on the device, which uploads nothing. Against `Balanced` at 4,096 frames, it saves upload time at rates under 3.0 to 5.7 Mb/s; at 1.00 Mb/s it saves 4.8 to 7.1 s more for each minute.
+  - Blocks of 1,152 frames: the speed of 4,096 frames and a copy 0.4% to 0.8% larger.
+  - Blocks of 240 frames: the encode of 868 to 1,016 times real time, and the largest copy.
+- Evidence: a private record and "Encode time and upload time".
+- Rule and code references: SoundKit `soundkit-flac` (`WasmFlacFrameEncoder`), the library import of soundkit-wasm, `docs/media-pipeline.md` of SoundKit, the soundkit-wasm test helper `assert_raw_flac_library_packet`; a private record.
+- Limits and counterexamples: One cloud job gives the upload rate. The encode times are of the M1; a phone can be slower. The decoders of the engine and of the Lambdas read FLAC frames of each block length of the FLAC format.
+- Verification: On 35 imports (WAV, AAC, MP3, Ogg Opus, ALAC and CAF), each copy of SoundKit `95626f9` decodes to the same samples, bit for bit, as the copy of `3530cad` with blocks of 5 ms. On the 33 music imports, the copy is 0.939 to 0.967 times the copy with blocks of 5 ms, and each import takes 0.23 to 0.26 s more for each minute in Node on the M1. The soundkit-wasm test `rust_library_encoder_streams_without_a_javascript_boundary` checks that the first packet of its fixture holds 4,096 frames.
+- Review condition: Upload rates of user jobs under 3.0 Mb/s, where `Maximum` saves time against `Balanced`; an encode time on a phone.
+- Work reference: TODO.md, "FLAC copy packets (D060)".
+- Supersedes / superseded by: None. Applies to the copy of D060.
+
+## D275: Whole-track stems worker at 45 minutes
+
+- Recorded: 2026-10-29.
+- Origin: TODO.md, "Master recordings over 30 minutes": with D262, the Lambdas accept a source of up to 45 minutes, and the site and the whole-track stems worker accept up to 30 minutes.
+- Basis: Measurement.
+- Status: Accepted. Implementation: stemsplits `060ccc0` (branch `wholetrack-45-minutes`) and bitneedle-app `08369ee` (branch `mastering-45-minutes`). Not deployed.
+- Decision:
+  - The whole-track stems worker accepts an upload of up to 2,700 s and 900,000,000 bytes, as the Lambdas (D262).
+  - The worker decodes the upload as its bytes arrive from S3.
+  - The session of the worker resamples its input from the 16-bit samples one block at a time, in place of a float copy of the whole input.
+  - The worker encodes each stem on its own thread as the segments join, and holds the Opus stream of each stem in place of the whole stem.
+  - The site accepts a cloud master of a recording of up to 45 minutes.
+- Reason: On the M1 with a local segment answer, the 45-minute job peaks at 1,616.6 MB of live heap, against 3,022.9 MB, which is more than the 3,008 MB of the Lambda. The 29.9-minute job peaks at 1,172.1 MB against 2,068.7 MB. The stem streams are the streams of `13ee7e5`, bit for bit, at both lengths.
+- Alternatives and tradeoffs:
+  - The input of the session as 16-bit samples: half the memory of the model input. For a source at a rate other than 44.1 kHz, the requests to the segment service change, and the stems change.
+  - A session that frees its input as the requests go out: a change of `SplitSession` for the phone, the browser and the cloud.
+- Evidence: a private record.
+- Rule and code references: stemsplits `deploy/aws/wholetrack/src/main.rs` (`SourceDecoder`, `MAX_SECONDS`, `MAX_SOURCE_BYTES`), `deploy/aws/wholetrack/src/encode.rs` (`StemEncoder`, `StemStreams`), `deploy/aws/wholetrack/src/separate.rs`, `crates/stemsplits-web/src/lib.rs` (`prepare`); bitneedle-app `web/js/mastering.mjs`, `web/js/routes/master.mjs`, `web/js/questions.mjs`.
+- Limits and counterexamples: The macOS allocator and a local answer give these figures; the glibc allocator of the Lambda and the segment service can give other figures. The 45-minute run of the "encode on join" build reached a macOS footprint of 2,874.6 MB with a live heap of 1,618.2 MB or less.
+- Verification: The FNV-1a hashes of the four stem streams of `060ccc0` and of `13ee7e5` are `45cf47edddcf64bb` at 29.9 minutes and `c79bba920b34437b` at 45 minutes. The tests of the worker and of `stemsplits-web` pass; a shift of one frame in the stem encoder fails two of them.
+- Review condition: A Lambda report of the worker at 45 minutes over 2,400 MB.
+- Work reference: TODO.md, "Master recordings over 30 minutes".
+- Supersedes / superseded by: None. Extends D262.
+
+## D276: Set manifest with shared keys
+
+- Recorded: 2026-10-29.
+- Origin: TODO.md, "Master recordings over 30 minutes": a manifest that holds the de-esser key and the low-mid key of a version once. At 29.7 minutes with the sibilance of track-f, the manifest is 7,802,553 bytes, and the four version specs and the reference and the chosen spec of ADJUST each hold the de-esser key of 482,055 bytes and the low-mid key of 649,254 bytes. The control reads a manifest of up to 12,000,000 bytes (D265).
+- Basis: Measurement; no listening.
+- Status: Accepted. Implemented in `distributed::share_manifest`, `distributed::expand_manifest`, `distributed::finalize_measured`, `adjust::render`, the ADJUST action of the family Lambda, the size check of the control and a private record, and in bitneedle-app `50aaee3` (branch `mastering-shared-manifest`). Not deployed.
+- Decision:
+  - A set manifest of schema `mastering.distributed-set.5` holds each distinct value of the `deesser`, `low_mid` and `focus_envelopes` fields of its specs once, in `shared`, as the worker plan of D266 does. Each spec holds `{"shared": index}` in place of the value. An empty field stays in its spec.
+  - The specs of a manifest are the spec of each version, the chosen spec of the reference record of a version (D270), and the reference and the chosen spec of the record of ADJUST.
+  - The ADJUST action, `adjust::render`, the web app and the native app put the values back before they use a spec. A manifest without `shared` stays as it is, so a set made before D276 keeps its ADJUST requests.
+  - The app keeps the manifest with each value in its specs as the set summary.
+  - The site and the native app with the expansion go out before the stack that writes schema 5.
+- Reason: The shared manifests are 0.246 to 0.822 times the bytes of the full manifests: 1,922,982 bytes at 29.7 minutes and 1,500,996 bytes at 45 minutes. At 45 minutes with a keyed vocal in 18.4% of the frames, the manifest is 2,810,691 bytes against 10,360,190 bytes with each key in its specs, which is over the 9,000,000 bytes of the review condition of D265 and 1,639,810 bytes under the 12,000,000 bytes that the control reads. The gzip of the manifest with base64 is 1,084,152 bytes against 4,067,332 bytes. At 45 minutes with the de-esser key and the low-mid key, the manifest is 3,935,051 bytes against 16,354,307 bytes: over the 12,000,000 bytes, the status of that job fails with "Mastering object is too large". The expansion of each shared manifest is the full manifest in the engine, in the web app and in the native app.
+- Alternatives and tradeoffs:
+  - A status without the manifest after the first read, or the manifest from a signed link (D265): the manifest in S3 keeps each copy of the keys.
+  - An app that keeps the shared form in its set summary: less storage on the device, but each read of a spec in the app, such as the previews of ADJUST and the report, then takes the shared values.
+- Evidence: a private record.
+- Rule and code references: `a_manifest_with_shared_keys_gives_the_adjust_result_of_the_full_manifest` (`tests/stem_evidence.rs`).
+- Limits and counterexamples: The browser engine of 1.14.0 refuses a spec whose `deesser` holds `{"shared": index}` (`deesser::Plan` refuses an unknown field), so an app of an earlier deployment cannot preview an ADJUST request, show its range or render it on the device for a set of schema 5 (`excerpt::delivered_spec`, `excerpt::request_spec`). The set summary on the device keeps each copy of the keys. The two 45-minute recordings with dense vocals add synthetic speech to a mix: the speech keys 18.4% and 20.5% of the frames, against 2.3% to 10.7% in the album sets. Gzip at level 1 makes the shared manifests 3.46 to 3.78 times smaller, and the full manifests 3.39 to 3.88 times smaller, against 3.50 to 3.55 in D265; the size check of the control takes 3.39.
+- Verification: `cargo fmt --check`, `cargo test --release` and `cargo clippy --all-targets -- -D warnings` pass for the engine and the Lambda crate, the WASM clippy passes, and the public check passes. Disposable checks of the web app in Node and of the native app in a macOS build give the full manifest from each shared manifest.
+- Review condition: A new field of a spec that each spec of a manifest holds, a new reader of the manifest, or a shared manifest over 9,000,000 bytes (D265).
+- Work reference: TODO.md, "Master recordings over 30 minutes".
+- Supersedes / superseded by: None. Extends D265 and D266.
+
+## D277: Plan specs decoded with their shared keys in place
+
+- Recorded: 2026-10-29.
+- Origin: Measurement, a private record. At 45 minutes with the de-esser key in 20.5% of the frames and the low-mid key (D276), the macOS footprint of a family is 846.0 to 861.1 MB, and the footprint of the finalizer is 1,379.8 MB. The `essential` family peaks at 776.6 MB of live bytes, and 348 of the 471 steps of 1 MB above 300 MB come from the copies of the keys in `distributed::InputPlan::read`.
+- Basis: Measurement; no listening.
+- Status: Accepted. Implemented in `distributed::InputPlan::read`, `distributed::decode_spec_shared`, `distributed::render_family_continued` and `distributed::finalize_measured`. Not deployed.
+- Decision:
+  - `InputPlan::read` keeps the `{"shared": index}` fields of the specs of a worker plan (D266).
+  - A family decodes each spec of its plan with the values of `shared` in place. Each field of a spec decodes from the JSON of the plan without a copy.
+  - The hash of a spec of the plan serializes the spec with the shared values in place, so the reference record of a family is the record of the plan with each key in each spec.
+  - Two specs of the plan are equal when they are equal with the shared values in place.
+  - The finalizer moves the version records and the base of ADJUST into the manifest.
+  - The plan, the family results, the reference records and the manifest keep their schemas and their bytes.
+- Reason: The footprint of a family falls to 360.4 to 400.0 MB, and the footprint of the finalizer to 599.8 MB. The `essential` family peaks at 186.8 MB of live bytes. Each family result, the manifest and each ADJUST result are equal to those of D276. The wall time of each family is 0.99 times the time of D276, and of the finalizer 0.94 times.
+- Alternatives and tradeoffs:
+  - A family result that holds each key once: the JSON values of the chosen spec in the reference record and in the version record give 36 of the 37 steps of the peak of the `essential` family above 150 MB. The finalizer reads the family results, so a new family schema adds a step to the order of the deploy.
+  - A typed spec in the plan input of a family: the equality of two specs and the hash of a spec take the JSON of the spec.
+- Evidence: a private record.
+- Rule and code references: `a_family_of_a_plan_with_shared_keys_takes_the_reference_record_of_the_full_plan` (`tests/stem_evidence.rs`).
+- Limits and counterexamples: `adjust::render` holds the manifest with each key in each spec. At 45 minutes with both keys, the footprint of ADJUST is 872.3 to 919.2 MB, against 429.0 to 471.0 MB for the 45-minute album file. The finalizer holds the family results with each key in the spec of each version. Each figure is from a macOS build, and the Lambdas use glibc.
+- Verification: `cargo fmt --check`, `cargo test --release` and `cargo clippy --all-targets -- -D warnings` pass for the engine and the Lambda crate, the WASM clippy passes, and the public check passes.
+- Review condition: A new field of a spec that holds a key, a new reader of the worker plan, or a Lambda report of a stage at 30 minutes or more.
+- Work reference: TODO.md, "Master recordings over 30 minutes".
+- Supersedes / superseded by: None. Extends D266.
+
+## D278: ADJUST requests that read the shared keys in place
+
+- Recorded: 2026-10-29.
+- Origin: Measurement, a private record. After D277, at 45 minutes with the de-esser key and the low-mid key, the steps of the ADJUST action of the Lambda peak at 598.3 to 653.3 MB of live bytes. The expansion of the manifest adds 159.4 MB, and the plan of a request holds the keys in each candidate spec before `distributed::share_specs`.
+- Basis: Measurement; no listening.
+- Status: Accepted. Implemented in `distributed::expand_record`, `distributed::share_spec`, `distributed::shared_values`, `adjust::render`, `adjust::worker_plan` and the ADJUST action of the family Lambda. Not deployed.
+- Decision:
+  - A request on a set manifest of schema 5 puts the shared values back only in the records that it reads: the parent version record, the Essential version record and the reference record of the set. The other version records keep their `{"shared": index}` fields: a request reads their stored facts and their ceiling.
+  - The plan of a request shares each spec as it takes it, in the order of `share_specs`, so the plan holds one copy of each key. The plan is equal to the plan of D266.
+  - The ADJUST action frees the JSON value of the plan after the base of the request, and the manifest after the records of the request.
+- Reason: The steps of the ADJUST action peak at 351.3 to 355.9 MB of live bytes, and `master adjust` at 684.3 to 696.5 MB of macOS footprint against 872.3 to 919.2 MB. The result and the plan of each request are equal to those of D276, and the wall times are 0.98 to 1.04 times those of D277.
+- Alternatives and tradeoffs: An ADJUST action that reads the manifest with each key in its specs, as in D276: the manifest then holds 159.4 MB of live bytes at 45 minutes with both keys for the whole request.
+- Evidence: a private record.
+- Rule and code references: `a_manifest_with_shared_keys_gives_the_adjust_result_of_the_full_manifest` (`tests/stem_evidence.rs`).
+- Limits and counterexamples: The family of a request reads the reference record with its chosen spec as a JSON value (`shared_reference`). A disposable example of the working tree gives the counts of the ADJUST action, without S3. Each figure is from a macOS build.
+- Verification: `cargo fmt --check`, `cargo test --release` and `cargo clippy --all-targets -- -D warnings` pass for the engine and the Lambda crate, the WASM clippy passes, and the public check passes.
+- Review condition: A new reader of a version record of the manifest in a request, or a Lambda report of ADJUST at 30 minutes or more.
+- Work reference: TODO.md, "Master recordings over 30 minutes".
+- Supersedes / superseded by: None. Extends D276 and D277.
+
+## D279: One step of a dial
+
+- Recorded: 2026-10-29.
+- Origin: Measurement. On the 45-minute album file of a private record, one Loudness step up measured +0.454 LU and was a duplicate of `master`. On track-f, one step of Air, Width or Compression was a duplicate of its parent on each of the four versions. The panel offers ±1 steps (D272), and the user then sees that the new version sounds the same as its parent, after a full render.
+- Basis: Measurement and acoustics; no listening (owner rule: decisions by measurement).
+- Status: Accepted. Implemented in `adjust::DETECTABLE_DB`, `Sound::is_duplicate_of`, `Steps::detectable_at`, `adjust::compression_shift` and `compressor::Stats::over_quantiles_db`. Not deployed.
+- Decision:
+  - The duplicate screen of a request counts a change of a requested control from 0.41 dB or 0.41 LU, the smallest level increment that a listener detects in wideband noise (ΔI/I = 0.1, Miller 1947). The other measures count from `DISTINCT_DB`, 0.5 dB, as before.
+  - The builder leaves out a share of the steps that changes no requested control by 0.41 dB. Three quarters and half of one step are 0.375 and 0.25 dB, so one step has one candidate. Each share keeps the ceiling.
+  - A Compression step changes the mean compressor reduction by 0.5 dB. Each render report holds the level of the compressor's detector over its threshold at 0, 5, … 100% of the frames (`over_quantiles_db`). The builder takes the offset at which the mean static reduction of this distribution equals the measured mean reduction of the parent, and solves the move of the threshold from that offset. A parent whose report has no quantiles moves the threshold by 1 dB for each step. A change that no move gives, such as a step down to no reduction, is outside the range of the compressor, and a smaller share renders.
+  - The range of a version (`adjust::range`) leaves out a step whose first share moves its control no further than a smaller step in the same direction. On each `master` of the eight mixes, half or three quarters of four Compression steps down give the change of two or three steps, so the panel offers −3 to +4 Compression steps.
+- Reason: One step is `DISTINCT_DB`, and a render delivers a step within a few hundredths of a dB of it, on each side. Before, on the eight album mixes, one step delivered on 12 of 72 requests: Air measured 0.477 to 0.492 dB, Width 0.488 to 0.498 dB, Loudness 0.445 to 0.527 LU and Compression 0.353 to 0.469 dB. In the knee of the compressor, a dB of threshold moves the reduction by less than 0.5 dB. After, each of the 72 requests delivers, and Compression measures 0.479 to 0.512 dB. At ±2 to ±4 steps, Compression measures 0.957 to 1.053 times the requested change of the delivered share, against +1.70 to +1.94 dB for +4 steps and −1.10 to −1.26 dB for −4 steps on engine 1.14.0. A change of 0.41 dB is the increment that a listener detects, so a result with the requested change at or over it is distinct. `DISTINCT_DB` keeps its margin over 0.41 dB for the versions that the engine proposes.
+- Alternatives and tradeoffs: A range that hides ±1: the smallest step is then 1 dB. A larger step: each step then moves away from 0.5 dB, the unit of the panel and of the version names. A tone step that aims over 0.5 dB: the shortfall differs by control and by track. For Compression, the change of the static mean reduction predicts 0.81 to 0.97 times the measured change of a fixed step, and the static change times the ratio of the measured to the static mean predicts 1.02 to 1.32 times; the offset model predicts 0.99 to 1.04 times.
+- Evidence: a private record.
+- Rule and code references: `adjust.steps.v1`; `a_requested_control_counts_from_the_detectable_increment`, `a_share_under_the_detectable_increment_is_left_out` and `a_compression_step_moves_the_mean_reduction_by_one_step` and `the_range_leaves_out_a_step_that_moves_no_further` (`adjust::tests`); `the_level_quantiles_give_the_mean_static_reduction` (`compressor::tests`).
+- Limits and counterexamples: 0.41 dB is the increment of a level change of wideband noise. The increment of a change in one region of the spectrum, such as Air, or of the side/mid can be larger. The model of the mean reduction holds the shape of the distribution after a shift; at a step that takes the reduction close to 0 dB it measured −1.501 to −1.509 dB for −1.5 dB. Three steps down are outside the range on a `master` that reduces by less than 1.5 dB, and four steps down on each `master` of the eight mixes. A version record of an earlier engine has no quantiles and keeps the fixed step. The preview of Compression −2 misses the final render by 0.57 and 0.60 dB on 2 of 8 mixes, in the band from 20 to 120 Hz of the first section: the preview predicts the low-end hold without the change of the compressor, and the step now moves the reduction by 1.0 dB in place of 0.66 to 0.69 dB. The family renders and their WAVs are equal to those before, apart from the quantiles in each report, and the render time is the same.
+- Verification: `cargo fmt --check`, `cargo test --release` and `cargo clippy --all-targets -- -D warnings` pass for the engine and the Lambda crate, and the WASM clippy passes.
+- Review condition: A delivered step whose requested control measures under 0.41 dB; a Compression step outside 0.9 to 1.1 times its request; a second album of pairs.
+- Work reference: TODO.md, "One step of a dial".
+- Supersedes / superseded by: None. Changes the duplicate screen of D172 and the Compression step of D171.
+
+### Updates
+
+- 2026-10-29: Reference of the requests. The run of this decision requested on the `family.json` of `master`, which holds no reference record, so each request rendered the `essential` spec as its reference. With the reference record of the Essential family, 13 of the 72 one-step requests deliver before this decision, against 12 without the record, and each of the 120 requests after it delivers the same share. The measured changes move by up to 0.036 LU (Loudness +1 on track-b) and by 0.008 dB or less for Air, Width and Compression. Compression measures 0.957 to 1.053 times the request of the delivered share.
+
+## D280: Hold of a Compression step in the preview
+
+- Recorded: 2026-10-29.
+- Origin: Measurement. After D279, the preview of Compression −2 missed the final render by 0.597 and 0.565 dB on track-b and track-c, in 40 to 120 Hz of the first section (a private record).
+- Basis: Measurement; no listening (owner rule: decisions by measurement).
+- Status: Accepted. Implemented in `compressor::Stats::hold_shift`, `compressor::process_with_hold_shift`, `adjust::compression_hold_db`, `adjust::predicted_hold` and `HoldSections::of`. Not deployed.
+- Decision:
+  - The compressor of a render of a whole recording runs two shadow gains beside its gain, with the threshold 2 dB up and 2 dB down (`HOLD_SHIFT_DB`). Each shadow follows the detector of the compressor with its own reduction, on blocks of 32 frames at 48 kHz, and takes the make-up of the compressor. The spectrum of each 15 s section of the decimated signal after each gain gives the change of each held band against the power of the section (`hold_shift`).
+  - The preview adds the change of a Compression step to each section of the parent before it solves the hold of the request. The step takes the change of the hold shift of its direction, times the change of the mean reduction of the step over that of the 2 dB move, both from the model of D279.
+  - The stored sections of a version (`hold_sections`) take the intended move of the hold: the low shelves of the version against those of the reference. Before, they took the shelves of the version alone.
+- Reason: A Compression step changes the held bands of each section by different amounts: on track-b, −2 steps changed 40 to 120 Hz of the first section by −0.365 dB and of the loud sections by 0.07 dB or less, at the output of the compressor. The preview predicted one change for each section. The shadows agree with two real runs of the compressor within 0.020 dB in each band of each section of track-b. The spectrum of a section is the measure of the hold; Butterworth filters of order 2 gave 0.4 times the change. On a version without a hold, the stored sections were off by the predicted move of the low shelves of Essential: −2.75 to −2.89 dB on each section of track-c against −0.24 to −0.39 dB with the fix. After the change, 16 of 16 Compression ±2 checks pass, against 14 of 16, and the largest difference falls from 0.597 to 0.374 dB. The Bass ±2 checks keep 15 of 16, and the median of their medians falls from 0.024 to 0.014 dB.
+- Alternatives and tradeoffs: Shadows with time-domain filters of order 2 at the full rate gave 0.4 times the change and took 7% more time for the family of track-c; the decimated shadows take about 2%. A render of each request in the preview: the preview renders 4 s spans, not the recording. Shadows of more threshold moves: each adds a gain on the blocks and a spectrum of each section; the two moves predict ±2 steps within the criterion.
+- Evidence: a private record.
+- Rule and code references: `adjust.steps.v1`; `the_hold_shift_gives_the_held_bands_of_a_moved_threshold` (`compressor::tests`); `the_preview_of_a_compression_step_takes_the_hold_of_each_section` and `the_hold_sections_count_the_shelves_against_the_reference` (`adjust::tests`).
+- Limits and counterexamples: The shadow make-up gives back the power of each 15 s section; the compressor gives it back over each 4 s window. The change against the integrated loudness leaves out the change of the integrated loudness, 0.011 LU or less on track-b. The change of a step between the shadows and beyond them follows the model of the mean reduction. A version record of an earlier engine has no hold shift, and its stored sections keep the frame of the shelves of the version. The preview of Bass +2 on track-c misses the final render by 0.565 dB before and after: the request's shelf lifts 40 to 120 Hz of the quiet sections by 0.28 to 0.44 dB less than intended, and of the loud sections by 0.05 to 0.07 dB less, and the preview predicts one change of the tone for each section. The family render of track-c takes 68.8 and 70.4 s against 68.1 and 68.6 s, and its WAVs are equal to those before.
+- Verification: `cargo fmt --check`, `cargo test --release` and `cargo clippy --all-targets -- -D warnings` pass for the engine and the Lambda crate, and the WASM clippy passes.
+- Review condition: A Compression preview check outside the criterion; a difference of the hold shift and a real run over 0.05 dB in a band of a section; a family render more than 3% slower.
+- Work reference: TODO.md, "Preview of the hold after a Compression step (D279)".
+- Supersedes / superseded by: None. Changes the preview of the hold of D172 and the stored sections of engine 1.7.0.
+
+### Updates
+
+- 2026-10-29: Reference of the requests. The preview checks of D279 and of this decision ran `master adjust` on the `family.json` of `master`, which holds no reference record, so each request rendered the `essential` spec as its reference. With the reference record of the Essential family, the 16 Compression ±2 checks pass at HEAD and with this decision, and the largest difference falls from 0.479 to 0.172 dB. The 16 Bass ±2 checks pass with both, and the median of their medians falls from 0.020 to 0.012 dB. Bass +2 on track-c passes with 0.148 dB in place of 0.565 dB. Compression +3, −3 and +4 pass on each mix, with the largest difference 0.280 dB. `master adjust --essential` takes the record of the `family.json` of `essential`, and a request without a record writes a line that says so.
+
+## D281: Drive of a Loudness step in the preview
+
+- Recorded: 2026-10-29.
+- Origin: Measurement. With the reference record of the set, the previews of Loudness +2 and Peak level −2 on track-b missed the median criterion with 0.270 and 0.267 dB: the preview was 0.26 LU quieter than the final render (a private record).
+- Basis: Measurement; no listening (owner rule: decisions by measurement).
+- Status: Accepted. Implemented in `render_blocks::drive_loudness`, `Renderer::drive_response`, `treatment_render::DriveResponse`, `adjust::drive_change_db` and `adjust::solved_drive_db`. Not deployed.
+- Decision:
+  - The family render measures the drive response of each delivered version once, on the prefix of its delivered render. Three base-rate models of peak control give the loudness at the drive of the render and at 1 dB up and 1 dB down. The render report keeps the two changes and the loss at the drive: the loudness of the prefix with the drive and the true-peak trim, less the output loudness (`drive_response`).
+  - The preview of steps and of a preset solves the drive for the target change less the ceiling change, at the ratio of drive to ceiling of the parent, and adds the ceiling change. Peak control scales with its ceiling.
+  - The drive change of a loudness change follows the quadratic through the two changes from 1 dB down upward. Under 1 dB down, the loss left at 1 dB down falls away exponentially from the slope of the quadratic, and the output approaches the drive change plus the loss of the record.
+  - A parent without the response keeps the drive rule of HEAD: the target change less the change of the prefix loudness.
+- Reason: The final renders raise the drive by 0.848 to 1.365 dB for Loudness +2, and by 0.053 to 0.361 dB for a 1 dB lower ceiling; the preview took 1.0 and 0 dB. On 63 checks of Loudness ±2 and ±4, Peak level −2 and −3, and the Streaming and Radio presets on the eight mixes, 59 pass against 39, and the median of the medians of each request falls to 0.007 to 0.049 dB, from 0.082 to 0.380 dB. The drive of the preview is within −0.095 to +0.155 dB of the final drive on the steps, and within −0.045 to +0.022 dB on the presets. The quadratic alone misses the drive of Radio by up to 3.969 dB, and a loss that grows by the same factor for each dB misses it by up to 0.386 dB.
+- Alternatives and tradeoffs: Shadow limiters in each render of peak control took 24% more time for the family of track-e at 4x, and 10% and 15% for the families of track-e and track-c at the base rate. One pass of the three models on the delivered prefix takes 0.59 to 0.60 s on track-e and 0.53 to 0.56 s on track-c with two threads: 3.4% and 0.7% of the family. A model from the record alone (the loss at the drive and one rate of growth) gave rates from 0.36 to 0.80 on the eight mixes. Two exponentials through the loss of the record gave errors of up to 0.588 dB at 1.5 and 2 LU.
+- Evidence: a private record.
+- Rule and code references: `adjust.steps.v1`, `adjust.streaming.v1`, `adjust.radio.v1`, `set.drive-response.v1`; `a_segmented_drive_loudness_matches_the_whole_pass` and `the_drive_loudness_gives_the_loudness_changes_of_the_render` (`render_blocks::tests`); `the_drive_change_follows_the_drive_response` and `the_preview_of_a_ceiling_step_solves_the_drive_from_the_response` (`adjust::tests`).
+- Limits and counterexamples: The final render solves the restoring gains and the hold again. On track-d and track-g its prefix is 0.151 and 0.083 LU louder at Loudness +2, and the preview drive is 0.155 and 0.107 dB over the final drive. Streaming on track-b and Radio on track-b, track-c and track-g fail on the largest difference, with 0.593 to 0.916 dB in one band of a section: the final render holds the bass of sections that the parent does not hold, and the preview of a preset keeps the hold of the parent. On Loudness −2 and −4 on track-b, the largest difference rises from 0.184 to 0.311 dB and from 0.307 to 0.422 dB. The response holds for the delivered render; a version record of an earlier engine has none.
+- Verification: `cargo fmt --check`, `cargo test --release` and `cargo clippy --all-targets -- -D warnings` pass for the engine and the Lambda crate, and the WASM clippy passes.
+- Review condition: A Loudness, Peak level, Streaming or Radio preview check that fails on the median; a drive error over 0.2 dB; a family render more than 4% slower.
+- Work reference: TODO.md, "Preview of the drive of a Loudness step (D281)" and "Hold of a preset in the preview".
+- Supersedes / superseded by: None. Changes the drive of the preview of D172.
+
+## D282: Hold of a preset in the preview
+
+- Recorded: 2026-10-29.
+- Origin: Measurement. With the drive of D281, Streaming on track-b and Radio on track-b, track-c and track-g failed the largest-difference criterion of the preview, with 0.593 to 0.916 dB in one band of a section. The preview of a preset kept the hold of the parent, and a trial that predicted one change of the tone and the width for each section changed the 16 preset checks by 0.03 dB or less (a private record).
+- Basis: Measurement; no listening (owner rule: decisions by measurement).
+- Status: Accepted. Implemented in `low_end::sections_read`, `render_blocks::drive_loudness`, `treatment_render::DriveResponse`, `adjust::HoldSections`, `adjust::peak_control_hold_db`, `adjust::predicted_hold` and `adjust::request_hold`. Not deployed.
+- Decision:
+  - The preview of a preset predicts the hold of the final render from the sections that the parent stores, as the preview of steps does.
+  - Each version record keeps the side share of each held band of each section and the power of the held bands of each section against the loudness of the version (`hold_sections.side_share`, `hold_sections.power_db`). The change of the tone and the width of a section takes the side share of the section.
+  - The drive models of D281 give the change of each held band of each section at 1 dB down, at 1 dB up and without peak control (`set.drive-response.v2`). From 1 dB down upward, the change of peak control in a section follows the quadratic through the two changes. Under 1 dB down, the change approaches the change without peak control at the rate of the loudness tail of D281.
+  - The loudness that a hold bell adds to the prefix takes the wet of each section weighted by the power of the held bands of the section.
+  - A record without the new fields keeps the rules of HEAD for them.
+- Reason: On 127 checks of 16 requests on the eight mixes, 127 pass against 123 at HEAD. The largest difference of Streaming falls from 0.593 to 0.080 dB and that of Radio from 0.916 to 0.247 dB, and the drive of the preview of a preset is within −0.023 to +0.019 dB of the final drive. In section 10 of track-g, the side has 91% of the power of the 40–120 Hz band, against 4.2% or less in the other sections. Over −1 to +1 dB of drive, the quadratic gives the change of peak control in a section within 0.009 dB on track-b, track-c and track-g; a share of the loudness loss misses it by up to 0.192 dB.
+- Alternatives and tradeoffs: A share of the loudness loss of the record misses the change of a section by up to 0.903 dB at +1.5 to +3 dB. A tail at the rate that continues the slope of the quadratic misses it by up to 0.122 dB at −6 to −1.5 dB, against 0.074 dB with the loss tail. The bell loudness weighted by time put the preset drive 0.05 to 0.11 dB under the final drive in a trial. The fourth model and the sections add 1.5% to the mean time of the family render of track-e, and the mean of track-c falls by 0.5%.
+- Evidence: a private record.
+- Rule and code references: `set.drive-response.v2`, `set.low-end.v3`, `adjust.streaming.v1`, `adjust.radio.v1`, `adjust.mono.v1`; `the_sections_give_the_side_share_of_the_held_bands` (`low_end::tests`); `the_drive_models_give_the_change_of_each_section` (`render_blocks::tests`); `the_section_change_follows_the_drive_response`, `the_preview_of_a_preset_takes_the_peak_control_of_each_section` and `the_preview_of_a_fold_takes_the_side_share_of_each_section` (`adjust::tests`).
+- Limits and counterexamples: Above 1 dB up, the quadratic takes the drop of a loud section too far, by up to 0.293 dB at +3 dB on track-b. Loudness +4 and Peak level −3 on track-b pass with medians of 0.167 and 0.106 dB, against 0.046 and 0.025 dB at HEAD, and the preview drive is 0.280 and 0.145 dB under the final drive. The drive error of Loudness +4 on track-b meets the review condition of D281. The preview keeps the restoring gains of the parent, and the final render raises the restoring gain of 20–120 Hz by up to 0.361 dB at Loudness +4 on track-c. On Radio on track-c, the preview holds section 2 with a wet of 0.542, against 0.759 in the final render. A version record of an earlier engine has none of the new fields.
+- Verification: `cargo fmt --check`, `cargo test --release` and `cargo clippy --all-targets -- -D warnings` pass for the engine and the Lambda crate, and the WASM clippy passes.
+- Review condition: A preset or step preview check that fails; a preview drive error over 0.2 dB; a family render more than 4% slower than D281.
+- Work reference: TODO.md, "Hold of a preset in the preview", "Section changes above 1 dB up" and "Restoring gains in the preview".
+- Supersedes / superseded by: None. Changes the hold prediction of the preview of D280 and D281.
+
+## D283: Far model of the drive response
+
+- Recorded: 2026-10-29.
+- Origin: Measurement. With D282, the previews of Loudness +4 and Peak level −3 on track-b passed with medians of 0.167 and 0.106 dB, against 0.046 and 0.025 dB at HEAD, and their drive was 0.280 and 0.145 dB under the final drive. Above 1 dB up, the quadratic through the changes at 1 dB down and 1 dB up took the drop of a loud section too far, by up to 0.293 dB at +3 dB (a private record).
+- Basis: Measurement; no listening (owner rule: decisions by measurement).
+- Status: Accepted. Implemented in `render_blocks::drive_loudness`, `treatment_render::DriveResponse`, `adjust::Response` and `adjust::drive_change_db`. Not deployed.
+- Decision:
+  - The drive response has a fifth base-rate model of peak control at the drive 3 dB up (`render_blocks::DRIVE_RESPONSE_FAR_DB`). The record keeps its loudness change and the change of each held band of each section (`far_lu`, `sections_far_db`, `set.drive-response.v3`).
+  - Over the drive 1 dB up, the preview takes the loudness change of peak control and the change of each section from the quadratic through 0 at the drive, the change at 1 dB up and the change at 3 dB up, when that quadratic rises at 1 dB up.
+  - A record without the far model keeps the rule of D282.
+- Reason: On the probe of the eight mixes, the largest loudness error falls from 0.071, 0.163 and 0.298 LU to 0.028, 0.023 and 0 LU at +2, +2.5 and +3 dB, and the largest section error falls from 0.111, 0.177 and 0.298 dB to 0.028, 0.023 and 0.012 dB. Against the loudness change of the 31 final renders of Loudness +2 and +4 and Peak level −2 and −3, with the change of their prefix loudness, the error falls from −0.005 to +0.122 LU to −0.036 to +0.052 LU. All 127 preview checks pass. Loudness +4 on track-b passes with a median of 0.050 dB, against 0.167 dB, and its drive error falls from −0.280 to −0.093 dB.
+- Alternatives and tradeoffs: The quadratic through the changes at the drive, 1 dB up and 2 dB up misses the section change by up to 0.067 dB at +3 dB on track-b, track-c and track-g; through 1 dB up and 3 dB up, by 0.012 dB or less. A line from 1 dB up with the slope of the quadratic there misses it by up to 0.228 dB at +3 dB. The fifth model adds 1.2% to the mean time of the family render of track-e, and the mean of track-c falls by 0.2%.
+- Evidence: a private record.
+- Rule and code references: `set.drive-response.v3`; `the_drive_models_give_the_change_of_each_section` and `the_drive_loudness_gives_the_loudness_changes_of_the_render` (`render_blocks::tests`); `the_section_change_follows_the_drive_response` and `the_drive_change_follows_the_drive_response` (`adjust::tests`).
+- Limits and counterexamples: On 10 of the 30 final renders that move the input of peak control by more than 1 dB, the quadratic of D282 is closer, and the far model errs on them by 0.017 LU or less. On track-d and track-g, the drive errors of Loudness +2 and +4 and Peak level −2 and −3 rise to +0.109 to +0.177 dB: their final renders raise the prefix loudness by 0.083 to 0.197 LU, and the preview keeps the restoring gains of the parent. Over 3 dB up, the far model extrapolates: at +5 dB on the probe, it misses the loudness by up to 0.294 LU and the section change by up to 0.295 dB. One step raises the input by 2.98 dB or less on the eight mixes.
+- Verification: `cargo fmt --check`, `cargo test --release` and `cargo clippy --all-targets -- -D warnings` pass for the engine and the Lambda crate, and the WASM clippy passes.
+- Review condition: A preview check that fails; a drive error over 0.2 dB; a family render more than 4% slower than D282.
+- Work reference: TODO.md, "Section changes above 1 dB up" and "Restoring gains in the preview".
+- Supersedes / superseded by: None. Changes the drive solve of D281 and the section change of D282 over 1 dB up.
+
+## D284: Restoring gains in the preview
+
+- Recorded: 2026-10-29.
+- Origin: Measurement. With D283, the preview kept the restoring gains of the parent. On Loudness +2 and +4 and Peak level −2 and −3, the final render raises the restoring gain of 20–120 Hz by up to 0.409 dB. On track-d and track-g, the drive errors of these previews were +0.109 to +0.177 dB, and their final renders raise the prefix loudness by 0.083 to 0.197 LU (a private record).
+- Basis: Measurement; no listening (owner rule: decisions by measurement).
+- Status: Accepted. Implemented in `render_blocks::drive_loudness`, `treatment_render::BlockScan`, `treatment_render::DriveResponse`, `adjust::predicted_restoration`, `adjust::local_change_db`, `adjust::restoration_loudness_db`, `adjust::restoration_hold_db` and `low_end::restoration_shift_db`. Not deployed.
+- Decision:
+  - The drive response has a sixth base-rate model, the shelf model: peak control at the drive of the prefix with the restoring filter of 20–120 Hz at 1 dB (`render_blocks::DRIVE_RESPONSE_SHELF_DB`). The model filters the base-rate frames and moves the largest 4x sample of each channel of a frame by the change of the frame.
+  - Each model gives the window bands of the restoration. The record keeps the local band change of each model less that at the drive, against the window bands of the prefix before its restoring filters (`local_down_db`, `local_up_db`, `local_far_db`, `local_free_db`, `shelf_local_db`), the loudness change of the shelf model (`shelf_lu`) and the change of each held band of each section of the shelf model (`sections_shelf_db`, `set.drive-response.v4`).
+  - The preview of steps and the preview of a preset replay the two restoration passes of the final render. The first render leaves the change of the parent plus the local band change at the input change of peak control. After each pass, the step of 20–120 Hz moves the change by the change of the shelf model, and the step of each other band by the response of its filter.
+  - The drive solve adds the loudness of the change of the restoring gains to the change of the prefix loudness, from the stored spectrum after the tone of the request.
+  - The hold adds the change of the restoring gains to the change of each section: for 20–120 Hz, the gain step times the change of the section in the shelf model, and for the other bands, the change from the source spectrum.
+  - A record without the new fields keeps the restoring gains of the parent.
+- Reason: Against the final renders of Loudness +2 and +4 and Peak level −2 and −3, the predicted restoring gain of 20–120 Hz is within 0.030 dB of the final gain in 16 of the 17 renders that change a gain by 0.05 dB or more. All 127 preview checks pass. The largest differences of Loudness +4 and Peak level −3 fall from 0.303 and 0.293 dB to 0.164 and 0.165 dB, and the drive errors of track-g fall from +0.109 to +0.177 dB to +0.015 to +0.024 dB.
+- Alternatives and tradeoffs: With the mean response of the restoring filter in place of the shelf model, the predicted gain misses by up to 0.141 dB. The change of the hold from the source spectrum for 20–120 Hz, as the final render plans a pass, gives lower medians on track-b and track-c and largest differences of 0.212 and 0.182 dB for Loudness +4 and Peak level −3; its hold is farther from the final hold on 4 of 5 held bands of track-b and track-c. With the restoring filters of the parent in the loudness of the tone of each request, the drive errors of Bass −2 on track-c and track-g rise by 0.022 and 0.019 dB. A shelf model that filters the 4x frames gives the same record within 0.0033 dB and the same previews within 0.0001 dB, and adds 4.1% to the mean time of the family render of track-e. The base-rate shelf model adds 2.6% to the mean of track-e and 0.4% to the mean of track-c.
+- Evidence: a private record.
+- Rule and code references: `set.drive-response.v4`, `set.peak-tone-restoration.v4`; `the_drive_models_give_the_window_bands_of_each_model` and `the_drive_models_give_the_change_of_each_section` (`render_blocks::tests`); `the_preview_replays_the_restoration_passes_of_the_drive_change`, `the_local_change_follows_the_drive_models`, `the_restoring_gains_add_their_loudness_to_the_prefix` and `the_hold_takes_the_shelf_model_for_the_restoring_gain_of_the_bass` (`adjust::tests`).
+- Limits and counterexamples: On track-b, Loudness +4 gives +0.173 dB against +0.107 dB. The preview predicts no change of the restoring gains for a request that keeps the input of peak control, and for the decreases of track-c, whose final renders change the gain of 20–120 Hz by −0.052 dB; Bass +2 changes it by +0.133 dB on track-c and +0.152 dB on track-g. On track-d, the drive errors of Loudness +2 and +4 are +0.086 and +0.074 dB: the final hold has a wet of 0.15 to 0.20 at three points where the preview has 0.02 or less, and the final renders raise the prefix loudness by 0.151 and 0.197 LU against 0.080 and 0.130 LU in the preview. On track-c, Loudness +4 passes with a median of 0.073 dB, against 0.026 dB with D283; the drive response puts the input change of peak control 0.098 dB under that of the final render.
+- Verification: `cargo fmt --check`, `cargo test --release` and `cargo clippy --all-targets -- -D warnings` pass for the engine and the Lambda crate, and the WASM clippy passes.
+- Review condition: A preview check that fails; a drive error over 0.2 dB; a family render more than 4% slower than D283.
+- Work reference: TODO.md, "Restoring gains in the preview", "Restoring gains of a step that keeps the drive" and "Drive errors of track-c and track-d".
+- Supersedes / superseded by: None. Changes the restoring gains of the preview of D202 and the drive solve of D281.
+
+## D285: Starting gains of the restoration in the preview
+
+- Recorded: 2026-10-29.
+- Origin: Measurement. The final render of a request starts the restoration from the restoring gains of Essential (`selection::warm_start`), and the preview of D284 started it from the delivered gains of the parent. On track-c, Essential and the parent have gains of 20–120 Hz of 0.380 and 0.433 dB. The final renders of Loudness −2 and −4, Streaming, Radio, Compression −2 and Bass −2 keep the gains of Essential, 0.052 dB under the prediction of D284 (a private record).
+- Basis: Measurement; no listening (owner rule: decisions by measurement).
+- Status: Accepted. Implemented in `treatment_render::Restoration`, `selection::hold_low_end` and `adjust::predicted_restoration`. Not deployed.
+- Decision:
+  - The restoration record keeps the gains of the first render (`measured_gains_db`) with the change that the first render measured (`measured_change_db`).
+  - For a parent after Essential, the preview starts the restoration from the gains of the first render of the parent and the change that it measured, plus the local band change at the input change of peak control.
+  - For a request on Essential, the preview starts from the delivered gains and the delivered change of Essential, as D284.
+  - A record without `measured_gains_db` keeps the rule of D284.
+- Reason: On the eight mixes, the gains of the first render of `master` equal the gains of Essential. On track-c, the predicted gain of 20–120 Hz of Loudness −2 and −4, Streaming and Radio equals the final gain, against +0.052 dB with D284. The error of the first-render change of 20–120 Hz of the 12 requests of track-c other than Compression and Bass changes from +0.006 to +0.036 dB to −0.019 to +0.011 dB. All 127 preview checks pass, and the sum of the largest differences falls from 6.046 to 5.972 dB.
+- Alternatives and tradeoffs: The replay of the restoration from the gains of Essential in the versions record gives the same gains on the eight mixes; the record of the parent holds them without a second record. The preview drive of Loudness −2 on track-c moves from 0.059 to 0.062 dB under the final drive, and its largest difference rises from 0.103 to 0.118 dB.
+- Evidence: a private record.
+- Rule and code references: `set.peak-tone-restoration.v4`; `the_preview_replays_the_restoration_passes_of_the_drive_change` (`adjust::tests`); `restoration_reports_the_local_rule_and_does_not_widen_the_change` (`tests/treatment_render.rs`).
+- Limits and counterexamples: On track-c, Compression −2 and Bass −2 keep the gains of Essential in the final render, and the preview predicts a pass to the gains of the parent: the steps of the tone change the first-render change of 20–120 Hz by +0.042 and +0.036 dB. The rule takes a version after Essential to start from the gains of Essential, as `selection::warm_start` does for a set and for a request.
+- Verification: `cargo fmt --check`, `cargo test --release` and `cargo clippy --all-targets -- -D warnings` pass for the engine and the Lambda crate, and the WASM clippy passes.
+- Review condition: A preview check that fails; a version whose first render starts from gains other than those of Essential.
+- Work reference: TODO.md, "Starting gains of the restoration in the preview" and "Restoring gains of a step that keeps the drive".
+- Supersedes / superseded by: None. Changes the start of the restoration of the preview of D284.
+
+## D286: Hold steps of the preview with the restoration passes
+
+- Recorded: 2026-10-29.
+- Origin: Measurement. With D285, on track-d, the previews of Loudness +2 and +4 and Peak level −2 and −3 had drive errors of +0.074 to +0.087 dB, and their final renders hold sections that the preview leaves unheld. A trace of the hold of Loudness +2 on track-d gives two causes. The final render plans its first hold step with the shift of its first restoration pass, +0.073 dB in the held band of 40–120 Hz, and the preview added the shift of both passes, +0.10 dB. The model of the hold of the parent took a second step, which the render of the parent did not take: the render measured four sections 0.001 to 0.016 dB over the limit of −0.5 dB, and the model put them at the limit or under it (a private record).
+- Basis: Measurement; no listening (owner rule: decisions by measurement).
+- Status: Accepted. Implemented in `adjust::Restored`, `adjust::HoldPasses`, `adjust::hold_steps` and `adjust::predicted_hold`. Not deployed.
+- Decision:
+  - The preview gives the restoring gains of each pass of the final render (`adjust::Restored`).
+  - The hold steps of the preview follow the loop of the final render (`adjust::hold_steps`). Each step plans against the changes of the render before it plus the shift that the final render plans for the pass of the step (`low_end::restoration_shift_db`). The render of a step adds the predicted change of the step and the change of its pass from the shelf model (D284). The first render adds the change from the delivered gains of the parent to the starting gains (D285).
+  - Each step after the first takes the spec of the step before it, and a step whose bells take the tone past the response bound of `Tone::validate` is not taken, as in the final render.
+  - The model of the hold of the parent starts from its first render, takes one pass to its delivered gains, and stops after the renders of its hold: the renders of its restoration record less one.
+- Reason: All 127 preview checks pass. Over the 127 checks, the sum of the medians falls from 2.822 to 2.505 dB, the sum of the largest differences from 5.972 to 5.072 dB, and the sum of the drive errors from 3.277 to 2.903 dB. On track-d, the medians of Loudness +2 and +4 fall from 0.073 and 0.054 dB to 0.020 and 0.010 dB, and their drive errors from +0.087 and +0.074 dB to +0.026 and +0.014 dB. The largest differences of Loudness +2, Peak level −3 and Compression +2 fall from 0.170, 0.168 and 0.172 dB to 0.047, 0.100 and 0.086 dB.
+- Alternatives and tradeoffs: With the limit of the steps of the parent and the change of the restoring gains of the request at each step, as D284, the sums are 2.542, 5.550 and 2.959 dB; on track-d, Loudness +2 and +4 have medians of 0.044 and 0.019 dB. With the steps pass by pass and without the limit, the sums are 2.834, 5.884 and 3.298 dB.
+- Evidence: a private record.
+- Rule and code references: `set.low-end.v3`; `the_hold_plans_each_step_with_the_shift_of_its_pass` and `the_preview_replays_the_restoration_passes_of_the_drive_change` (`adjust::tests`).
+- Limits and counterexamples: On track-d, Bass −2 passes with a median of 0.062 dB and a drive error of −0.066 dB, against 0.014 and −0.015 dB with D285. Its final render takes no hold step, and the preview puts the changes of its sections 0.05 to 0.12 dB under those of the final render and holds eight sections. With D285, the second step of the model of the parent took back the wets of the request. On track-c, Loudness +4 passes with a median of 0.089 dB and a drive error of −0.108 dB, against 0.071 and −0.087 dB. The first steps of the preview and of the final render plan against changes within 0.024 dB of each other. From the first render to the render of the first step, the model lowers the held band of 120–250 Hz of the fifth section by 0.045 dB, and the final render raises it by 0.012 dB, so the preview takes a second step.
+- Verification: `cargo fmt --check`, `cargo test --release` and `cargo clippy --all-targets -- -D warnings` pass for the engine and the Lambda crate, and the WASM clippy passes. The family render of track-e gives the same WAV SHA-256 as D285.
+- Review condition: A preview check that fails; a drive error over 0.2 dB.
+- Work reference: TODO.md, "Drive errors of track-c and track-d", "Section changes of a bass step" and "Second hold step of the preview".
+- Supersedes / superseded by: None. Changes the hold steps of the preview of D282 and the change of the restoring gains in the hold of D284.
+
+
+## D287: Take of peak control of a tone step in the preview
+
+- Recorded: 2026-10-29.
+- Origin: Measurement. With D286, the preview of a tone step leaves the change that peak control makes to the held bands and to the restoration bands as in the parent. The final renders change the restoring gain of 20–120 Hz by +0.133 dB on track-c and +0.152 dB on track-g for Bass +2, and the preview of Bass +2 on track-g has a median of 0.051 dB and a drive error of +0.058 dB (a private record).
+- Basis: Measurement; no listening (owner rule: decisions by measurement).
+- Status: Accepted. Implemented in `render_blocks::shadow_loudness`, `render_blocks::DriveModels`, `treatment_render::DriveResponse`, `adjust::predicted_restoration`, `adjust::shelf_take_db`, `adjust::tone_shelves` and `adjust::predicted_hold`. Not deployed.
+- Decision:
+  - The drive response has a seventh base-rate model: the shelf model without peak control. The record keeps the loudness that the restoring filter of the shelf model adds without peak control (`shelf_free_lu`), the local band change of the model less that at the drive (`shelf_free_local_db`) and the change of each held band of each section of the model (`sections_shelf_free_db`, `set.drive-response.v5`).
+  - The tone step of a request in units of the shelf model is the change of the held power of 40–120 Hz from the tone of the parent to that of the request, without their holds, over the change of 40–120 Hz of the restoring filter of the shelf model (`adjust::tone_shelves`).
+  - The first render of the request takes the tone step times the take of the shelf model in each restoration band: the change of the shelf model less the change of the shelf model without peak control, plus the change without peak control, less the local change at the input change `shelf_free_lu`.
+  - Each section of the hold takes the change of 40–120 Hz of the tone in the section times the take of the shelf model in the section per dB of 40–120 Hz, with the change of peak control in the section at the input change `shelf_free_lu` (`adjust::shelf_take_db`).
+  - A record without the new fields keeps the change of peak control of the parent.
+- Reason: The shelf model takes the change of the output loudness that the restoring filter adds to the input of peak control, and the render normalizes the output to the same loudness. On the probes of track-b, track-c and track-g, the take with the change at `shelf_free_lu` matches the change of peak control with the filter in the tone within a sum of 0.135 to 0.252 dB over the sections and the two held bands, against 0.787 to 1.216 dB without it. With D288, all 127 preview checks pass, and the sums of the medians, the largest differences and the drive errors fall from 2.505, 5.072 and 2.903 dB to 2.435, 4.772 and 2.832 dB. On track-g, Bass +2 falls from a median of 0.051 dB and a drive error of +0.058 dB to 0.004 and +0.005 dB.
+- Alternatives and tradeoffs: Without the change at `shelf_free_lu`, the sums are 2.482, 5.793 and 2.884 dB. Without D288, they are 2.515, 5.284 and 2.914 dB. With the loudness take of the tone step in the drive solve, the change of the output loudness of the shelf model less the change of the loudness curve at `shelf_free_lu`, the sums are 2.679, 4.992 and 3.104 dB: the drive errors of Bass +2 fall on track-b, track-c and track-h and rise on track-d, track-f and track-g, and those of Bass −2 rise on seven of eight mixes. With the step of the restoring gain of 20–120 Hz added to the tone step of that take, they are 2.742, 4.998 and 3.179 dB.
+- Evidence: a private record.
+- Rule and code references: `set.drive-response.v5`; `the_drive_models_give_the_window_bands_of_each_model` and `the_drive_models_give_the_change_of_each_section` (`render_blocks::tests`); `a_tone_step_takes_the_change_of_peak_control_of_the_shelf_model` and `the_preview_replays_the_restoration_passes_of_the_drive_change` (`adjust::tests`).
+- Limits and counterexamples: On track-c, Bass +2 passes with a median of 0.082 dB and a drive error of −0.088 dB, against 0.052 and −0.056 dB with D286. Its first render is nearer to the final render: the sum of the errors of the sections falls from 2.011 to 0.341 dB. The final render takes the loudness that peak control takes from the bass step back in its drive search, and the preview does not. On track-g, the largest difference of Radio rises from 0.064 to 0.110 dB.
+- Verification: `cargo fmt --check`, `cargo test --release` and `cargo clippy --all-targets -- -D warnings` pass for the engine and the Lambda crate, and the WASM clippy passes. The family renders of track-c and track-e give the same WAV SHA-256 as D286. Over three family renders each with `--profile measure`, the mean time of track-e is 20.99 s against 20.81 s with D286 (+0.8%), and the median time of track-c is 74.62 s against 77.03 s.
+- Review condition: A preview check that fails; a drive error over 0.2 dB; a family render more than 4% slower than D286.
+- Work reference: TODO.md, "Restoring gains of a step that keeps the drive", "Section changes of a bass step" and "Drive of a bass step".
+- Supersedes / superseded by: None. Changes the restoring gains of the preview of D284 and the hold of D286.
+
+## D288: Section spectrum of the held bands
+
+- Recorded: 2026-10-29.
+- Origin: Measurement. Without peak control, Bass +2 raises 40–120 Hz of the sections of track-c by 0.508 to 0.677 dB: the three quiet sections get 0.508, 0.523 and 0.567 dB, and the loud sections 0.668 to 0.677 dB. The preview took the change of the tone of a section from the mean spectrum and the side share of the section (D282). With D287 alone, the sum of the largest differences rises from 5.072 to 5.284 dB (a private record).
+- Basis: Measurement; no listening (owner rule: decisions by measurement).
+- Status: Accepted. Implemented in `low_end::Sections`, `low_end::low_band`, `adjust::HoldSections`, `adjust::low_gains` and `adjust::section_tone_db`. Not deployed.
+- Decision:
+  - The sections of a render keep the power of the mid and of the side in eight sub-bands of equal width in log frequency of each held band (`low_end::LOW_SPLITS`, `HoldSections::low_db`).
+  - The change of the tone and the width of a held band of a section is the sum of the powers of its sub-bands after the gains of the mid and of the side at the centre of each sub-band, against the sum before (`adjust::section_tone_db`).
+  - A record without the sub-bands takes the side share of D282.
+- Reason: With D287, all 127 preview checks pass, and the sums of the medians, the largest differences and the drive errors fall from 2.515, 5.284 and 2.914 dB to 2.435, 4.772 and 2.832 dB. On track-d, Bass −2 falls from a median of 0.062 dB, a largest difference of 0.211 dB and a drive error of −0.066 dB with D286 to 0.013, 0.043 and +0.016 dB.
+- Alternatives and tradeoffs: D287 without the sub-bands gives a largest difference of 0.339 dB for Bass +2 on track-b and of 0.205 dB for Bass −2, against 0.130 and 0.012 dB.
+- Evidence: a private record.
+- Rule and code references: `set.low-end.v3`; `the_sections_give_the_spectrum_of_the_held_bands` (`low_end::tests`); `the_tone_of_a_section_follows_its_own_spectrum` (`adjust::tests`).
+- Limits and counterexamples: The record of a version stores the sub-bands of its sections with the render, and a record of an earlier engine takes the side share.
+- Verification: As D287.
+- Review condition: A preview check that fails; a drive error over 0.2 dB.
+- Work reference: TODO.md, "Section changes of a bass step".
+- Supersedes / superseded by: None. Changes the change of the tone and the width of a section of D282.
+
+## D289: Drive of the preview from the output of the parent
+
+- Recorded: 2026-10-29.
+- Origin: Measurement. The drive search of a render stops within 0.03 LU of its target, and the drive response gives the change of the output loudness against the output of the parent render. The renders of `master` of track-b and track-c end 0.025 and 0.027 LU under their targets, and with D288 their previews have the largest drive errors: on track-c, Loudness +4 has a drive error of −0.108 dB (a private record).
+- Basis: Measurement; no listening (owner rule: decisions by measurement).
+- Status: Accepted. Implemented in `adjust::solved_drive_db` and `adjust::missed_lu`. Not deployed.
+- Decision:
+  - The drive solve of the preview of steps and of the preview of a preset takes the target change less the output loudness of the parent render less the target of its search.
+  - A record without the search of the parent takes the target change.
+- Reason: All 127 preview checks pass. Over the 127 checks, the sums of the medians, the largest differences and the drive errors fall from 2.435, 4.772 and 2.832 dB to 1.987, 4.262 and 2.310 dB. The sums of the drive errors of track-b and track-c fall from 0.787 and 0.641 dB to 0.399 and 0.358 dB. On track-c, Loudness +4 falls from a median of 0.089 dB and a drive error of −0.108 dB to 0.059 and −0.069 dB. The mean of the output less the target of the final renders of each mix is −0.011 to +0.007 LU.
+- Alternatives and tradeoffs: With the input change of peak control of the hold and of the restoration also from the output of the parent, the sums are 1.994, 4.380 and 2.318 dB. With the loudness take of the shelf model of D287 for the step of the restoring gain of 20–120 Hz in the drive solve, they are 2.095, 4.445 and 2.446 dB: the sums of the drive errors of Loudness +2, Peak level −2 and Peak level −3 rise from 0.197, 0.186 and 0.208 dB to 0.243, 0.232 and 0.265 dB.
+- Evidence: a private record.
+- Rule and code references: `the_drive_solve_starts_from_the_output_of_the_parent` (`adjust::tests`).
+- Limits and counterexamples: The final renders of track-a and track-f keep about the miss of the parent: their means are −0.011 and −0.009 LU, against −0.015 and −0.010 LU for the parent. Their sums of the drive errors rise from 0.262 and 0.158 dB to 0.336 and 0.225 dB.
+- Verification: `cargo fmt --check`, `cargo test --release` and `cargo clippy --all-targets -- -D warnings` pass for the engine and the Lambda crate, and the WASM clippy passes. D289 changes the preview alone; the family render calls no preview.
+- Review condition: A preview check that fails; a drive error over 0.2 dB.
+- Work reference: TODO.md, "Second hold step of the preview" and "Drive of a bass step".
+- Supersedes / superseded by: None. Changes the drive solve of D281.
+
+## D290: Take of peak control of the hold bells in the preview
+
+- Recorded: 2026-10-29.
+- Origin: Measurement. With D289, on track-c, the preview of Loudness +4 takes a second hold step that the final render does not take. From the first render to the render of the first step, the model lowers 120–250 Hz of the fifth section by 0.032 dB, and the final render raises it by 0.026 dB (a private record).
+- Basis: Measurement; no listening (owner rule: decisions by measurement).
+- Status: Accepted. Implemented in `adjust::hold_steps`. Not deployed.
+- Decision: The model of each hold step of the preview adds the rise of 40–120 Hz of the step in each section, its predicted change plus its loudness offset, times the take of the shelf model of D287 in the section per dB of 40–120 Hz. A record without the shelf model without peak control takes no change.
+- Reason: All 127 preview checks pass. Over the 127 checks, the sums of the medians and the drive errors fall from 1.987 and 2.310 dB to 1.978 and 2.303 dB, and the sum of the largest differences is 4.263 dB against 4.262 dB. On track-c, Loudness +4 falls from a median of 0.059 dB and a drive error of −0.069 dB to 0.051 and −0.061 dB. The other 126 checks give the same values within 0.001 dB. On track-c, the preview of Loudness +4 takes one hold step, as the final render does, against two with D289.
+- Alternatives and tradeoffs: None measured.
+- Evidence: a private record.
+- Rule and code references: `set.low-end.v3`; `the_hold_plans_each_step_with_the_shift_of_its_pass` (`adjust::tests`).
+- Limits and counterexamples: The take of the shelf model is the take of a shelf over the whole recording, with its change of the loudness of peak control; a bell lifts a part of the sections.
+- Verification: `cargo fmt --check`, `cargo test --release` and `cargo clippy --all-targets -- -D warnings` pass for the engine and the Lambda crate, and the WASM clippy passes.
+- Review condition: A preview check that fails; a drive error over 0.2 dB.
+- Work reference: TODO.md, "Second hold step of the preview".
+- Supersedes / superseded by: None. Changes the hold steps of the preview of D286.
+
+## D291: Gain of a level in dB
+
+- Recorded: 2026-10-30.
+- Origin: Measurement. A CPU profile of `render_set` of the browser engine on track-e in Node on the M1 gives 21.8 s of 159.8 s to `pow` of the math library of WASM. The limiter (`dsp::Limiter::push`) calls it through `dsp::gain` for 16.3 s of that time, and the compressor for most of the rest (a private record).
+- Basis: Measurement.
+- Status: Accepted. Implemented in `dsp::gain`. Not deployed.
+- Decision: `dsp::gain` computes 10^(x/20) as e^(x ln 10 / 20) on each target.
+- Reason: In WASM in Node on the M1, one call of `exp` takes 8.8 to 8.9 ns and one call of `pow` takes 38.5 to 38.6 ns. From −120 to +40 dB, the two forms differ by at most 2.5e-15 relative. On track-e, `render_set` takes 135.0 and 137.1 s against 151.7 to 152.5 s (−10.5%), and `plan_set` takes 68.0 and 70.5 s against 79.4 to 82.7 s (−14.8%). The peak of the WASM memory stays at 130.75 MiB. The native set of track-e takes 40.5 to 41.9 s against 40.8 to 41.4 s.
+- Alternatives and tradeoffs: `exp2` of x log2(10) / 20 takes 5.7 ns for a call in WASM and has the same largest difference. The sets of this record use `exp`. With the `exp` form in the browser engine alone, the native WAVs stay those of `pow`, and the native time is the same with each form.
+- Evidence: a private record.
+- Rule and code references: `the_gain_of_a_level_is_ten_to_its_twentieth` (`dsp::tests`).
+- Limits and counterexamples: The times are those of Node 26.7 on the M1. A WAV of a version can differ from the WAV of `pow` in the last steps of 24 bits, as between two targets (D268).
+- Verification: On the nine regression mixes with their stems, the WASM sets and the native sets make the same decisions as those of `c2920e0`: the same versions, candidates, statuses, labels and measured names, and the same value of each field that is not a number. 25 of the 36 WASM WAVs and 27 of the 36 native WAVs are identical. Each other WAV differs by 1 or 2 steps of 24 bits, at residuals of −201.4 to −166.6 dB. The largest relative change of a number of a spec is 2.0e-9. `cargo fmt --check`, `cargo test --release` and `cargo clippy --all-targets -- -D warnings` pass for the engine and the Lambda crate, and the WASM clippy passes.
+- Review condition: A set whose decisions differ between the two forms; a browser engine whose `pow` takes less than twice the time of its `exp`.
+- Work reference: TODO.md, "Gain of a level in dB".
+- Supersedes / superseded by: None.
+
+## D292: Central sums of the true-peak points
+
+- Recorded: 2026-10-30.
+- Origin: Measurement. After D291, a CPU profile of `render_set` of the browser engine on track-e gives 26.8 s of 135.1 s to the true-peak scans. `peak_core_from` takes 14.8 s and `peak_scan_core` 12.0 s. The block bound of D248 multiplies the largest sample near a block by the largest absolute tap sum of a point, 2.417 at 48 kHz. On the first 60 s of the master of track-e, 1.6% of the blocks have a bound at or under the ceiling (a private record).
+- Basis: Measurement.
+- Status: Accepted. Implemented in `dsp::Oversampler`. Not deployed.
+- Decision:
+  - Before the 97-tap sums of a group of frames, the true-peak scans compute the central sums of the 8 points of each frame. The central taps are the 18 taps from 8 frames before the frame to 9 frames after it.
+  - The bound of a point is its absolute central sum plus the tail gain times the largest sample near the block.
+  - The tail gain is the largest absolute sum of the f32 taps of a point outside the central taps, plus a margin. The margin is 1e-4 of the absolute sum of all the f32 taps of the point. The tail gain is 0.330 at 48 kHz and 0.347 at 44.1 kHz.
+  - A group whose bounds are at most the limit of the scan skips the 97-tap sums.
+  - A block of `PeakScan` whose points the scan did not each measure holds the negative of its bound. `peak_after_core` measures such a block again when its bound is above the peak.
+- Reason: A skipped point is at most the limit. Thus each peak, each frame over the ceiling and each peak after the local gain is that of the exhaustive scan. The rounding of an f32 sum of 97 or 18 products is at most 115 × 2^−24 of their absolute sum: less than the margin. The central sums run in 16 lanes, one for each point and channel, with no sum across the lanes. In the profile, the scans take 11.6 s against 26.8 s, and `render_set` takes 120.9 s against 135.1 s. The release builds take 120.0 and 120.2 s for `render_set` against 135.4 and 136.1 s (−11.5%). The peak of the WASM memory stays at 130.75 MiB. The native set of track-e takes 34.1 to 35.1 s against 37.1 to 38.3 s (−8.6%).
+- Alternatives and tradeoffs:
+  - Central sums of the 16 taps nearest each point, with `dot_pairs_windows`: in the profile, the central sums took 10.8 s and the scans 6.2 s. The sums across the lanes cost as much as the products.
+  - The lane maximum with `f32::max` kept the comparisons of the 16 lanes in scalar code. `render_set` took 122.5 s in the profile against 120.9 s.
+  - A model of the bound on the master of track-e gives the share of the skipped groups: 85.1% for 16 central taps, 90.4% for 18 and 94.2% for 24. 24 taps cost a third more for each frame than 18.
+- Evidence: a private record.
+- Rule and code references: `a_point_is_at_most_its_central_sum_and_its_tail_bound` and `the_scans_of_loud_tones_equal_the_points_of_each_frame` (`dsp::tests`).
+- Limits and counterexamples: The share of the skipped groups depends on the signal. On the first 60 s of three masters at the ceiling, the model gives 90.4% for track-e, 99.2% for track-a and 98.8% for track-b. The bound uses the largest sample near the block, not near each frame. Targets without the vector paths of `dot_pairs_windows` skip single frames with the same bound.
+- Verification: The sets of the nine regression mixes with their stems were made with D291 and with D292. The 36 WASM WAVs and the 36 native WAVs are identical, and each record makes the same decisions. `cargo fmt --check`, `cargo test --release` and `cargo clippy --all-targets -- -D warnings` pass for the engine. The tests of the Lambda crate and the export check pass.
+- Review condition: A change of the taps of the interpolator, of `PEAK_POINTS` or of the f32 sums of `dot_pairs`.
+- Work reference: TODO.md, "Central sums of the true-peak points".
+- Supersedes / superseded by: None. Extends D239 and D248.
+
+## D293: Windows of the four phases of the 4x signal
+
+- Recorded: 2026-10-30.
+- Origin: Measurement. In the profile of D292, the 4x signals of `render_blocks::Upsample::push` take 5.76 s of 120.9 s of `render_set` on track-e (a private record).
+- Basis: Measurement.
+- Status: Rejected. The engine keeps `Oversampler::at_all`.
+- Decision: Do not compute the four phases of `vector::WINDOWS` frames in one pass over the taps of each phase.
+- Reason: `at_all` computes two phases in each pass over the samples of a frame (`dot_pairs_two`), so each load of the samples serves two phases. The windows serve two frames with each load of the taps. In WASM, each form makes 24 vector loads for each frame and each 16 taps. In a profile, `Upsample::push` and the function of its four phases took 7.42 s, or 5.96 s at the load of the D292 profile, against 5.76 s.
+- Alternatives and tradeoffs: None measured.
+- Evidence: a private record.
+- Rule and code references: None.
+- Limits and counterexamples: The native aarch64 form computes four windows in a pass and makes 20 vector loads for each frame. With D294, the native set of track-e took 34.6 to 35.2 s against 34.1 to 35.1 s.
+- Verification: A unit test compared each 4x sample of the windows with the sample of `at_all`, bit for bit.
+- Review condition: A form of the four phases that shares each load of the taps and each load of the samples within the vector registers of the host.
+- Work reference: TODO.md, "Windows of the 4x signal".
+- Supersedes / superseded by: None.
+
+## D294: Reduction of a repeated gain
+
+- Recorded: 2026-10-30.
+- Origin: Measurement. In the profile of D292, `log10` takes 6.19 s of `render_set` on track-e, and 4.11 s of it comes from the loop of `render_with_block_trace`. In the set of track-e, 36% of the gains of the limiter are 1, and 24% equal the gain before them (a private record).
+- Basis: Measurement.
+- Status: Accepted. Implemented in `LimiterStatsAccumulator::push`. Not deployed.
+- Decision: `LimiterStatsAccumulator::push` keeps the last gain under 1 and its reduction in dB. For the same gain, it uses the kept reduction in place of `log10`.
+- Reason: The reduction is a function of the gain alone, so each reduction is the same. In the set of track-e, the statistics compute 39% of the gains with `log10` against 64%. In a profile, `log10` from the loop takes 3.37 s against 4.11 s at the same load (−18%). The build of D293 and D294 runs `render_set` on track-e in 116.6 and 117.4 s, against 120.0 and 120.2 s for D292. Its native set takes 34.6 to 35.2 s, against 34.1 to 35.1 s.
+- Alternatives and tradeoffs: A method in place of the closure of the frames of `render_with_block_trace` put the code of the frames in the loop. The loop then took 12% more time in a profile, as `Limiter::push` stayed a function of its own.
+- Evidence: a private record.
+- Rule and code references: `the_reduction_of_a_repeated_gain_is_its_reduction` (`dsp::tests`).
+- Limits and counterexamples: The share of the repeated gains depends on the limiter settings and the signal.
+- Verification: The engine checks pass: fmt, clippy, the clippy of the WASM crate, 388 tests, 34 tests of the lambda and the export check. The sets of the nine regression mixes with D294 and D295 give 36 WASM WAVs and 36 native WAVs that are identical to the sets of D292, and each record makes the same decisions.
+- Review condition: A limiter whose gain changes at each frame.
+- Work reference: TODO.md, "Reduction of a repeated gain".
+- Supersedes / superseded by: None.
+
+## D295: Probe renders without statistics
+
+- Recorded: 2026-10-30.
+- Origin: Measurement. In the profile of D293 and D294, the closure of the frames of `render_with_block_trace` takes 13.47 s of `render_set` on track-e, and its `log10` calls take 3.95 s. The probe renders of `audibility::peak_control` keep only the audio. Their renders computed the limiter statistics, the clipping and the trace of each frame (a private record).
+- Basis: Measurement.
+- Status: Accepted. Implemented in `render_blocks::render_peak_control_audio_into`. Not deployed.
+- Decision: `audibility::peak_control` renders with `render_peak_control_audio_into`. The render computes the gain, the clipper and the samples of each frame. It skips the limiter statistics, the clipping statistics and the trace.
+- Reason: The statistics read the gains and the samples and write only to their own accumulators, so the audio is the same. In a profile, the closure of the frames takes 6.32 s against 12.11 s, and its `log10` calls take 1.57 s against 3.55 s, at the same load. With D294, `render_set` on track-e takes 111.0 and 111.1 s against 121.7 and 121.7 s for D292 (−8.7%). The native set takes 34.0 to 34.8 s against 34.8 to 36.6 s.
+- Alternatives and tradeoffs: The search renders of `Renderer::search` keep the statistics. A search render goes to the cache of probes, and the set can report it as its render.
+- Evidence: a private record.
+- Rule and code references: `a_render_without_statistics_has_the_audio_of_a_render_with_them` (`render_blocks::tests`).
+- Limits and counterexamples: A probe render under `segmented_min_frames` renders in one piece with `render`, which computes the statistics.
+- Verification: The engine checks pass: fmt, clippy, the clippy of the WASM crate, 388 tests, 34 tests of the lambda and the export check. The sets of the nine regression mixes with D294 and D295 give 36 WASM WAVs and 36 native WAVs that are identical to the sets of D292, and each record makes the same decisions.
+- Review condition: A caller of `audibility::peak_control` that reads the statistics of the probe render.
+- Work reference: TODO.md, "Probe renders without statistics".
+- Supersedes / superseded by: None.
+
+## D296: Table of the band centres
+
+- Recorded: 2026-10-30.
+- Origin: Measurement. In the profile of D295, `atan` takes 2.94 s of 112.0 s of `render_set` on track-e. `masking::centre_hz` found the centre of a band with 50 bisection steps of `bark`, and each step calls `atan` two times. `deesser::band_power` calls `centre_hz` for each band of each frame (a private record).
+- Basis: Measurement.
+- Status: Accepted. Implemented in `masking::centre_hz`. Not deployed.
+- Decision: `masking::centre_hz` reads a table of the 25 band centres. The first call computes the table with the bisection.
+- Reason: The table holds the result of the bisection of each band, so each centre is the same. In a profile, `atan` takes 0.02 s against 4.91 s at the same load. In series 3, `render_set` on track-e takes 107.4 and 107.6 s against 112.7 and 111.5 s with D295 (−4.1%). The native set takes 31.1 to 32.0 s against 33.6 to 34.1 s (−6.5%).
+- Alternatives and tradeoffs: None measured.
+- Evidence: a private record.
+- Rule and code references: `the_centre_of_each_band_is_its_bisection` (`masking::tests`).
+- Limits and counterexamples: `centre_hz` panics for a band at or above `BANDS`.
+- Verification: The engine checks pass: fmt, clippy, the clippy of the WASM crate, 389 tests, 34 tests of the lambda and the export check. The sets of the nine regression mixes with D296 and D298 give 36 WASM WAVs and 36 native WAVs that are identical to the sets of D295, and each record makes the same decisions.
+- Review condition: A change to `bark` or to `BANDS`.
+- Work reference: TODO.md, "Table of the band centres".
+- Supersedes / superseded by: None.
+
+## D297: Divisions of the frames of a render
+
+- Recorded: 2026-10-30.
+- Origin: Measurement. Each 4x frame of a render ran the `%` of the position of the three rings of `MovingAverage::push` in the smoothing of `Limiter::push`. Each counted frame found its trace bin with the 64-bit division of `waveform::bin_of` (a private record).
+- Basis: Measurement.
+- Status: Rejected. The engine keeps the `%` and `bin_of`.
+- Decision: Do not wrap the positions of the rings with a compare, and do not keep the trace bin of the last counted frame and its positions.
+- Reason: In a profile of D296 and D297, at the load of the D296 profile, `Limiter::push` took 4.67 s against 4.54 s, and the closure of the frames 6.61 s against 6.25 s. With D298, `Limiter::push` took 5.72 s against 5.53 s and the closure of the frames 5.90 s against 6.10 s. The profile took 104.4 s against 104.7 s.
+- Alternatives and tradeoffs: None measured.
+- Evidence: a private record.
+- Rule and code references: None.
+- Limits and counterexamples: The profiles measure the WASM engine. Natively, the build of D296 and D297 took 31.3 to 32.4 s in series 2, and the build of D296 took 31.1 to 32.0 s in series 3.
+- Verification: A unit test compared the bin of each position with the range of the bin. The four WAVs of track-e of the build of D296 and D297 equal the WAVs of D292.
+- Review condition: A target or a render loop where the profile shows the divisions of the frames.
+- Work reference: TODO.md, "Divisions of the frames".
+- Supersedes / superseded by: None.
+
+## D298: Frames of a block in one call
+
+- Recorded: 2026-10-30.
+- Origin: Measurement. In the profile of D296, the loop of `render_with_block_trace` takes 5.26 s of `render_set` on track-e, and the closure of its frames 6.25 s. The loop called the closure for each 4x frame, and the accumulators of the statistics, the clipping and the trace were behind references (a private record).
+- Basis: Measurement.
+- Status: Accepted. Implemented in `render_blocks::render_with_block_trace`. Not deployed.
+- Decision: The loop of a block collects the gains of the limiter. One call of the closure then makes the frames of the block from the gains and the pending frames, with the accumulators in locals of the call.
+- Reason: Each frame takes the same operations in the same order, so each sample, each statistic and each trace bin is the same. In a profile, at the same load, the functions of `render_with_block_trace` take 24.85 s against 27.71 s. The loop takes 2.83 s against 5.26 s, the closure of the frames and its `log10` calls 6.75 s against 7.74 s, and `Limiter::push` 5.53 s against 4.54 s. In series 3, `render_set` on track-e takes 104.4 and 104.8 s against 107.4 and 107.6 s with D296 (−2.7%). The native set takes 31.0 to 31.7 s against 31.1 to 32.0 s.
+- Alternatives and tradeoffs: D297 measured the divisions of the frames.
+- Evidence: a private record.
+- Rule and code references: `block_boundaries_preserve_samples_and_forward_statistics_exactly`, `a_segmented_render_matches_the_whole_render` and `a_render_without_statistics_has_the_audio_of_a_render_with_them` (`render_blocks::tests`).
+- Limits and counterexamples: The deque of the pending frames holds the frames of a block and the lag of the limiter: 65,536 frames of a block take 512 KiB.
+- Verification: The engine checks pass: fmt, clippy, the clippy of the WASM crate, 389 tests, 34 tests of the lambda and the export check. The sets of the nine regression mixes with D296 and D298 give 36 WASM WAVs and 36 native WAVs that are identical to the sets of D295, and each record makes the same decisions.
+- Review condition: A change of `BLOCK` or of the frames of the closure.
+- Work reference: TODO.md, "Frames of a block in one call".
+- Supersedes / superseded by: None.
+
+## D299: Trace bin of the last counted frame
+
+- Recorded: 2026-10-30.
+- Origin: Measurement. In the profile of D298, the closures of `render_with_block_trace` take 12.62 s of `render_set` on track-e. Each counted frame reads and writes its trace bin in `bins` (a private record).
+- Basis: Measurement.
+- Status: Rejected. The engine keeps the trace bins in `bins`.
+- Decision: Do not keep the trace bin of the last counted frame in locals of the closure of the frames.
+- Reason: In a profile, at a load factor of 0.991 against the profile of D298, `render_with_block_trace` and its calls took 25.01 s against 24.97 s. In series 5, `render_set` on track-e took 105.86 and 106.54 s against 106.22 and 106.34 s with D298.
+- Alternatives and tradeoffs: D297 measured a form that also kept the positions of the bins.
+- Evidence: a private record.
+- Rule and code references: None.
+- Limits and counterexamples: The profiles measure the WASM engine. Natively, in series 5, the set took 32.0 to 32.3 s against 31.7 to 33.2 s with D298.
+- Verification: The 13 tests of `render_blocks` passed. The four WAVs of track-e of the build of D299 equal the WAVs of D298.
+- Review condition: A change of the trace or of the frames of the closure.
+- Work reference: TODO.md, "Trace bin of the last counted frame".
+- Supersedes / superseded by: None.
+
+## D300: Running extremes and smoothing of the limiter
+
+- Recorded: 2026-10-30.
+- Origin: Measurement. In the profile of D298, `Limiter::push` and its calls take 8.65 s of `render_set` on track-e. Each push of a running extreme read a field to choose the maximum or the minimum. Each of the three moving averages of the smoothing had its ring, its position and its `%` (a private record).
+- Basis: Measurement.
+- Status: Accepted. Implemented in `dsp::Limiter`. Not deployed.
+- Decision: `RunningExtremum` takes the maximum or the minimum as a constant parameter, and its deque has the capacity of its window from `new`. `Smoothing` holds the three moving averages in one ring with one position.
+- Reason: Each push takes the same operations in the same order, so each gain is the same. In the profiles of D299 and of D299 with D300, at the same load, `Limiter::push` and its calls take 6.48 s against 8.85 s. `render_with_block_trace` and its calls take 23.83 s against 25.01 s. In series 6, `render_set` on track-e takes 106.09 and 105.18 s against 106.33 and 106.73 s with D298. In series 5, with D299, it took 104.89 and 104.91 s against 106.22 and 106.34 s (−1.3%).
+- Alternatives and tradeoffs: A multiply by the reciprocal of the length in place of the division of each average gave the same WAVs of track-e. In a profile, `Limiter::push` and its calls took 6.21 s against 6.48 s. The multiply rounds differently from the division, so a gain can change.
+- Evidence: a private record.
+- Rule and code references: `the_smoothing_equals_three_moving_averages_in_cascade` (`dsp::tests`).
+- Limits and counterexamples: Natively, in round 1 of series 6, the set took 30.63 s against 32.73 s. Rounds 2 and 3 ran at load averages up to 15.6. In series 5, with D299, the native set took 32.2 to 33.0 s against 31.7 to 33.2 s.
+- Verification: The engine checks pass: fmt, clippy, the clippy of the WASM crate, 390 tests, 34 tests of the lambda and the export check. The sets of the nine regression mixes with D300 give 36 WASM WAVs and 36 native WAVs that are identical to the sets of D298, and each record makes the same decisions.
+- Review condition: A change of the stages of the limiter.
+- Work reference: TODO.md, "Running extremes and smoothing of the limiter".
+- Supersedes / superseded by: None.
+
+## D301: Lane sums in vector registers
+
+- Recorded: 2026-10-30.
+- Origin: Measurement. In the profile of D300, `Upsample::push` takes 5.67 s and the two true-peak scans take 11.67 s of `render_set` on track-e. At the end of each product, `dot_pairs_two` and `dot_pairs_windows` store the 16 lane sums. They add the last 2 or 4 products one at a time and add the lanes as scalars (a private record).
+- Basis: Measurement.
+- Status: Rejected. The engine keeps the scalar sums of `sum_lanes`.
+- Decision: Do not add the last products and the lanes in vector registers.
+- Reason: The copies of the last values into arrays with padding compile to `memory.copy`, and V8 runs `memory.copy` as a call. In a profile, at a load factor of 0.987 against the profile of D300, `Upsample::push` and its calls took 10.35 s against 7.01 s. The profile took 116.3 s against 106.5 s. By a count of the WASM operations, a form without the copies takes about 40 operations at the end of each product against about 48.
+- Alternatives and tradeoffs: D293 measured windows of the four phases.
+- Evidence: a private record.
+- Rule and code references: None.
+- Limits and counterexamples: A product of 194 values takes about 250 WASM operations for each output.
+- Verification: A unit test compared the sums with `dot_pairs` bit for bit, for each count of last values from 0 to 15, natively and in a `wasm32-wasip1` build in Node. The four WAVs of track-e of the build equal the WAVs of D300.
+- Review condition: A WASM engine that runs a short `memory.copy` in line, or products whose count of values is a multiple of 16.
+- Work reference: TODO.md, "Lane sums in vector registers".
+- Supersedes / superseded by: None.
+
+## D302: Running peak of the chunks of a true-peak search
+
+- Recorded: 2026-10-30.
+- Origin: Measurement. In the profile of D300, `peak_core_from` and its calls take 6.55 s of `render_set` on track-e. Each chunk of 65,536 frames starts from the sample peak. Each span of `fit_true_peak_stored` and each core of the delivery check start from a fixed floor (a private record).
+- Basis: Measurement.
+- Status: Rejected. The chunks, the spans and the cores keep their floors.
+- Decision: Do not start each chunk, span and core of a true-peak search from the largest peak of the ones that ended before it.
+- Reason: The peak is the same in each order of the chunks, but the work changes little. In a profile, at a load factor of 1.033 against the profile of D300, `peak_core_from` and its calls took 6.50 s against 6.55 s. In series 7, `render_set` on track-e took 108.97 and 106.65 s against 108.98 and 106.72 s with D300. The time of the scans is in the groups whose bound is over the peak of the signal (D303).
+- Alternatives and tradeoffs: None measured.
+- Evidence: a private record.
+- Rule and code references: None.
+- Limits and counterexamples: `peak_scan_core` kept its floors in the build, because the stored scan and the whole scan must give the same blocks.
+- Verification: The 29 tests of `dsp`, `render_blocks` and `delivery` passed. The four WAVs of track-e of the build equal the WAVs of D300.
+- Review condition: A scan whose time is in the groups under the peak of the signal.
+- Work reference: TODO.md, "Running peak of the chunks of a true-peak search".
+- Supersedes / superseded by: None.
+
+## D303: Wide bound of the true-peak points
+
+- Recorded: 2026-10-30.
+- Origin: Measurement. In the profile of D300, the true-peak scans and their calls take 14.36 s of `render_set` on track-e. On the first 60 s of the master of track-e, the bound of D292 skips 89.2% of the groups of 2 frames. Each other group takes the 97-tap sums of the 8 points of each frame (a private record).
+- Basis: Measurement.
+- Status: Accepted. Implemented in `dsp::Oversampler::group_bound`. Not deployed.
+- Decision:
+  - A group whose central bound is over the limit adds the products of the 11 taps on each side of the central taps to its central sums. These 40 wide taps run from 19 frames before the frame to 20 frames after it.
+  - The wide bound of a point is its absolute wide sum plus the wide tail gain times the largest sample near the block. The wide tail gain is the tail gain of D292 for the wide taps: 0.073 at 48 kHz and 0.088 at 44.1 kHz.
+  - A group whose wide bound is at most the limit skips the 97-tap sums.
+- Reason: A skipped point is at most the limit. Thus each peak, each frame over the ceiling and each peak after the local gain is that of the exhaustive scan. The rounding of an f32 sum of 97 or 40 products is at most 137 × 2^−24 of their absolute sum: less than the margin of 1e-4. In the model of the bound, the share of the groups with the 97-tap sums falls from 10.8% to 1.5% on the master of track-e. In a profile, at a load factor of 1.021 against the profile of D300, the scans and their calls take 12.96 s against 14.66 s. In series 8, `render_set` on track-e takes 105.07 and 105.00 s against 106.16 and 106.16 s with D300 (−1.1%).
+- Alternatives and tradeoffs:
+  - In the model, a second stage of 32 taps costs 3% more than 40 taps on the master of track-e, and one of 48 taps costs the same.
+  - D302 measured the running peak of the chunks.
+- Evidence: a private record.
+- Rule and code references: `a_point_is_at_most_its_central_sum_and_its_tail_bound` and `the_scans_of_loud_tones_equal_the_points_of_each_frame` (`dsp::tests`).
+- Limits and counterexamples: In the model, the share of the groups with the 97-tap sums falls from 0.9% to 0.2% on the bold of track-a, and from 3.6% to 0.5% on the essential of track-f. The scans of these masters gain less.
+- Verification: The engine checks pass: fmt, clippy, the clippy of the WASM crate, 390 tests, 34 tests of the lambda and the export check. The sets of the nine regression mixes with D303 give 36 WASM WAVs and 36 native WAVs that are identical to the sets of D300, and each record makes the same decisions.
+- Review condition: A change of the interpolator, of `RADIUS` or of the scans.
+- Work reference: TODO.md, "Wide bound of the true-peak points".
+- Supersedes / superseded by: None.
+
+## D304: Levels and reductions of the make-up pass in the gain pass
+
+- Recorded: 2026-10-30.
+- Origin: Measurement. In the profile of D303, `compressor::Stream::advance` and its calls take 4.77 s of `render_set` on track-e. In a stream with section make-up, `Makeup::push` and `Compress::process` run the same detector and the same reduction on each frame. The make-up pass takes 2.11 s, and the gain pass takes 2.47 s (a private record).
+- Basis: Measurement.
+- Status: Accepted. Implemented in `compressor::Stream`. Not deployed.
+- Decision: In a stream with section make-up, the make-up pass keeps the level over the threshold and the reduction of each frame until the gain pass takes the frame. The gain pass applies these values, and it does not run the detector.
+- Reason: The two passes start from the same detector and the same reduction. They take the same frames with the same section levels. Thus each value of the make-up pass is the value of the gain pass. In the profiles, at a load factor of 0.986 against the profile of D303, `Stream::advance` and its calls take 3.18 s against 4.77 s. In series 9 and 10, `render_set` on track-e takes 105.62, 105.96, 100.27 and 99.76 s against 108.16, 107.70, 103.60 and 102.00 s with D303 (−2.0% and −2.7%).
+- Alternatives and tradeoffs: The values take 16 bytes for each frame between the two passes. Their ring has the capacity of the ring of the frames: `span` plus `Stream::lag` frames, 4.1 MB for spans of 65,536 frames at 48 kHz. The peak of the WASM memory stays at 130.75 MiB. `process` on a whole signal keeps the detector in its gain pass, because it would keep the values of all the frames.
+- Evidence: a private record.
+- Rule and code references: `the_stream_equals_the_compressor_of_the_whole_signal` (`compressor::tests`). The test also compares the hold shift of a stream with the hold shift of `process_with_hold_shift`.
+- Limits and counterexamples: A stream without section make-up keeps the detector in its gain pass. Natively, the set takes 31.5 to 35.4 s against 31.1 to 35.5 s with D303, at load averages up to 11.5.
+- Verification: The engine checks pass: fmt, clippy, the clippy of the WASM crate, 390 tests, 34 tests of the lambda and the export check. The compressor tests also pass in a `wasm32-wasip1` build in Node. The sets of the nine regression mixes with D304 give 36 WASM WAVs and 36 native WAVs that are identical to the sets of D303, and each record makes the same decisions.
+- Review condition: A change of the detector, of the reduction or of the make-up of the compressor.
+- Work reference: TODO.md, "Levels and reductions of the make-up pass".
+- Supersedes / superseded by: None.
+
+## D305: Block passes of the drive of the peak-control render
+
+- Recorded: 2026-10-30.
+- Origin: Measurement. In the profile of D304, `render_with_block_trace` and its calls take 23.93 s of `render_set` on track-e. The loop over the 4x frames takes 4.04 s, and `Limiter::push` and its calls take 6.59 s. At each frame, the loop drove the frame, checked it, added it to the queue, called the limiter and added the gain to a vector. The queue and the vector are in memory, so each frame loaded and stored their lengths around the call (a private record).
+- Basis: Measurement.
+- Status: Accepted. Implemented in `render_blocks::render_with_block_trace` and `dsp::Limiter::push`. Not deployed.
+- Decision:
+  - The loop drives each block of 65,536 frames, checks the block and adds the block to the queue in whole passes. Then it gives the peak of each frame to the limiter, and it writes the gains into a vector of the length of a block.
+  - `Limiter::push` is in line in its callers.
+- Reason: Each frame takes the same operations, so each driven frame and each gain is the same. A block with a nonfinite driven sample gives the same error. In the profiles, at load factors of 1.029 and 1.016 against the profile of D304, `render_with_block_trace` and its calls take 23.72 s with the block passes and 22.39 s with the block passes and the limiter in line. They take 23.93 s with D304. In series 11 and 12, `render_set` on track-e takes 100.69, 97.80, 104.80 and 104.33 s against 102.99, 100.57, 106.11 and 106.46 s with D304 (−2.5% and −1.6%).
+- Alternatives and tradeoffs: With the block passes only, the loop takes 2.08 s against 4.04 s, but `Limiter::push` and its calls take 7.79 s against 6.59 s. In series 11, `render_set` took 100.58 and 100.23 s with the block passes only.
+- Evidence: a private record.
+- Rule and code references: `limiter_trace_follows_the_selected_render_and_matches_whole_song_stats` and the other tests of `render_blocks::tests`.
+- Limits and counterexamples: Natively, the set takes 30.5 to 38.7 s against 30.2 to 38.1 s with D304, at load averages up to 11.1.
+- Verification: The engine checks pass: fmt, clippy, the clippy of the WASM crate, 390 tests, 34 tests of the lambda and the export check. The sets of the nine regression mixes with D305 give 36 WASM WAVs and 36 native WAVs that are identical to the sets of D304, and each record makes the same decisions.
+- Review condition: A change of the limiter or of the loop of the frames of `render_with_block_trace`.
+- Work reference: TODO.md, "Block passes of the drive of the peak-control render".
+- Supersedes / superseded by: None.
+
+## D306: Filters and energy of the loudness meter in locals
+
+- Recorded: 2026-10-30.
+- Origin: Measurement. In the profile of D305, `LoudnessMeter::push` takes 2.42 s of `render_set` on track-e. In WASM, its loop loads 29 and stores 10 f64 values of the meter at each frame, and it takes a remainder at each frame (a private record).
+- Basis: Measurement.
+- Status: Rejected. The engine keeps the loop of `LoudnessMeter::push`.
+- Decision: Do not keep the filters and the energy of the meter in locals.
+- Reason: With the state in locals and a count of the frames to the end of each bucket, the loop has no loads or stores of the meter. In a profile, at a load factor of 1.025 against the profile of D305, `LoudnessMeter::push` took 2.40 s against 2.42 s. Each frame runs the recursions of two filters in series for each channel.
+- Alternatives and tradeoffs: None measured.
+- Evidence: a private record.
+- Rule and code references: None.
+- Limits and counterexamples: None.
+- Verification: A unit test compared the buckets of the meter in spans of 1 to 65,536 frames with the buckets of a meter of each frame, bit for bit. The profile gave the four WAVs of track-e of D305.
+- Review condition: A form of the meter that runs the filters of more than one frame at a time.
+- Work reference: TODO.md, "Filters and energy of the loudness meter in locals".
+- Supersedes / superseded by: None.
+
+## D307: Runs of the bins of the auditory bands
+
+- Recorded: 2026-10-30.
+- Origin: Measurement. In the profile of D305, `auditory::measure_stem_read` and its calls take 2.72 s of `render_set` on track-e. For each frame of 4,096 samples, each of the 64 bands added the mid and the side power of its bins from a list of pairs of a bin and a weight (a private record).
+- Basis: Measurement.
+- Status: Accepted. Implemented in `auditory::frame_measure`. Not deployed.
+- Decision: Each band keeps its first bin and the weights of its bins as one run. The mid and the side power of each bin are side by side in one array.
+- Reason: The weight of a bin falls as the distance of the bin from the centre of the band increases. Thus the bins of a band with a weight of 1e-12 or more are one run, and an assertion checks each run. Each sum adds the same products in the same order. In the profiles, at a load factor of 0.940 against the profile of D305, `measure_stem_read` and its calls take 1.59 s against 2.72 s. In series 14, on battery power, `render_set` on track-e takes 114.71 and 109.24 s against 115.96 and 112.96 s with D305 (−2.2%).
+- Alternatives and tradeoffs: LLVM compiles the sums of a band to scalar operations on two bins at a time.
+- Evidence: a private record.
+- Rule and code references: `the_runs_of_the_bands_give_the_sums_of_the_weighted_bins` (`auditory::tests`).
+- Limits and counterexamples: Natively, on battery power, the set takes 37.9 to 40.4 s against 38.2 to 40.2 s with D305.
+- Verification: The engine checks pass: fmt, clippy, the clippy of the WASM crate, 391 tests, 34 tests of the lambda and the export check. The sets of the nine regression mixes with D307 give 36 WASM WAVs and 36 native WAVs that are identical to the sets of D305, and each record makes the same decisions.
+- Review condition: A change of the bands, of the weights or of the truncation at 1e-12.
+- Work reference: TODO.md, "Runs of the bins of the auditory bands".
+- Supersedes / superseded by: None.
+
+## D308: Sample peaks in vector lanes
+
+- Recorded: 2026-10-30.
+- Origin: Measurement. In the profile of D307, `BlockPeaks::near` takes 1.59 s and `sample_peak_stored` takes 0.80 s of `render_set` on track-e. Each sample peak took one value at a time (a private record).
+- Basis: Measurement.
+- Status: Accepted. Implemented in `dsp::peak_abs`. Not deployed.
+- Decision: `dsp::sample_peak` takes 16 values at each step in four vector lanes. The true-peak scans, the upsampled blocks of the peak-control render and `sample_peak_stored` use it.
+- Reason: The fold of `f32::max` from 0 takes the larger value and passes a NaN by, so the order of the values leaves the result the same. A test compares the lanes with the fold for NaN, infinities, both zeros and a subnormal value. In the profiles, at a load factor of 0.929 against the profile of D307, `BlockPeaks::near` takes 0.23 s against 1.59 s. In series 15, on battery power, `render_set` on track-e takes 93.78 and 94.75 s against 99.01 and 96.79 s with D307 (−3.7%).
+- Alternatives and tradeoffs: The values after the last whole step of 16 values take the scalar fold.
+- Evidence: a private record.
+- Rule and code references: `the_peak_in_lanes_equals_the_fold_of_each_value` (`dsp::tests`).
+- Limits and counterexamples: Natively, on battery power, the set takes 30.60 to 31.65 s against 30.45 to 32.62 s with D307.
+- Verification: The engine checks pass: fmt, clippy, the clippy of the WASM crate, 392 tests, 34 tests of the lambda and the export check. The sets of the nine regression mixes with D308 give 36 WASM WAVs and 36 native WAVs that are identical to the sets of D307, and each record makes the same decisions.
+- Review condition: A change of `vector::max_abs` or of the NaN rule of a sample peak.
+- Work reference: TODO.md, "Sample peaks in vector lanes".
+- Supersedes / superseded by: None.
+
+## D309: Bins of the held bands in the sections
+
+- Recorded: 2026-10-30.
+- Origin: Measurement. In the profile of D308, `selection::measure` takes 2.39 s of its own time in `render_set` on track-e. In it, `low_end::sections_read` tested each bin of the spectrum of each 15 s section against the held bands (a private record).
+- Basis: Measurement.
+- Status: Accepted. Implemented in `low_end::sections_read`. Not deployed.
+- Decision: The sums of each section take the bins before the first bin at the top of the held bands, 250 Hz.
+- Reason: The frequency of a bin rises with the bin, so the bins from that bin on are in no held band and in no sub-band. The sums add the same values in the same order. In the profiles, at a load factor of 1.029 against the profile of D308, the own time of `selection::measure` is 2.33 s against 2.39 s.
+- Alternatives and tradeoffs: The FFT of each section stays whole. A transform of the low bins alone changes the values of the bins.
+- Evidence: a private record.
+- Rule and code references: `the_sections_give_the_sums_of_each_bin_of_the_spectrum` (`low_end::tests`).
+- Limits and counterexamples: In series 16, the two WASM runs of D309 differ by 4.93 s. This difference is larger than the change in the profile.
+- Verification: The engine checks pass: fmt, clippy, the clippy of the WASM crate, 394 tests, 34 tests of the lambda and the export check. The sets of the nine regression mixes with D310, which holds D309, give 36 WASM WAVs and 36 native WAVs that are identical to the sets of D308, and each record makes the same decisions.
+- Review condition: A change of `BANDS_HZ` or of `low_band`.
+- Work reference: TODO.md, "Bins of the held bands in the sections".
+- Supersedes / superseded by: None.
+
+## D310: Window levels in one pass
+
+- Recorded: 2026-10-30.
+- Origin: Measurement. In the profile of D309, `selection::measure` takes 2.33 s of its own time. Its window levels added each frame three times, once for each 3 s window at steps of 1 s, in one dependent chain of additions for each window (a private record).
+- Basis: Measurement.
+- Status: Accepted. Implemented in `selection::window_levels_read`. Not deployed.
+- Decision: `window_levels_read` reads each step of 1 s once and adds each frame to the sums of its three windows.
+- Reason: Each sum adds the same values in the same order as a pass for each window. The three sums are independent chains of additions. In the profiles, at load factors of 0.992 and 1.029 against the profile of D308, the own time of `selection::measure` is 2.03 s with D310 against 2.33 s with D309.
+- Alternatives and tradeoffs: A running sum that adds the new step and subtracts the old step changes the values of the sums.
+- Evidence: a private record.
+- Rule and code references: `the_window_levels_of_one_pass_equal_a_sum_for_each_window` (`selection::tests`).
+- Limits and counterexamples: In series 16, `render_set` with D310 takes 91.49 and 91.86 s against 89.73 and 93.06 s with D308. The difference is in the spread of the runs.
+- Verification: The engine checks pass: fmt, clippy, the clippy of the WASM crate, 394 tests, 34 tests of the lambda and the export check. The sets of the nine regression mixes with D310 give 36 WASM WAVs and 36 native WAVs that are identical to the sets of D308, and each record makes the same decisions.
+- Review condition: A change of the window, of the step or of the sum of a window.
+- Work reference: TODO.md, "Window levels in one pass".
+- Supersedes / superseded by: None.
+
+## D311: Runs of the frames of a block of the peak-control render
+
+- Recorded: 2026-10-30.
+- Origin: Measurement. In the profile of D310, the closure that takes the gains of each block of the peak-control render takes 5.74 s of `render_set` on track-e. For each counted frame, it found the bin of the trace with a division, and it loaded and stored the seven sums of the bin (a private record).
+- Basis: Measurement.
+- Status: Rejected. The closure keeps one loop over the frames of a block.
+- Decision: Do not take the frames of a block in runs of one state.
+- Reason: A build took the frames in runs: the counted frames of one bin of the trace, and the frames that do not count. The sums of the bin of a run were locals. In a profile, at a load factor of 0.997 against the profile of D310, the closure took 5.89 s against 5.74 s.
+- Alternatives and tradeoffs: None measured.
+- Evidence: a private record.
+- Rule and code references: None.
+- Limits and counterexamples: None.
+- Verification: A unit test compared the output, the statistics and the trace of blocks of 127 and 4,096 frames with those of blocks of one frame, bit for bit. The profile gave the four WAVs of track-e of D310.
+- Review condition: A change of the work of the closure for each frame.
+- Work reference: TODO.md, "Runs of the frames of a block of the peak-control render".
+- Supersedes / superseded by: None.
+
+## D312: Running extremum of the limiter in line
+
+- Recorded: 2026-10-30.
+- Origin: Measurement. In the profile of D310, `render_with_block_trace` takes 6.89 s of its own time in `render_set` on track-e. In WASM, its frame loop calls `RunningExtremum::push` twice for each frame, for the lookahead and for the sustain window (a private record).
+- Basis: Measurement.
+- Status: Accepted. Implemented in `dsp::RunningExtremum::push`. Not deployed.
+- Decision: `RunningExtremum::push` is in line in its callers.
+- Reason: The arithmetic of each frame stays the same. In the profiles, at a load factor of 0.993 against the profile of D310, the own time of `render_with_block_trace` is 6.12 s against 6.89 s. In series 17, natively, the set takes 27.84 to 29.96 s against 28.99 to 29.64 s with D310.
+- Alternatives and tradeoffs: None measured.
+- Evidence: a private record.
+- Rule and code references: `block_boundaries_preserve_samples_and_forward_statistics_exactly` (`render_blocks::tests`).
+- Limits and counterexamples: In series 17, `render_set` with D312 takes 89.29 and 90.12 s against 89.68 and 90.03 s with D310. The difference is in the spread of the runs.
+- Verification: The engine checks pass: fmt, clippy, the clippy of the WASM crate, 394 tests, 34 tests of the lambda and the export check. The sets of the nine regression mixes with D312 give 36 WASM WAVs and 36 native WAVs that are identical to the sets of D310, and each record makes the same decisions.
+- Review condition: A change of `RunningExtremum` or of the frame loop of the limiter.
+- Work reference: TODO.md, "Running extremum of the limiter in line".
+- Supersedes / superseded by: None.
+
+## D313: Window power of the frames of the stereo analysis
+
+- Recorded: 2026-10-30.
+- Origin: Measurement. In the profile of D312, `stereo::analyze_read` takes 1.21 s of its own time in `render_set` on track-e, and its code is also in line in `set::prepare_mix` and `selection::measure`. For each frame of 8,192 samples, it added the power of the window at each sample in one dependent chain of additions (a private record).
+- Basis: Measurement.
+- Status: Accepted. Implemented in `stereo::analyze_read`. Not deployed.
+- Decision: A frame whose 8,192 samples are all in the recording takes the sum of the whole window, computed once. A frame at an end of the recording takes the sum of the window at its samples.
+- Reason: Each frame with all of its samples took the same sum in the same order. In the profiles, at a load factor of 0.997 against the profile of D312, the own times of `analyze_read`, `prepare_mix` and `selection::measure` are 1.00, 2.08 and 1.89 s against 1.21, 2.34 and 2.03 s. In series 18, natively, the set takes 28.11 to 29.37 s against 28.65 to 29.88 s with D312.
+- Alternatives and tradeoffs: None measured.
+- Evidence: a private record.
+- Rule and code references: `frames_on_several_cores_match_the_sequential_analysis` (`stereo::parallel_tests`) compares the analysis with a sum of the window power for each frame.
+- Limits and counterexamples: In series 18, `render_set` with D313 takes 89.52 and 91.45 s against 90.33 and 90.68 s with D312. The difference is in the spread of the runs.
+- Verification: The engine checks pass: fmt, clippy, the clippy of the WASM crate, 394 tests, 34 tests of the lambda and the export check. The sets of the nine regression mixes with D313 give 36 WASM WAVs and 36 native WAVs that are identical to the sets of D312, and each record makes the same decisions.
+- Review condition: A change of the window, of the frame size or of the frames at the ends.
+- Work reference: TODO.md, "Window power of the stereo analysis".
+- Supersedes / superseded by: None.
+
+## D314: Bin of the trace of the peak-control render
+
+- Recorded: 2026-10-31.
+- Origin: Measurement. In the profile of D313, the closure that takes the gains of each block of the peak-control render takes 5.68 s of `render_set` on track-e. For each counted frame, it finds the bin of the trace with a division, and it loads and stores the seven sums of the bin (a private record).
+- Basis: Measurement.
+- Status: Rejected. The closure finds the bin of each counted frame.
+- Decision: Do not keep the bin of the trace and its sums in locals of the closure.
+- Reason: A build kept the bin, the frame where it ends and its sums in locals of each call. It found a bin only after the frames of the last bin. This is a second form of D311. Over three profiles of each build, the closure took 5.80 to 6.14 s against 5.68 to 5.93 s with D313. `render_with_block_trace` took 5.84 to 6.04 s against 6.03 to 6.18 s. The profile totals are 89.3 to 91.4 s against 89.7 to 92.2 s.
+- Alternatives and tradeoffs: D311 took the frames of a block in runs of one bin.
+- Evidence: a private record.
+- Rule and code references: None.
+- Limits and counterexamples: In series 19, natively, the set took 29.59 to 30.38 s against 30.03 to 30.67 s with D313.
+- Verification: A unit test compared the trace of blocks of 4,099 frames with the trace of blocks of one frame. The clippy checks, 395 tests, 34 tests of the lambda and the export check passed. The sets of the nine regression mixes gave 36 WASM WAVs and 36 native WAVs that are identical to the sets of D313.
+- Review condition: A change of the work of the closure for each frame.
+- Work reference: TODO.md, "Bin of the trace of the peak-control render".
+- Supersedes / superseded by: None.
+
+## D315: Wet share of a segment of one share
+
+- Recorded: 2026-10-31.
+- Origin: Measurement. In the profile of D314, `treatment::ToneStream::process` takes 1.71 s of its own time on track-e, and its calls of `cos` take 0.31 s. Each frame of a filter with an envelope takes the raised cosine of its segment (a private record).
+- Basis: Measurement.
+- Status: Rejected. Each frame takes the raised cosine of its segment.
+- Decision: Do not take the share of a segment whose two points have one share without the raised cosine.
+- Reason: Between two points of one share, the raised cosine gives that share. A build took the share of such a segment without the cosine. In its profile, at a load factor of 1.008 against the profile of D314, the calls of `cos` from `ToneStream::process` took 0.30 s against 0.31 s. The own time of `ToneStream::process` was 1.86 s against 1.71 s. Few frames of the envelopes of track-e are in such segments.
+- Alternatives and tradeoffs: None measured.
+- Evidence: a private record.
+- Rule and code references: None.
+- Limits and counterexamples: None.
+- Verification: A unit test compared the frames with the frames of the raised cosine at each frame, bit for bit. The profile gave the four WAVs of track-e of D313.
+- Review condition: Envelopes with long segments of one share.
+- Work reference: TODO.md, "Wet share of a segment of one share".
+- Supersedes / superseded by: None.
+
+## D316: Equal-loudness contour of the weights
+
+- Recorded: 2026-10-31.
+- Origin: Measurement. In the profile of D313, `stereo::bin_weights` takes 0.23 s of `render_set` on track-e. For each of the 4,097 bins of the stereo analysis, `broad_tone::equal_loudness_weight` computed the SPL of each ISO 226 frequency twice (a private record).
+- Basis: Measurement.
+- Status: Accepted. Implemented in `broad_tone::Contour`, `broad_tone::equal_loudness_weights`, `broad_tone::reference_presence_db` and `stereo::bin_weights`. Not deployed.
+- Decision: The weights of a set of frequencies take one contour (`equal_loudness_weights`). `reference_presence_db` takes one contour for the band centers.
+- Reason: Each weight takes the same values in the same order. In the profiles, at a load factor of 1.097 against a profile of D313, `bin_weights` takes 0.01 s against 0.23 s, and the own time of `pow` is 0.13 s against 0.39 s.
+- Alternatives and tradeoffs: D314 and D315, rejected.
+- Evidence: a private record.
+- Rule and code references: `the_weights_of_one_contour_equal_the_weights_of_a_contour_for_each` (`broad_tone::tests`).
+- Limits and counterexamples: In series 20, the WASM and the native times are in the spread of the runs.
+- Verification: The engine checks pass: fmt, clippy, the clippy of the WASM crate, 395 tests, 34 tests of the lambda and the export check. The sets of the nine regression mixes with D316 give 36 WASM WAVs and 36 native WAVs that are identical to the sets of D313, and each record makes the same decisions.
+- Review condition: A change of the contour or of `REFERENCE_PHON`.
+- Work reference: TODO.md, "Equal-loudness contour of the weights".
+- Supersedes / superseded by: None.
+
+## D317: Flatness of the masking frames
+
+- Recorded: 2026-10-31.
+- Origin: Measurement. In the profile of D316, `log` takes 2.17 s of `render_set` on track-e. For the spectral flatness of each masking frame, `masking::frames` takes the log of the power of each bin up to `FLATNESS_MAX_HZ` (a private record).
+- Basis: Measurement.
+- Status: Accepted. Implemented in `masking::Measures`, the frame functions of `masking`, `stft::stereo_frame_pairs_each` and their callers. Not deployed.
+- Decision: Each call of the masking frames names its measures (`masking::Measures`). Only the frames of the masker of a noise-to-mask ratio and the frames of the tonality of the low-mid key take the flatness. The other frames take the band powers, and their `flatness_db` is empty.
+- Reason: The threshold of a noise-to-mask ratio takes the flatness of the masker, and the low-mid key takes the flatness of the mix. The frames of the noise, of the stems and of the mid channel use only their band powers. In the band powers, a frame of `Measures::Powers` does the same operations in the same order as a frame with the flatness. In the profiles, at a load factor of 1.006, `log` takes 0.69 s against 2.04 s.
+- Alternatives and tradeoffs: None measured.
+- Evidence: a private record.
+- Rule and code references: `the_powers_alone_equal_the_powers_with_the_flatness` (`masking::tests`).
+- Limits and counterexamples: The closure that measures each frame takes 1.30 s against 1.26 s.
+- Verification: The engine checks pass: fmt, clippy, the clippy of the WASM crate, 396 tests, 34 tests of the lambda and the export check. The sets of the nine regression mixes with D317 give 36 WASM WAVs and 36 native WAVs that are identical to the sets of D316, and each record makes the same decisions.
+- Review condition: A new use of the flatness of the frames.
+- Work reference: TODO.md, "Flatness of the masking frames".
+- Supersedes / superseded by: None.
+
+## D318: Runs of one bin of the waveform envelopes
+
+- Recorded: 2026-10-31.
+- Origin: Measurement. In the profile of D317, `mastering_wasm::run` takes 4.09 s of its own time on track-e. In a build with `waveform::Envelopes::push` out of line, that function takes 0.79 s. For each frame, it found the bin with a 64-bit division, and it loaded and stored the sums of the bin (a private record).
+- Basis: Measurement.
+- Status: Accepted. Implemented in `waveform::Envelopes::push`. Not deployed.
+- Decision: `Envelopes::push` takes the frames of one bin in one run, with the peak and the energy of the bin in locals. The peak of each frame comes first, and the running peak takes one `max` for each frame.
+- Reason: Frame `i` is in bin `k` when `bin_start(k) <= i < bin_start(k + 1)`. The energy takes the same values in the same order, and the `max` of the frame first gives the same peak. In the profiles, at a load factor of 1.005, the functions that hold the loop take 5.05 s against 6.20 s.
+- Alternatives and tradeoffs: A first form took the runs with two `max` for each frame, as before. In its profile, `Envelopes::push` took 0.61 s, against 0.34 s with the peak of the frame first.
+- Evidence: a private record.
+- Rule and code references: `runs_of_one_bin_equal_the_bin_of_each_frame` (`waveform::tests`).
+- Limits and counterexamples: None.
+- Verification: The engine checks pass: fmt, clippy, the clippy of the WASM crate, 397 tests, 34 tests of the lambda and the export check. The sets of the nine regression mixes with D318 give 36 WASM WAVs and 36 native WAVs that are identical to the sets of D317, and each record makes the same decisions.
+- Review condition: A change of the bins or of the sums of the envelopes.
+- Work reference: TODO.md, "Runs of one bin of the waveform envelopes".
+- Supersedes / superseded by: None.
+
+## D319: Peak of each frame of the level scans
+
+- Recorded: 2026-10-31.
+- Origin: Measurement. The level scans `MetricsScan::push`, `analysis::Scan::push` and `analysis::push_blocks` took the running peak of each sample with `max`. A `max` that passes a NaN by takes a compare, a select and a second compare and select in WASM. The two `max` of each frame were one chain (a private record).
+- Basis: Measurement.
+- Status: Accepted. Implemented in `MetricsScan::push`, `analysis::Scan::push` and `analysis::push_blocks`. Not deployed.
+- Decision: Each scan takes the peak of the two samples of a frame first. The running peak takes one `max` for each frame.
+- Reason: `max` passes a NaN by in any order, so the order of the samples leaves the peak the same. The f32 peak of a frame as f64 is the peak of its samples as f64. In the profiles, at a load factor of 0.982, `selection::measure`, `analysis::blocks_read_with` and `analysis::Scan::push` take 2.31 s against 3.27 s.
+- Alternatives and tradeoffs: A first form changed only `MetricsScan::push`. In its profiles, `selection::measure` took 1.78 and 1.77 s against 1.90 and 1.89 s.
+- Evidence: a private record.
+- Rule and code references: `the_peak_of_each_frame_first_gives_the_same_sums` (`metrics_tests`) and `the_peak_of_each_frame_first_gives_the_same_blocks` (`analysis::peak_tests`).
+- Limits and counterexamples: None.
+- Verification: The engine checks pass: fmt, clippy, the clippy of the WASM crate, 399 tests, 34 tests of the lambda and the export check. The sets of the nine regression mixes with D319 give 36 WASM WAVs and 36 native WAVs that are identical to the sets of D318, and each record makes the same decisions.
+- Review condition: A change of the peak or of the energy of the scans.
+- Work reference: TODO.md, "Peak of each frame of the level scans".
+- Supersedes / superseded by: None.
+
+## D320: Spectrum of the source in the stereo analysis
+
+- Recorded: 2026-10-31.
+- Origin: Measurement. `pipeline::analyze_source_read` took the spectrum and the stereo analysis of the source in two passes. Each pass transformed frames of 8,192 samples at hops of 2,048 samples with the same Hann window (a private record).
+- Basis: Measurement.
+- Status: Accepted. Implemented in `SpectrumSums`, `spectrum_read`, `stereo::analyze_with_spectrum_read` and `pipeline::analyze_source_read`. Not deployed.
+- Decision: The source analysis takes the spectrum from the frames of the stereo analysis (`stereo::analyze_with_spectrum_read`). Each frame of the stereo analysis with a whole window adds the terms of its bins to the sums of the spectrum.
+- Reason: The frame of the stereo analysis at center `c` with a whole window holds the frames from `c - 4,096` to `c + 4,096`. The frame of the spectrum that starts at `c - 4,096` holds the same frames. The two frames have the same window and the same transform, and the sums take the frames in the same order. In the profiles, at a load factor of 0.995, `set::prepare_mix` takes 1.65 s of its own time and 0.55 s of FFT, against 1.88 s and 0.70 s.
+- Alternatives and tradeoffs: None measured.
+- Evidence: a private record.
+- Rule and code references: `the_analysis_with_the_spectrum_equals_each_pass` (`stereo::parallel_tests`).
+- Limits and counterexamples: The spectra of the versions (`adjust::measure`) and of `set::sub_lift` keep their own passes. In series 24, the WASM and the native times are in the spread of the runs.
+- Verification: The engine checks pass: fmt, clippy, the clippy of the WASM crate, 400 tests, 34 tests of the lambda and the export check. The sets of the nine regression mixes with D320 give 36 WASM WAVs and 36 native WAVs that are identical to the sets of D319, and each record makes the same decisions.
+- Review condition: A change of the frames, the window or the hop of the spectrum or of the stereo analysis.
+- Work reference: TODO.md, "Spectrum of the source in the stereo analysis".
+- Supersedes / superseded by: None.
+
+## D321: Filters of two lanes of the passage powers
+
+- Recorded: 2026-10-31.
+- Origin: Measurement. In the profile of D320, `refinement::band_powers` takes 2.01 s of its own time on track-e. For each frame and each bell, `passage_powers` ticked six scalar f64 filters: the bell and two bands for the vocal, and the same three filters for the accompaniment (a private record).
+- Basis: Measurement.
+- Status: Accepted. Implemented in `refinement::passage_powers` and `refinement::pair`. Not deployed.
+- Decision: `passage_powers` ticks three filters of two f64 lanes, with the vocal in lane 0 and the accompaniment in lane 1. The lanes are WASM `f64x2` and NEON `float64x2_t`. Other targets use two scalar values.
+- Reason: The vocal and the accompaniment use the same coefficients. Each multiply, add and subtract of a lane rounds as the scalar operation, so each lane gives the outputs and the states of a scalar filter. In the profiles, at load factors of 1.000 and 1.013, `band_powers` takes 1.24 s against 2.01 s.
+- Alternatives and tradeoffs: None measured.
+- Evidence: a private record.
+- Rule and code references: `the_filters_of_two_lanes_equal_a_filter_for_each_role` (`refinement::tests`).
+- Limits and counterexamples: None.
+- Verification: The engine checks pass: fmt, clippy, the clippy of the WASM crate, 401 tests, 34 tests of the lambda and the export check. The sets of the nine regression mixes with D321 give 36 WASM WAVs and 36 native WAVs that are identical to the sets of D320, and each record makes the same decisions.
+- Review condition: A change of the filters of the passage powers, or a filter with other coefficients for each role.
+- Work reference: TODO.md, "Filters of two lanes of the passage powers".
+- Supersedes / superseded by: None.
+
+## D322: Loudness meter in two lanes
+
+- Recorded: 2026-10-31.
+- Origin: Measurement. In the profile of D321, `dsp::LoudnessMeter::push` takes 2.29 s of its own time on track-e. For each frame, it ticked the K-weighting shelf and high-pass of each channel as four scalar f64 filters in the meter, and it took the remainder of the frame count by the bucket (a private record).
+- Basis: Measurement.
+- Status: Accepted. Implemented in `dsp::LoudnessMeter` and `dsp::pair`. Not deployed.
+- Decision: The meter ticks the shelf and the high-pass as filters of two f64 lanes (`dsp::pair`, D321), with the left channel in lane 0 and the right channel in lane 1. The filters and the sums are locals of each call. The frame that ends a bucket is the next multiple of the bucket.
+- Reason: The two channels use the same coefficients, and each lane rounds as the scalar filter. The energy adds the left sample and then the right sample, as before. In the profiles, at load factors of 0.987 and 1.004, `LoudnessMeter::push` takes 1.52 and 1.58 s against 2.29 s.
+- Alternatives and tradeoffs: None measured.
+- Evidence: a private record.
+- Rule and code references: `the_meter_in_pairs_equals_a_filter_for_each_channel` (`dsp::tests`).
+- Limits and counterexamples: None.
+- Verification: The engine checks pass: fmt, clippy, the clippy of the WASM crate, 402 tests, 34 tests of the lambda and the export check. The sets of the nine regression mixes with D322 give 36 WASM WAVs and 36 native WAVs that are identical to the sets of D321, and each record makes the same decisions.
+- Review condition: A change of the K-weighting or of the buckets of the meter.
+- Work reference: TODO.md, "Loudness meter in two lanes".
+- Supersedes / superseded by: None.
+
+## D323: Runs of one band of the masking frames
+
+- Recorded: 2026-10-31.
+- Origin: Measurement. In the profile of D322, the closure that measures each masking frame takes 1.33 s of its own time on track-e. For each bin, it added the power of the bin to the sum of its band in the array of the band powers (a private record).
+- Basis: Measurement.
+- Status: Accepted. Implemented in `masking::frame_measure`. Not deployed.
+- Decision: The closure takes the bins in runs of consecutive bins with one band. The sum of the band continues in a local over each run.
+- Reason: Each run starts from the sum of its band and adds the powers of its bins in order, so each band power takes the same additions in the same order. In the profiles, at a load factor of 1.011, the closure takes 0.83 s against 1.33 s.
+- Alternatives and tradeoffs: None measured.
+- Evidence: a private record.
+- Rule and code references: `the_runs_of_a_band_equal_a_sum_for_each_bin` (`masking::tests`).
+- Limits and counterexamples: None.
+- Verification: The engine checks pass: fmt, clippy, the clippy of the WASM crate, 404 tests, 34 tests of the lambda and the export check. The sets of the nine regression mixes with D323 and D324 give 36 WASM WAVs and 36 native WAVs that are identical to the sets of D322, and each record makes the same decisions.
+- Review condition: A change of the bands or of the measures of the masking frames.
+- Work reference: TODO.md, "Runs of one band of the masking frames".
+- Supersedes / superseded by: None.
+
+## D324: Auditory bands side by side
+
+- Recorded: 2026-10-31.
+- Origin: Measurement. In the profile of D323, `auditory::measure_stem_read` takes 1.16 s of its own time on track-e. For each frame, `auditory::frame_measure` added the weighted powers of 33 to 1,541 bins to the sums of each of 64 bands, one band at a time (a private record).
+- Basis: Measurement.
+- Status: Accepted. Implemented in `auditory::frame_measure`. Not deployed.
+- Decision: The closure takes the bands in groups of four. Over the bins that each band of a group holds, the four bands add one bin each in turn. Each band then adds its other bins.
+- Reason: Each band adds its bins in the order of the bins, so each sum takes the same additions in the same order. The four chains of additions run beside each other. In the profiles, at a load factor of 0.990, `measure_stem_read` takes 0.85 s against 1.16 s.
+- Alternatives and tradeoffs: None measured.
+- Evidence: a private record.
+- Rule and code references: `the_bands_side_by_side_equal_one_band_at_a_time` (`auditory::tests`).
+- Limits and counterexamples: None.
+- Verification: The engine checks pass: fmt, clippy, the clippy of the WASM crate, 404 tests, 34 tests of the lambda and the export check. The sets of the nine regression mixes with D323 and D324 give 36 WASM WAVs and 36 native WAVs that are identical to the sets of D322, and each record makes the same decisions.
+- Review condition: A change of the bands or of the weights of the auditory frames.
+- Work reference: TODO.md, "Auditory bands side by side".
+- Supersedes / superseded by: None.
+
+## D325: Band frames of the stems in the stereo analysis
+
+- Recorded: 2026-10-31.
+- Origin: Measurement. For each stem, `stem_evidence` transforms the band frames of 8,192 samples at hops of 4,096 (`band_frames_read`) and the frames of the stereo analysis at hops of 2,048 (`stem_image_read`). Each band frame is a frame of the stereo analysis (a private record).
+- Basis: Measurement.
+- Status: Rejected. Each stem keeps the two passes.
+- Decision: Do not take the band frames of a stem from the frames of its stereo analysis.
+- Reason: A build took the band frames from the frames of the stereo analysis whose window starts at a multiple of 4,096. In its profiles, the FFT functions took 8.29 and 8.32 s against 8.69 s, and the own time of `mastering_wasm::run` was 4.58 and 4.39 s against 3.76 s with `stereo::analyze_read`. The profile totals are 83.8 and 85.4 s against 83.8 s. The peak of the WASM memory was 135.81 MiB against 130.31 MiB.
+- Alternatives and tradeoffs: D320 takes the spectrum of the source from its stereo analysis.
+- Evidence: a private record.
+- Rule and code references: None.
+- Limits and counterexamples: In series 28, natively, the set took 24.99 to 26.23 s against 25.47 to 26.36 s.
+- Verification: A unit test compared the image and the band frames with those of the two passes, bit for bit. The engine checks passed with 405 tests. The sets of the nine regression mixes gave 36 WASM WAVs and 36 native WAVs that are identical to the sets of D324.
+- Review condition: A change of the memory of the stereo analysis or of the work of the band frames.
+- Work reference: TODO.md, "Band frames of the stems in the stereo analysis".
+- Supersedes / superseded by: None.
+
+## D326: Gains of two blocks in two lanes
+
+- Recorded: 2026-10-31.
+- Origin: Measurement. In the profile of D324, `audibility::Prefix::ratios` and `audibility::peak_control_ratios_of` take 1.17 s and 0.70 s of their own time on track-e. For each block of 16,384 frames, `GainFit::gain` adds the products of the frames in one chain for each sum (a private record).
+- Basis: Measurement.
+- Status: Rejected. `GainFit` takes the gain of each block in turn.
+- Decision: Do not take the gains of two blocks in the two lanes of `dsp::pair`.
+- Reason: A build with the parts of the ratios out of line gave `GainFit::gain` 0.03 s, `GainFit::residual` 0.12 s and `masking::Thresholds::next` 0.11 s of the run. In series 29, `render_set` took 84.27 and 83.12 s with D326 against 82.69 and 83.37 s with D324.
+- Alternatives and tradeoffs: None measured.
+- Evidence: a private record.
+- Rule and code references: None.
+- Limits and counterexamples: In the pair of profiles, at a load factor of 0.995, `Prefix::ratios` took 1.02 s against 1.17 s, and `peak_control_ratios_of` 0.63 s against 0.70 s. The profile total was 84.0 s against 83.7 s.
+- Verification: A unit test compared the gains with the gain of each block, bit for bit. The engine checks passed with 405 tests. The sets of the nine regression mixes gave 36 WASM WAVs and 36 native WAVs that are identical to the sets of D324.
+- Review condition: Longer prefixes of the ratios.
+- Work reference: TODO.md, "Gains of two blocks in two lanes".
+- Supersedes / superseded by: None.
+
+## D327: Comparisons in place of max in the frames of the peak-control render
+
+- Recorded: 2026-10-31.
+- Origin: Measurement. In the profile of D324, the closure that takes the gains of each block of the peak-control render takes 5.96 s of its own time on track-e. For each counted frame, it takes five maxima of the clip reduction and of the peaks of the trace with `f64::max` and `f32::max` (a private record).
+- Basis: Measurement.
+- Status: Accepted. Implemented in `render_blocks::render_with_block_trace` and `dsp::larger` (in `render_blocks` before D329). Not deployed.
+- Decision: The closure takes the maximum of the clip reduction of a frame, the maximum of the clip reductions, the input and output peaks of a trace bin and the clip of a trace bin with `larger`: one comparison and one select.
+- Reason: `max` passes a NaN by. In WASM, the code of `max` also tests each value for NaN. The values of these maxima are not NaN and not -0.0, and for such values `larger` gives the value of `max`. In the profiles, at a load factor of 0.997, the closure takes 4.49 s against 5.96 s. In series 30, `render_set` takes 82.47 and 83.08 s against 84.15 and 85.43 s with D324.
+- Alternatives and tradeoffs: The maximum reduction of a trace bin keeps `max`, because the reduction of a frame without reduction is -0.0.
+- Evidence: a private record.
+- Rule and code references: `larger_and_smaller_equal_max_and_min` (`dsp::tests`), from D329; before it, `larger_equals_max_without_nan_and_negative_zero` (`render_blocks::tests`).
+- Limits and counterexamples: Natively, in series 30, the set took 27.27 to 28.19 s against 26.38 to 27.77 s with D324, at load averages of 6.1 to 7.6.
+- Verification: The engine checks pass: fmt, clippy, the clippy of the WASM crate, 405 tests, 34 tests of the lambda and the export check. The sets of the nine regression mixes with D327 give 36 WASM WAVs and 36 native WAVs that are identical to the sets of D324, and each record makes the same decisions.
+- Review condition: A change of the values of the maxima of the closure.
+- Work reference: TODO.md, "Comparisons in place of max in the frames of the peak-control render".
+- Supersedes / superseded by: None.
+
+## D328: Gains of the limiter in two lanes
+
+- Recorded: 2026-11-02.
+- Origin: Measurement. In the profile of D327, `exp` takes 2.80 s of `render_set` on track-e, and its calls from the peak-control renders take 2.25 s. For each frame whose lookahead reduction changes, `Limiter::push` takes the gain of the reduction with `exp` (a private record).
+- Basis: Measurement.
+- Status: Rejected. `Limiter::push` takes the gain of each new reduction with `exp`.
+- Decision: Do not take the gains of the limiter of a block in the two lanes of `dsp::pair`.
+- Reason: A build took the stages of the frames of a block first and the gains of the new reductions after them, two at a time, with the operations of the `exp` of libm in each lane. In the profiles, at a load factor of 1.012, `render_with_block_trace` took 8.05 s against 5.89 s, and `exp` took 0.55 s against 2.80 s. The two functions took 8.60 s against 8.69 s. The profile total was 86.5 s against 85.8 s.
+- Alternatives and tradeoffs: None measured.
+- Evidence: a private record.
+- Rule and code references: None.
+- Limits and counterexamples: No series ran.
+- Verification: A unit test compared the two lanes with the `exp` of the libm crate on 200,000 values and on the edges of its argument reduction, bit for bit. A unit test compared the gains of blocks of 1 to 60,000 frames with the gains of each push, bit for bit. The clippy checks passed. Each profile gave the four WAVs of D313.
+- Review condition: A change of the stages of the limiter or of the code of `exp` in WASM.
+- Work reference: TODO.md, "Gains of the limiter in two lanes".
+- Supersedes / superseded by: None.
+
+## D329: Comparisons in place of max and min in the true-peak scans and the limiter
+
+- Recorded: 2026-11-02.
+- Origin: Measurement. With D327, five maxima of each frame of the peak-control render took 1.47 s less with comparisons. In the profile of D327, `Oversampler::peak_core_from` and `Oversampler::peak_scan_core` take 4.61 and 4.49 s of their own time on track-e. For each frame that a scan measures, the scans fold the 16 interpolated values of the frame with `f32::max` (a private record).
+- Basis: Measurement.
+- Status: Accepted. Implemented in `dsp::larger`, `dsp::smaller`, `dsp::Oversampler`, `dsp::Limiter`, `dsp::LimiterStatsAccumulator` and `render_blocks::render_with_block_trace`. Not deployed.
+- Decision: These maxima and minima take `larger` and `smaller`, one comparison and one select:
+  - the fold of the interpolated values of each frame, and the largest lane of the bound of a group of frames (`lanes_peak`);
+  - the peak of each frame in the chunks of `peak_core_from` and `peak_after_core`, and the largest value and the frame peak of `peak_scan_core`;
+  - the peak of each frame that the limiter of the peak-control render takes, and the larger of the fast and slow reductions of the limiter;
+  - the smallest gain of the limiter statistics.
+- Reason: `max` and `min` pass a NaN by. In WASM, their code also tests each value for NaN. In each of these, the first value is not NaN and no value is -0.0: absolute values, sums from +0.0, reductions of +0.0 or more and gains from 0 to 1. The samples of a render are finite. For such values, `larger` and `smaller` give the values of `max` and `min`. In the profiles, at a load factor of 0.982, `peak_core_from` takes 3.34 s against 4.61 s, and `peak_scan_core` 3.38 s against 4.49 s. In series 32, `render_set` takes 78.47, 78.81 s against 81.24, 81.43 s with D327.
+- Alternatives and tradeoffs: `larger` moves from `render_blocks` to `dsp`.
+- Evidence: a private record.
+- Rule and code references: `larger_and_smaller_equal_max_and_min` (`dsp::tests`).
+- Limits and counterexamples: `render_with_block_trace` takes 5.85 s against 5.94 s, so the peaks and the reductions of the limiter take about the same time. Natively, in series 32, the set took 24.70, 27.29, 25.50 s against 24.67, 26.15, 25.25 s with D327, at load averages of 5.2 to 9.7.
+- Verification: The engine checks pass: fmt, clippy, the clippy of the WASM crate, 405 tests, 34 tests of the lambda and the export check. The sets of the nine regression mixes with D329 give 36 WASM WAVs and 36 native WAVs that are identical to the sets of D327, and each record makes the same decisions. The version records of the WASM sets are identical to those of D327, byte for byte.
+- Review condition: A scan or a limiter with values that can be NaN or -0.0.
+- Work reference: TODO.md, "Comparisons in place of max and min in the true-peak scans and the limiter".
+- Supersedes / superseded by: Moves `larger` of D327 to `dsp`.
+
+## D330: Measures of the controls from the stereo analysis of a render
+
+- Recorded: 2026-11-02.
+- Origin: TODO.md, "Spectra of the versions". Measurement. In the profile of D329, `spectrum_read` takes 1.46 s of `render_set` on track-e with its calls: the spectra of the four delivered versions for their measures of the controls (`adjust::measure`). The audio of a delivered version is the render of its report (`report.render.audio`), and `selection::measure` takes the stereo analysis of that render (a private record).
+- Basis: Measurement.
+- Status: Accepted. Implemented in `selection::measure`, `selection::Measured::measures`, `set::Report::measures`, `adjust::measures_of`, `distributed` and the WASM sink. Not deployed.
+- Decision: `selection::measure` takes the spectrum of a render from the frames of its stereo analysis (`stereo::analyze_with_spectrum_read`, D320) and the measures of the controls from that spectrum (`adjust::measures_of`). The report of a version holds them, outside its JSON. The WASM sink takes the measures of the report. The measure of a family candidate of the Lambda takes the spectrum from its stereo analysis in the same way.
+- Reason: The frames of the stereo analysis give the spectrum of `spectrum_read`, bit for bit (D320). In the profiles, at a load factor of 0.982, `spectrum_read` takes no time against 1.46 s, and `selection::measure` takes 3.79 s with its calls against 3.46 s: the terms of the spectrum for each measured render. In series 33, `render_set` takes 77.04, 76.64 s against 78.07, 77.74 s with D329.
+- Alternatives and tradeoffs: None measured.
+- Evidence: a private record.
+- Rule and code references: `the_analysis_with_the_spectrum_equals_each_pass` (`stereo::tests`, D320).
+- Limits and counterexamples: Natively, in series 33, the set took 24.74, 25.95, 25.92 s against 25.78, 25.81, 25.95 s with D329, at load averages of 4.6 to 7.0.
+- Verification: The engine checks pass: fmt, clippy, the clippy of the WASM crate, 405 tests, 34 tests of the lambda and the export check. The sets of the nine regression mixes with D330 give 36 WASM WAVs and 36 native WAVs that are identical to the sets of D329, and each record makes the same decisions. The version records of the WASM sets, with the measures of the controls, are identical to those of D329, byte for byte.
+- Review condition: A delivered version whose audio is not the render of its report.
+- Work reference: TODO.md, "Spectra of the versions".
+- Supersedes / superseded by: None.
+
+## D331: Stereo Eq in two lanes or by frame
+
+- Recorded: 2026-11-03.
+- Origin: Measurement. In the profile of D330, `ToneStream::process` takes 1.68 s of `render_set` on track-e. `dsp::Eq::process` filters the whole span with one band, then with the next band (a private record).
+- Basis: Measurement.
+- Status: Rejected. `dsp::Eq::process` filters the span band by band, with a filter for each channel.
+- Decision: Keep the band-by-band form of `dsp::Eq::process`.
+- Reason: Three bit-exact forms ran slower. The two channels of a band in the two lanes of `dsp::pair` took 2.01 s against 1.65 s. The same form with the f32 conversions in the lanes took 2.04 s against 1.68 s. All the bands of a frame before the next frame took 1.99 s against 1.67 s.
+- Alternatives and tradeoffs: None measured.
+- Evidence: a private record.
+- Rule and code references: None.
+- Limits and counterexamples: The profiles ran on battery power. No series ran.
+- Verification: A unit test compared each form with the band-by-band form on spans of 1, 997 and 48,000 frames, bit for bit. The clippy checks passed. Each profile gave the four WAVs of D313.
+- Review condition: A change of the biquad of `dsp` or of the number of the bands of a tone.
+- Work reference: TODO.md, "Stereo Eq in two lanes or by frame".
+- Supersedes / superseded by: None.
+
+
+## D332: Running peak comparisons in analysis and delivery (pending validation)
+
+- Recorded: 2026-11-03.
+- Origin: Existing local implementation preserved for testing on the remote host.
+- Basis: The comparison helper of D329, applied to running absolute peaks and absolute sample differences.
+- Status: Proposal. Implemented in the development checkout; performance and full audio regression validation remain pending. Not deployed.
+- Decision under review: Use `dsp::larger` for the running peaks of the level scans and waveform envelopes and for the maximum sample error of delivery verification.
+- Reason: Avoid the extra NaN handling of floating-point `max` where the running accumulator starts at positive zero and the next value is an absolute value. No speed improvement is claimed.
+- Alternatives and tradeoffs: Keep the `max` operations of D319 and D329.
+- Evidence: The implementation and existing scan, waveform and delivery regression tests. No new benchmark result is recorded.
+- Limits and counterexamples: Review NaN handling and signed zero before accepting equivalence on all supported targets.
+- Verification: On 2026-11-03, `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test --release` passed, including the trace-bin regression. Native/WASM corpus comparison remains open.
+- Review condition: Complete native/WASM output equivalence checks and measurements built with `--profile measure` (D227).
+- Work reference: TODO.md, "Pending local optimizations".
+- Supersedes / superseded by: No accepted decision is replaced while this proposal is under review.
+
+## D333: Trace accumulation by consecutive bin runs (pending validation)
+
+- Recorded: 2026-11-03.
+- Origin: Existing local implementation preserved for testing on the remote host.
+- Basis: Counted frame positions increase consecutively; `waveform::bin_start` gives the first position of the next trace bin.
+- Status: Proposal. Implemented in the development checkout; performance and full audio regression validation remain pending. Not deployed.
+- Decision under review: Keep the current bin and its accumulators in locals for each emitted block, compute a new bin at its boundary, and save the final accumulators at the end of the block.
+- Reason: Reduce repeated bin division and vector reads and writes. No speed improvement is claimed.
+- Alternatives and tradeoffs: Keep the per-frame bin calculation. D297 and D299 rejected earlier forms after measurements; their evidence remains valid for those implementations.
+- Evidence: `the_trace_bins_of_the_counted_frames_follow_their_positions` compares counts with the per-frame definition for blocks of 1, 997 and 4,096 frames and an offset measure.
+- Limits and counterexamples: Bin counts alone do not establish equality of every statistic or delivered sample. The reduction maximum also uses `dsp::larger`; signed-zero behavior needs review.
+- Verification: On 2026-11-03, `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test --release` passed, including the trace-bin regression. Native/WASM corpus comparison remains open.
+- Review condition: Compare trace statistics, reports and audio with the previous implementation and measure with `--profile measure` (D227).
+- Work reference: TODO.md, "Pending local optimizations".
+- Supersedes / superseded by: Reopens the implementation question of D297 and D299; neither rejection is superseded without new measurements.

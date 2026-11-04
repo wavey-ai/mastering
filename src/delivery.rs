@@ -4,7 +4,7 @@ use crate::{
     resample,
 };
 use serde::{Deserialize, Serialize};
-use std::{path::Path, str::FromStr};
+use std::{io::Read, path::Path, str::FromStr};
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -29,6 +29,18 @@ impl FromStr for Format {
 
 /// Write `audio`, at `rate`, as a new WAV file at `path` in `format`.
 pub fn write(path: &Path, audio: &[Stereo], rate: u32, format: Format, seed: u64) -> Result<()> {
+    write_frames(path, &mut crate::scratch::Slice(audio), rate, format, seed)
+}
+
+/// `write` of the frames of `audio`, read in pieces: a stored render
+/// (D253).
+pub(crate) fn write_frames(
+    path: &Path,
+    audio: &mut impl crate::scratch::Frames,
+    rate: u32,
+    format: Format,
+    seed: u64,
+) -> Result<()> {
     validate_export(audio, format)?;
     let mut file = std::io::BufWriter::new(
         std::fs::OpenOptions::new()
@@ -36,20 +48,24 @@ pub fn write(path: &Path, audio: &[Stereo], rate: u32, format: Format, seed: u64
             .create_new(true)
             .open(path)?,
     );
-    write_to(&mut file, audio, rate, format, seed)
+    write_valid_to(&mut file, audio, rate, format, seed)
 }
 
-fn validate_export(audio: &[Stereo], format: Format) -> Result<()> {
+fn validate_export(audio: &mut impl crate::scratch::Frames, format: Format) -> Result<()> {
     let bound = match format {
         Format::Float32 => f64::INFINITY,
         Format::Pcm16 => 1.0 - 2.0 / 32768.0,
         Format::Pcm24 => 1.0 - 2.0 / 8388608.0,
     };
-    if audio
-        .iter()
-        .flatten()
-        .any(|x| !x.is_finite() || (*x as f64).abs() >= bound)
-    {
+    let mut valid = true;
+    crate::scratch::for_each_block(audio, |block| {
+        valid &= block
+            .iter()
+            .flatten()
+            .all(|x| x.is_finite() && (*x as f64).abs() < bound);
+        Ok(())
+    })?;
+    if !valid {
         return Err("Export requires finite audio with dither headroom for integer PCM".into());
     }
     Ok(())
@@ -64,9 +80,35 @@ pub fn write_to(
     format: Format,
     seed: u64,
 ) -> Result<()> {
-    validate_export(audio, format)?;
+    let mut audio = crate::scratch::Slice(audio);
+    validate_export(&mut audio, format)?;
+    write_valid_to(writer, &mut audio, rate, format, seed)
+}
+
+/// `write_to` of the frames of the render `audio`. The frames of a stored
+/// render are read in pieces (D253).
+pub fn write_render_to(
+    writer: &mut impl std::io::Write,
+    audio: &crate::treatment_render::RenderAudio,
+    rate: u32,
+    format: Format,
+    seed: u64,
+) -> Result<()> {
+    let mut frames = audio.frames();
+    validate_export(&mut frames, format)?;
+    write_valid_to(writer, &mut frames, rate, format, seed)
+}
+
+/// `write_to` of the frames of `audio`, which `validate_export` passed.
+fn write_valid_to(
+    writer: &mut impl std::io::Write,
+    audio: &mut impl crate::scratch::Frames,
+    rate: u32,
+    format: Format,
+    seed: u64,
+) -> Result<()> {
     if matches!(format, Format::Float32) {
-        return audio_io::write_to(writer, audio, rate);
+        return audio_io::write_f32_to(writer, audio, rate);
     }
     let bits = if matches!(format, Format::Pcm16) {
         16u16
@@ -152,8 +194,7 @@ pub struct Verification {
     pub note: &'static str,
 }
 
-/// `verify_samples` of the WAV at `path`, decoded block by block: a whole
-/// decoded copy of a 30-minute delivery is 0.6 GB. `expected` is at `rate`.
+/// Verify the WAV at `path` against `expected` at `rate` (`verify_stream`).
 pub fn verify(
     path: &Path,
     expected: &[Stereo],
@@ -161,22 +202,77 @@ pub fn verify(
     format: Format,
     ceiling: f64,
 ) -> Result<Verification> {
-    verify_in_cores(path, expected, rate, format, ceiling, 1 << 20)
+    verify_frames(
+        path,
+        &mut crate::scratch::Slice(expected),
+        rate,
+        format,
+        ceiling,
+    )
 }
 
-fn verify_in_cores(
+/// `verify` against the frames of `expected`, read in blocks: a stored
+/// render (D253).
+pub(crate) fn verify_frames(
     path: &Path,
+    expected: &mut impl crate::scratch::Frames,
+    rate: u32,
+    format: Format,
+    ceiling: f64,
+) -> Result<Verification> {
+    let (file, bytes) = audio_io::open(path)?;
+    verify_in_cores(
+        file,
+        bytes,
+        expected,
+        rate,
+        format,
+        ceiling,
+        1 << 20,
+        |_| {},
+    )
+}
+
+/// Verify the WAV of `bytes` bytes that `reader` gives against `expected` at
+/// `rate`: the sample error, the loudness and the 4x peak estimate of the
+/// decoded samples. The WAV is decoded block by block: a whole decoded copy
+/// of a 30-minute delivery is 0.6 GB. `each` receives each decoded block in
+/// order, inside the duration of `expected`.
+pub fn verify_stream(
+    reader: impl Read,
+    bytes: u64,
     expected: &[Stereo],
     rate: u32,
     format: Format,
     ceiling: f64,
-    core: usize,
+    each: impl FnMut(&[Stereo]),
 ) -> Result<Verification> {
-    if !ceiling.is_finite() || expected.iter().flatten().any(|x| !x.is_finite()) {
+    verify_in_cores(
+        reader,
+        bytes,
+        &mut crate::scratch::Slice(expected),
+        rate,
+        format,
+        ceiling,
+        1 << 20,
+        each,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn verify_in_cores(
+    reader: impl Read,
+    bytes: u64,
+    expected: &mut impl crate::scratch::Frames,
+    rate: u32,
+    format: Format,
+    ceiling: f64,
+    core: usize,
+    mut each: impl FnMut(&[Stereo]),
+) -> Result<Verification> {
+    if !ceiling.is_finite() || !crate::scratch::all_finite(expected)? {
         return Err("Delivery verification requires finite samples and ceiling".into());
     }
-    let file = std::fs::File::open(path)?;
-    let bytes = file.metadata()?.len();
     let oversampler = Oversampler::new(rate);
     let radius = dsp::RADIUS as usize;
     let mut meter = dsp::LoudnessMeter::new(rate);
@@ -184,16 +280,22 @@ fn verify_in_cores(
     // `window[0]` is decoded frame `window_start`. Each core of the peak
     // estimate has `radius` frames of context on each side, or a file end.
     let (mut window, mut window_start, mut next_core) = (Vec::new(), 0usize, 0usize);
-    let sample_rate = audio_io::read_blocks(file, bytes, |_, block| {
-        let Some(reference) = expected.get(decoded..decoded + block.len()) else {
+    let frames = expected.len();
+    let mut reference = Vec::new();
+    let sample_rate = audio_io::read_blocks(reader, bytes, |_, block| {
+        if block.len() > frames - decoded {
             return Err("Decoded delivery duration or rate differs".into());
-        };
+        }
+        let reference = expected.window(decoded, block.len(), &mut reference)?;
+        each(block);
         maximum_sample_error = reference
             .iter()
             .flatten()
             .zip(block.iter().flatten())
             .map(|(a, b)| (*a as f64 - *b as f64).abs())
-            .fold(maximum_sample_error, f64::max);
+            // The samples are finite, so a comparison gives the value of
+            // `max` (D332).
+            .fold(maximum_sample_error, dsp::larger);
         meter.push(block);
         window.extend_from_slice(block);
         decoded += block.len();
@@ -207,7 +309,7 @@ fn verify_in_cores(
         }
         Ok(())
     })?;
-    if sample_rate != rate || decoded != expected.len() {
+    if sample_rate != rate || decoded != frames {
         return Err("Decoded delivery duration or rate differs".into());
     }
     if next_core < decoded {
@@ -227,50 +329,6 @@ fn verify_in_cores(
         return Err("Decoded delivery failed sample-error or peak verification".into());
     }
     Ok(Verification { schema:"mastering.delivery.1", format, sample_rate:rate, frames:decoded, integrated_lufs,
-        peak_estimate_dbtp, maximum_sample_error, verified:true,
-        note:"Decoded WAV verification with own meter and 4x peak estimator; formal conformance remains open" })
-}
-
-/// Verify `decoded`, a decoded delivery at `sample_rate`, against `expected`
-/// at `rate`.
-pub fn verify_samples(
-    decoded: &[Stereo],
-    sample_rate: u32,
-    expected: &[Stereo],
-    rate: u32,
-    format: Format,
-    ceiling: f64,
-) -> Result<Verification> {
-    if sample_rate != rate || decoded.len() != expected.len() {
-        return Err("Decoded delivery duration or rate differs".into());
-    }
-    if !ceiling.is_finite()
-        || decoded
-            .iter()
-            .chain(expected)
-            .flatten()
-            .any(|x| !x.is_finite())
-    {
-        return Err("Delivery verification requires finite samples and ceiling".into());
-    }
-    let maximum_sample_error = expected
-        .iter()
-        .flatten()
-        .zip(decoded.iter().flatten())
-        .map(|(a, b)| (*a as f64 - *b as f64).abs())
-        .fold(0.0, f64::max);
-    let error_bound = match format {
-        Format::Float32 => 0.0,
-        Format::Pcm16 => 1.501 / 32768.0,
-        Format::Pcm24 => 1.501 / 8388608.0,
-    };
-    let peak_estimate_dbtp = dsp::db(Oversampler::new(rate).peak(decoded));
-    let integrated_lufs =
-        dsp::loudness(decoded, rate).ok_or("Decoded delivery is below the loudness gate")?;
-    if maximum_sample_error > error_bound || peak_estimate_dbtp > ceiling + 1e-6 {
-        return Err("Decoded delivery failed sample-error or peak verification".into());
-    }
-    Ok(Verification { schema:"mastering.delivery.1", format, sample_rate:rate, frames:decoded.len(), integrated_lufs,
         peak_estimate_dbtp, maximum_sample_error, verified:true,
         note:"Decoded WAV verification with own meter and 4x peak estimator; formal conformance remains open" })
 }
@@ -303,15 +361,19 @@ mod stream_tests {
                 audio_io::read_stream(std::io::Cursor::new(&streamed), streamed.len() as u64)
                     .unwrap();
             assert_eq!(decoded.audio.len(), audio.len());
-            assert!(verify_samples(
-                &decoded.audio,
-                decoded.sample_rate,
+            let mut blocks = Vec::new();
+            let verified = verify_stream(
+                std::io::Cursor::new(&streamed),
+                streamed.len() as u64,
                 &audio,
                 48000,
                 format,
-                0.0
+                0.0,
+                |block| blocks.extend_from_slice(block),
             )
-            .is_ok());
+            .unwrap();
+            assert_eq!(verified.frames, audio.len());
+            assert_eq!(blocks, decoded.audio);
         }
     }
 
@@ -335,32 +397,56 @@ mod stream_tests {
             ));
             write(&path, &audio, 48000, format, 99).unwrap();
             let decoded = audio_io::read_source(&path).unwrap();
-            let whole = verify_samples(
-                &decoded.audio,
-                decoded.sample_rate,
-                &audio,
-                48000,
-                format,
-                0.0,
-            )
-            .unwrap();
+            let maximum_sample_error = audio
+                .iter()
+                .flatten()
+                .zip(decoded.audio.iter().flatten())
+                .map(|(a, b)| (*a as f64 - *b as f64).abs())
+                .fold(0.0f64, f64::max);
+            let peak = dsp::db(Oversampler::new(48000).peak(&decoded.audio));
+            let lufs = dsp::loudness(&decoded.audio, 48000).unwrap();
+            let in_cores = |expected: &[Stereo], core| {
+                let (file, bytes) = audio_io::open(&path).unwrap();
+                verify_in_cores(
+                    file,
+                    bytes,
+                    &mut crate::scratch::Slice(expected),
+                    48000,
+                    format,
+                    0.0,
+                    core,
+                    |_| {},
+                )
+            };
             for core in [97, 4096, 65_536, 1 << 20] {
-                let cores = verify_in_cores(&path, &audio, 48000, format, 0.0, core).unwrap();
-                assert_eq!(cores.frames, whole.frames);
-                assert_eq!(
-                    cores.integrated_lufs.to_bits(),
-                    whole.integrated_lufs.to_bits()
-                );
-                assert_eq!(
-                    cores.peak_estimate_dbtp.to_bits(),
-                    whole.peak_estimate_dbtp.to_bits()
-                );
+                let cores = in_cores(&audio, core).unwrap();
+                assert_eq!(cores.frames, decoded.audio.len());
+                assert_eq!(cores.integrated_lufs.to_bits(), lufs.to_bits());
+                assert_eq!(cores.peak_estimate_dbtp.to_bits(), peak.to_bits());
                 assert_eq!(
                     cores.maximum_sample_error.to_bits(),
-                    whole.maximum_sample_error.to_bits()
+                    maximum_sample_error.to_bits()
                 );
             }
-            assert!(verify_in_cores(&path, &audio[1..], 48000, format, 0.0, 4096).is_err());
+            // A stored render gives the file and the verification of the
+            // frames in memory (D253).
+            let mut stored = crate::scratch::Pcm::temporary_of(&audio).unwrap();
+            let copy = path.with_extension("stored.wav");
+            write_frames(&copy, &mut stored, 48000, format, 99).unwrap();
+            assert_eq!(std::fs::read(&copy).unwrap(), std::fs::read(&path).unwrap());
+            std::fs::remove_file(copy).unwrap();
+            let (file, bytes) = audio_io::open(&path).unwrap();
+            let from_stored =
+                verify_in_cores(file, bytes, &mut stored, 48000, format, 0.0, 4096, |_| {})
+                    .unwrap();
+            assert_eq!(
+                serde_json::to_value(&from_stored).unwrap(),
+                serde_json::to_value(in_cores(&audio, 4096).unwrap()).unwrap()
+            );
+            assert!(in_cores(&audio[1..], 4096).is_err());
+            let mut longer = audio.clone();
+            longer.push([0.0, 0.0]);
+            assert!(in_cores(&longer, 4096).is_err());
             std::fs::remove_file(path).unwrap();
         }
     }
@@ -368,10 +454,29 @@ mod stream_tests {
     #[test]
     fn public_verification_rejects_nonfinite_samples() {
         let expected = vec![[0.1, 0.2]; 48000 * 3];
-        let mut decoded = expected.clone();
-        decoded[20][0] = f32::NAN;
-        assert!(verify_samples(&decoded, 48000, &expected, 48000, Format::Pcm24, 0.0).is_err());
-        assert!(verify_samples(&expected, 48000, &decoded, 48000, Format::Pcm24, 0.0).is_err());
+        let mut wav = Vec::new();
+        write_to(&mut wav, &expected, 48000, Format::Float32, 0).unwrap();
+        let check = |wav: &[u8], expected: &[Stereo], ceiling| {
+            let bytes = wav.len() as u64;
+            verify_stream(
+                wav,
+                bytes,
+                expected,
+                48000,
+                Format::Float32,
+                ceiling,
+                |_| {},
+            )
+        };
+        assert!(check(&wav, &expected, 0.0).is_ok());
+        assert!(check(&wav, &expected, f64::NAN).is_err());
+        let mut nonfinite = expected.clone();
+        nonfinite[20][0] = f32::NAN;
+        assert!(check(&wav, &nonfinite, 0.0).is_err());
+        // The samples of the float32 WAV end the file, 8 bytes to a frame.
+        let sample = wav.len() - (expected.len() - 20) * 8;
+        wav[sample..sample + 4].copy_from_slice(&f32::NAN.to_le_bytes());
+        assert!(check(&wav, &expected, 0.0).is_err());
     }
     #[test]
     fn a_copy_changes_the_rate_and_the_word_length_under_the_ceiling() {

@@ -179,71 +179,195 @@ pub fn stereo_frames_of<T: Send>(
     sample: impl Fn(usize) -> crate::audio_io::Stereo + Sync,
     frame: impl Fn(&[Complex<f64>], &[Complex<f64>]) -> T + Sync,
 ) -> Vec<T> {
-    const RANGE: usize = 256;
-    let hops = length / hop;
+    let mut frames = Vec::with_capacity(frame_count(length / hop, size, hop));
+    stereo_frames_each(length, size, hop, sample, frame, |value| frames.push(value));
+    frames
+}
+
+/// Hops in each range of the frames of a thread. Each range starts its
+/// transform `size / hop` hops early, so its frames do not depend on the
+/// ranges before it.
+const RANGE: usize = 256;
+
+/// Ranges of each thread in a batch of `stereo_frames_each`.
+const BATCH: usize = 4;
+
+/// The frames of `stereo_frames_of`, in order, to `sink`. The frames of a
+/// batch of ranges compute on the available cores, and `sink` takes them
+/// before the next batch: the frames of all ranges at once, beside their
+/// joined copy, held each frame twice.
+pub fn stereo_frames_each<T: Send>(
+    length: usize,
+    size: usize,
+    hop: usize,
+    sample: impl Fn(usize) -> crate::audio_io::Stereo + Sync,
+    frame: impl Fn(&[Complex<f64>], &[Complex<f64>]) -> T + Sync,
+    sink: impl FnMut(T),
+) {
+    stereo_frames_in(0..length / hop, size, hop, sample, frame, sink);
+}
+
+/// The frames `hops` of `stereo_frames_each`, to `sink`. When `hops.start`
+/// is a multiple of `RANGE`, they equal those frames of the whole signal.
+/// `sample` reads the frames of `reads(hops, size, hop)`.
+fn stereo_frames_in<T: Send>(
+    hops: std::ops::Range<usize>,
+    size: usize,
+    hop: usize,
+    sample: impl Fn(usize) -> crate::audio_io::Stereo + Sync,
+    frame: impl Fn(&[Complex<f64>], &[Complex<f64>]) -> T + Sync,
+    mut sink: impl FnMut(T),
+) {
     let warm = size.div_ceil(hop) - 1;
-    crate::dsp::chunked(hops, RANGE, |range| {
-        let mut stft = StereoStft::new(size, hop);
-        let mut out = Vec::with_capacity(range.len());
-        for index in range.start.saturating_sub(warm)..range.end {
-            let start = index * hop;
-            if let Some((l, r)) = stft.add_with(hop, |i| sample(start + i)) {
-                if index >= range.start {
-                    out.push(frame(l, r));
+    let batch = RANGE * BATCH * crate::dsp::threads().min(8);
+    for first in (hops.start..hops.end).step_by(batch) {
+        let parts = crate::dsp::chunked(batch.min(hops.end - first), RANGE, |part| {
+            let range = first + part.start..first + part.end;
+            let mut stft = StereoStft::new(size, hop);
+            let mut out = Vec::with_capacity(range.len());
+            for index in range.start.saturating_sub(warm)..range.end {
+                let start = index * hop;
+                if let Some((l, r)) = stft.add_with(hop, |i| sample(start + i)) {
+                    if index >= range.start {
+                        out.push(frame(l, r));
+                    }
                 }
             }
+            out
+        });
+        for part in parts {
+            part.into_iter().for_each(&mut sink);
         }
-        out
-    })
-    .into_iter()
-    .flatten()
-    .collect()
+    }
+}
+
+/// The frames of `stereo_frames_each` of the frames of `frames`, each
+/// through `map`, read in spans of one range for each thread: a span holds
+/// 4.2 MB of frames for each thread at a hop of 1,024 frames.
+pub(crate) fn stereo_frames_read<T: Send>(
+    frames: &mut impl crate::scratch::Frames,
+    size: usize,
+    hop: usize,
+    map: impl Fn(crate::audio_io::Stereo) -> crate::audio_io::Stereo + Sync,
+    frame: impl Fn(&[Complex<f64>], &[Complex<f64>]) -> T + Sync,
+    mut sink: impl FnMut(T),
+) -> crate::audio_io::Result<()> {
+    let hops = frames.len() / hop;
+    let span = RANGE * crate::dsp::threads().min(8);
+    let mut buffer = Vec::new();
+    for first in (0..hops).step_by(span) {
+        let range = first..(first + span).min(hops);
+        let reads = reads(range.clone(), size, hop);
+        let window = frames.window(reads.start, reads.len(), &mut buffer)?;
+        let sample = |n: usize| map(window[n - reads.start]);
+        stereo_frames_in(range, size, hop, sample, &frame, &mut sink);
+    }
+    Ok(())
+}
+
+/// The sample frames that `stereo_frames_in` reads for `hops`.
+fn reads(hops: std::ops::Range<usize>, size: usize, hop: usize) -> std::ops::Range<usize> {
+    let warm = size.div_ceil(hop) - 1;
+    hops.start.saturating_sub(warm) * hop..hops.end * hop
+}
+
+/// The frames that `hops` hops give: the first `size / hop - 1` hops only
+/// fill the window.
+pub fn frame_count(hops: usize, size: usize, hop: usize) -> usize {
+    hops.saturating_sub(size.div_ceil(hop) - 1)
 }
 
 /// `stereo_frames_of` of the two signals of `length` frames that `sample`
 /// gives by index, in one pass: each pair of frames is formed once for both
-/// transforms.
+/// transforms. Signal `k` takes the frame function `frame[k]`.
 pub fn stereo_frame_pairs_of<T: Send>(
     length: usize,
     size: usize,
     hop: usize,
     sample: impl Fn(usize) -> [crate::audio_io::Stereo; 2] + Sync,
-    frame: impl Fn(&[Complex<f64>], &[Complex<f64>]) -> T + Sync,
+    frame: [impl Fn(&[Complex<f64>], &[Complex<f64>]) -> T + Sync; 2],
 ) -> (Vec<T>, Vec<T>) {
-    const RANGE: usize = 256;
-    let hops = length / hop;
-    let warm = size.div_ceil(hop) - 1;
-    let parts = crate::dsp::chunked(hops, RANGE, |range| {
-        let mut stfts = [StereoStft::new(size, hop), StereoStft::new(size, hop)];
-        let mut pairs = vec![[[0.0f32; 2]; 2]; hop];
-        let mut out = (
-            Vec::with_capacity(range.len()),
-            Vec::with_capacity(range.len()),
-        );
-        for index in range.start.saturating_sub(warm)..range.end {
-            let start = index * hop;
-            for (i, pair) in pairs.iter_mut().enumerate() {
-                *pair = sample(start + i);
-            }
-            if let Some((l, r)) = stfts[0].add_with(hop, |i| pairs[i][0]) {
-                if index >= range.start {
-                    out.0.push(frame(l, r));
-                }
-            }
-            if let Some((l, r)) = stfts[1].add_with(hop, |i| pairs[i][1]) {
-                if index >= range.start {
-                    out.1.push(frame(l, r));
-                }
-            }
+    let read = |start: usize, pairs: &mut [[crate::audio_io::Stereo; 2]]| {
+        for (i, pair) in pairs.iter_mut().enumerate() {
+            *pair = sample(start + i);
         }
-        out
-    });
-    let (mut first, mut second) = (Vec::with_capacity(hops), Vec::with_capacity(hops));
-    for (a, b) in parts {
+    };
+    stereo_frame_pairs_in(0..length / hop, size, hop, read, frame)
+}
+
+/// Hops in each part of `stereo_frame_pairs_in`. Each part starts its
+/// transforms `size / hop` hops early, so its frames do not depend on the
+/// parts before it.
+pub const PAIR_RANGE: usize = RANGE;
+
+/// The frames `hops` of `stereo_frame_pairs_of`. When `hops.start` is a
+/// multiple of `PAIR_RANGE`, they equal those frames of the whole signal.
+/// `read(start, pairs)` writes the pairs of frames from `start` into
+/// `pairs`, `hop` pairs at a time, within `pair_reads(hops, size, hop)`.
+pub fn stereo_frame_pairs_in<T: Send>(
+    hops: std::ops::Range<usize>,
+    size: usize,
+    hop: usize,
+    read: impl Fn(usize, &mut [[crate::audio_io::Stereo; 2]]) + Sync,
+    frame: [impl Fn(&[Complex<f64>], &[Complex<f64>]) -> T + Sync; 2],
+) -> (Vec<T>, Vec<T>) {
+    let (mut first, mut second) = (
+        Vec::with_capacity(hops.len()),
+        Vec::with_capacity(hops.len()),
+    );
+    stereo_frame_pairs_each(hops, size, hop, read, frame, |a, b| {
         first.extend(a);
         second.extend(b);
-    }
+    });
     (first, second)
+}
+
+/// The frames of `stereo_frame_pairs_in`, in order, to `sink`, which takes
+/// the frames of the two signals of each part. The parts of a batch compute
+/// on the available cores, as in `stereo_frames_each`.
+pub fn stereo_frame_pairs_each<T: Send>(
+    hops: std::ops::Range<usize>,
+    size: usize,
+    hop: usize,
+    read: impl Fn(usize, &mut [[crate::audio_io::Stereo; 2]]) + Sync,
+    frame: [impl Fn(&[Complex<f64>], &[Complex<f64>]) -> T + Sync; 2],
+    mut sink: impl FnMut(Vec<T>, Vec<T>),
+) {
+    let warm = size.div_ceil(hop) - 1;
+    let batch = PAIR_RANGE * BATCH * crate::dsp::threads().min(8);
+    for first in (0..hops.len()).step_by(batch) {
+        let parts = crate::dsp::chunked(batch.min(hops.len() - first), PAIR_RANGE, |part| {
+            let range = hops.start + first + part.start..hops.start + first + part.end;
+            let mut stfts = [StereoStft::new(size, hop), StereoStft::new(size, hop)];
+            let mut pairs = vec![[[0.0f32; 2]; 2]; hop];
+            let mut out = (
+                Vec::with_capacity(range.len()),
+                Vec::with_capacity(range.len()),
+            );
+            for index in range.start.saturating_sub(warm)..range.end {
+                read(index * hop, &mut pairs);
+                if let Some((l, r)) = stfts[0].add_with(hop, |i| pairs[i][0]) {
+                    if index >= range.start {
+                        out.0.push(frame[0](l, r));
+                    }
+                }
+                if let Some((l, r)) = stfts[1].add_with(hop, |i| pairs[i][1]) {
+                    if index >= range.start {
+                        out.1.push(frame[1](l, r));
+                    }
+                }
+            }
+            out
+        });
+        for (a, b) in parts {
+            sink(a, b);
+        }
+    }
+}
+
+/// The sample frames that `stereo_frame_pairs_in` reads for `hops`.
+pub fn pair_reads(hops: std::ops::Range<usize>, size: usize, hop: usize) -> std::ops::Range<usize> {
+    reads(hops, size, hop)
 }
 
 #[cfg(test)]
@@ -269,8 +393,10 @@ mod tests {
                 .flat_map(|c| [c.re.to_bits(), c.im.to_bits()])
                 .collect()
         };
-        for (size, hop) in [(2048, 1024), (4096, 1024)] {
-            let (first, second) = stereo_frame_pairs_of(pairs.len(), size, hop, |n| pairs[n], bits);
+        // A hop of 16 frames gives several batches of ranges.
+        for (size, hop) in [(2048, 1024), (4096, 1024), (64, 16)] {
+            let (first, second) =
+                stereo_frame_pairs_of(pairs.len(), size, hop, |n| pairs[n], [bits; 2]);
             let one = |k: usize| stereo_frames_of(pairs.len(), size, hop, |n| pairs[n][k], bits);
             assert_eq!(first, one(0), "{size} {hop}");
             assert_eq!(second, one(1), "{size} {hop}");
@@ -291,7 +417,8 @@ mod tests {
                 [next(), next()]
             })
             .collect();
-        for (size, hop) in [(4096, 1024), (2048, 1024), (8192, 4096)] {
+        // A hop of 16 frames gives several batches of ranges.
+        for (size, hop) in [(4096, 1024), (2048, 1024), (8192, 4096), (64, 16)] {
             let bits = |l: &[Complex<f64>], r: &[Complex<f64>]| -> Vec<u64> {
                 l.iter()
                     .chain(r)
@@ -310,6 +437,11 @@ mod tests {
                 expected,
                 "{size} {hop}"
             );
+            // The frames of a stored signal, read in spans (D245).
+            let mut stored = crate::scratch::Pcm::temporary_of(&audio).unwrap();
+            let mut read = Vec::new();
+            stereo_frames_read(&mut stored, size, hop, |x| x, bits, |f| read.push(f)).unwrap();
+            assert_eq!(read, expected, "{size} {hop}");
         }
     }
 

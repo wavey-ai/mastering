@@ -1,20 +1,22 @@
-//! The album check, the running order and the album levels
-//! (`album.order.v2`, `album.levels.v2`, D207).
+//! The album check, the running order, the album levels and the album
+//! regions (`album.order.v3`, `album.levels.v2`, D207, D215).
 //!
 //! The check measures one track at a time and keeps a summary of each:
 //! a host that masters an album on a device holds one track in memory at a
-//! time. The order and the levels come from the summaries alone.
+//! time. The order, the levels and the mean regions come from the summaries
+//! alone.
 use crate::{
     audio_io::{Result, Stereo},
+    character::Regions,
     dsp,
 };
 use serde::{Deserialize, Serialize};
 
-pub const RULE: &str = "album.order.v2";
+pub const RULE: &str = "album.order.v3";
 pub const LEVELS_RULE: &str = "album.levels.v2";
 
-/// Length of the loudest excerpt on which the check measures the
-/// audibility point and the image, in seconds.
+/// Length of the loudest excerpt on which the check measures the crest and
+/// the image, in seconds.
 pub const EXCERPT_SECONDS: f64 = 60.0;
 /// Largest level step between adjacent tracks of the album levels, in LU.
 /// The masters of a reference album step 0.2 to 0.9 LU between adjacent
@@ -46,9 +48,8 @@ pub struct Track {
     pub seconds: f64,
     /// Integrated loudness of the mix, in LUFS.
     pub lufs: f64,
-    /// Audibility point of the base chain of the whole track, in LUFS: the
-    /// point of the loudest excerpt less the loudness of the excerpt above
-    /// the track. None for a track that arrives limited.
+    /// Audibility point of the base chain of the whole track, in LUFS
+    /// (`set::audibility_point`). None for a track that arrives limited.
     pub point_lufs: Option<f64>,
     /// 50 ms crest at the median, in dB.
     pub crest_db: f64,
@@ -73,6 +74,10 @@ pub struct Track {
     /// A summary without a `second_key` field is clear.
     #[serde(default = "clear")]
     pub key_clear: bool,
+    /// The five tone regions of the whole mix (`character::regions`). A
+    /// summary without a `regions` field has none.
+    #[serde(default)]
+    pub regions: Option<Regions>,
 }
 
 fn clear() -> bool {
@@ -105,10 +110,11 @@ pub fn measure(id: &str, audio: &[Stereo], rate: u32) -> Result<Track> {
     let seconds = audio.len() as f64 / rate as f64;
     let lufs = dsp::loudness(audio, rate).ok_or("The track is silent")?;
     let excerpt = loudest(audio, rate, EXCERPT_SECONDS);
-    let excerpt_lufs = dsp::loudness(excerpt, rate).unwrap_or(lufs);
     let source = crate::pipeline::analyze_source(excerpt, rate)?;
-    let point_lufs =
-        crate::set::audibility_point(excerpt, rate)?.map(|p| p - (excerpt_lufs - lufs));
+    // The point averages the masked disturbance over the whole recording, so
+    // quiet verses balance a loud chorus. The point of the loudest excerpt
+    // reads up to 0.87 LU under the point of the set (`album.point.v2`, D207).
+    let point_lufs = crate::set::audibility_point(audio, rate)?;
     let bands = &source.stereo.whole.bands;
     let ratio = |range: std::ops::RangeInclusive<usize>| {
         let (side, mid) = range
@@ -140,11 +146,35 @@ pub fn measure(id: &str, audio: &[Stereo], rate: u32) -> Result<Track> {
         key_strength: first.strength,
         second_key: Some(second),
         key_clear: first.strength - second.strength >= KEY_CLEAR_MARGIN,
+        regions: Some(crate::character::regions(
+            &crate::spectrum(audio, rate),
+            &[],
+            &[],
+            None,
+        )),
+    })
+}
+
+/// The mean of the regions of the mixes of an album, in dB: the reference
+/// of the version characters of each track in album mode (D215). None when
+/// a summary has no regions.
+pub fn mean_regions(tracks: &[Track]) -> Option<Regions> {
+    let regions: Vec<Regions> = tracks.iter().map(|t| t.regions).collect::<Option<_>>()?;
+    let n = regions.len() as f64;
+    (n > 0.0).then(|| {
+        let mean = |f: fn(&Regions) -> f64| regions.iter().map(f).sum::<f64>() / n;
+        Regions {
+            low_mid_db: mean(|r| r.low_mid_db),
+            presence_db: mean(|r| r.presence_db),
+            air_db: mean(|r| r.air_db),
+            sub_db: mean(|r| r.sub_db),
+            bass_db: mean(|r| r.bass_db),
+        }
     })
 }
 
 /// The loudest `seconds` of `audio`, in 1 s steps.
-fn loudest(audio: &[Stereo], rate: u32, seconds: f64) -> &[Stereo] {
+pub fn loudest(audio: &[Stereo], rate: u32, seconds: f64) -> &[Stereo] {
     let length = (seconds * rate as f64) as usize;
     if audio.len() <= length {
         return audio;
@@ -274,11 +304,13 @@ const MINOR: [f64; 12] = [
     6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17,
 ];
 
-/// Key of `audio`: a 12-bin chroma of the spectral peaks from 55 Hz to
-/// 2 kHz, correlated with the Krumhansl major and minor profiles. A peak is
-/// a bin above its two neighbors: the peaks keep the tones of the mix and
-/// drop most of the broadband energy of the drums. Returns the pitch class,
-/// the two keys of the highest correlation.
+/// Key of `audio`: a 12-bin chroma of the power of the spectral peaks from
+/// 55 Hz to 2 kHz, correlated with the Krumhansl major and minor profiles.
+/// A peak is a bin above its two neighbors: the peaks keep the tones of the
+/// mix and drop most of the broadband energy of the drums. The power gives
+/// the strong tones of the bass and the chords more weight than the weak
+/// peaks of the voice and the reverb (D207). Returns the two keys of the
+/// highest correlation.
 fn keys_of(audio: &[Stereo], rate: u32) -> [Key; 2] {
     let n = frame(8192, rate);
     let pitch: Vec<Option<usize>> = (0..n / 2 + 1)
@@ -294,7 +326,7 @@ fn keys_of(audio: &[Stereo], rate: u32) -> [Key; 2] {
         for k in 1..m.len() - 1 {
             if let Some(p) = pitch[k] {
                 if m[k] > m[k - 1] && m[k] > m[k + 1] {
-                    chroma[p] += m[k];
+                    chroma[p] += m[k] * m[k];
                 }
             }
         }
@@ -893,7 +925,23 @@ mod tests {
             key_strength: 0.8,
             second_key: None,
             key_clear: true,
+            regions: None,
         }
+    }
+
+    #[test]
+    fn the_album_regions_are_the_mean_of_the_mixes() {
+        let mut a = track("a", -8.0, 2, 0, false, 120.0, 200.0);
+        let mut b = track("b", -8.0, 2, 0, false, 120.0, 200.0);
+        assert_eq!(mean_regions(&[a.clone(), b.clone()]), None);
+        a.regions = Some(Regions::from([1.0, -4.0, -6.0, 2.0, 4.0]));
+        assert_eq!(mean_regions(&[a.clone(), b.clone()]), None);
+        b.regions = Some(Regions::from([3.0, -6.0, -8.0, 0.0, 6.0]));
+        assert_eq!(
+            mean_regions(&[a, b]),
+            Some(Regions::from([2.0, -5.0, -7.0, 1.0, 5.0]))
+        );
+        assert_eq!(mean_regions(&[]), None);
     }
 
     #[test]
@@ -1024,5 +1072,36 @@ mod tests {
         let unclear = costs(&[0, 1], &[a, b], &album, &options)[4];
         assert!(fifth > 0.0);
         assert_eq!(unclear, 0.0);
+    }
+
+    #[test]
+    fn the_key_follows_the_strong_tones() {
+        // A D major chord over sixteen tones of C, E, F and G at 0.6 of its
+        // level. The magnitudes of the peaks give C major, and their power
+        // gives D major.
+        let hz = |midi: i32| 440.0 * 2f64.powf((midi - 69) as f64 / 12.0);
+        let tones: Vec<(f64, f64)> = [38, 50, 62, 54, 66, 57, 69]
+            .into_iter()
+            .map(|m| (hz(m), 0.05))
+            .chain(
+                [
+                    48, 60, 72, 84, 52, 64, 76, 88, 55, 67, 79, 91, 53, 65, 77, 89,
+                ]
+                .into_iter()
+                .map(|m| (hz(m), 0.03)),
+            )
+            .collect();
+        let audio: Vec<Stereo> = (0..48_000 * 12)
+            .map(|i| {
+                let t = i as f64 / 48_000.0;
+                let x: f64 = tones
+                    .iter()
+                    .map(|(f, a)| a * (std::f64::consts::TAU * f * t).sin())
+                    .sum();
+                [x as f32; 2]
+            })
+            .collect();
+        let [first, _] = keys_of(&audio, 48_000);
+        assert_eq!((first.key, first.minor), (2, false));
     }
 }

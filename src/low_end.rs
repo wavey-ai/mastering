@@ -152,7 +152,7 @@ pub const ACTIVE_DB: f64 = 30.0;
 /// Renders of the hold after the first render.
 pub const ITERATIONS: usize = 2;
 
-fn section_frames(rate: u32) -> usize {
+pub(crate) fn section_frames(rate: u32) -> usize {
     (SECTION_SECONDS * rate as f64) as usize
 }
 
@@ -162,12 +162,57 @@ pub struct Sections {
     pub starts: Vec<usize>,
     pub ends: Vec<usize>,
     pub power_db: Vec<[f64; 2]>,
+    /// The part of `power_db` in the side, (L - R) / 2, in dB: a fold of
+    /// the side changes the held bands of a section by its side share
+    /// (D282). Empty in a reference record.
+    #[serde(skip)]
+    pub side_db: Vec<[f64; 2]>,
+    /// The power of the mid and of the side, (L + R) / 2 and (L - R) / 2,
+    /// in each sub-band of the held bands (`low_band`), in dB: the tone of
+    /// a request changes each section by its own spectrum (D288). Empty in
+    /// a reference record.
+    #[serde(skip)]
+    pub low_db: Vec<Vec<[f64; 2]>>,
+}
+
+/// Sub-bands of each held band in the spectrum of a section (D288).
+pub const LOW_SPLITS: usize = 8;
+
+/// The sub-band of `hz`: `LOW_SPLITS` sub-bands of each held band, of equal
+/// width on a log frequency axis. None outside the held bands.
+pub fn low_band(hz: f64) -> Option<usize> {
+    BANDS_HZ.iter().enumerate().find_map(|(b, (low, high))| {
+        (hz >= *low && hz < *high).then(|| {
+            let k = ((hz / low).log2() / (high / low).log2() * LOW_SPLITS as f64) as usize;
+            b * LOW_SPLITS + k.min(LOW_SPLITS - 1)
+        })
+    })
+}
+
+/// The centre of sub-band `k` (`low_band`) on a log frequency axis, in Hz.
+pub fn low_band_hz(k: usize) -> f64 {
+    let (low, high) = BANDS_HZ[k / LOW_SPLITS];
+    low * (high / low).powf(((k % LOW_SPLITS) as f64 + 0.5) / LOW_SPLITS as f64)
+}
+
+impl Sections {
+    /// The side share of the power of each held band in each section, or
+    /// None without the side power.
+    pub fn side_shares(&self) -> Option<Vec<[f64; 2]>> {
+        (self.side_db.len() == self.power_db.len()).then(|| {
+            self.power_db
+                .iter()
+                .zip(&self.side_db)
+                .map(|(p, s)| std::array::from_fn(|b| 10f64.powf((s[b] - p[b]) / 10.0).min(1.0)))
+                .collect()
+        })
+    }
 }
 
 /// Stereo power of the held bands over all sections of a render against
 /// its integrated loudness `lufs`, in dB: the bass that the hold lifts, at
 /// matched loudness. Only differences between renders of one source carry
-/// meaning (`set.version-names.v1`).
+/// meaning (`set.version-names.v2`).
 pub fn bass_level_db(sections: &Sections, lufs: f64) -> Option<f64> {
     let power: f64 = sections
         .power_db
@@ -180,51 +225,86 @@ pub fn bass_level_db(sections: &Sections, lufs: f64) -> Option<f64> {
 
 /// Stereo power of the held bands in each section of `audio` at `rate`.
 pub fn sections(audio: &[Stereo], rate: u32) -> Sections {
+    sections_read(&mut crate::scratch::Slice(audio), rate).expect("frames of a slice")
+}
+
+/// `sections` of the frames of `audio`, read one section at a time: a
+/// stored render (D253).
+pub(crate) fn sections_read(
+    audio: &mut impl crate::scratch::Frames,
+    rate: u32,
+) -> crate::audio_io::Result<Sections> {
     let span = section_frames(rate);
+    let frames = audio.len();
     let mut planner = realfft::RealFftPlanner::<f64>::new();
     let mut result = Sections::default();
+    let mut buffer = Vec::new();
     let mut start = 0;
-    while start < audio.len() {
-        let end = (start + span).min(audio.len());
+    while start < frames {
+        let end = (start + span).min(frames);
         if end - start < span / 2 {
             break;
         }
         let n = end - start;
         let fft = planner.plan_fft_forward(n);
-        let mut power = [0.0f64; 2];
-        for channel in 0..2 {
-            let mut input: Vec<f64> = audio[start..end]
-                .iter()
-                .map(|f| f[channel] as f64)
-                .collect();
+        let section = audio.window(start, n, &mut buffer)?;
+        let spectra: [_; 2] = std::array::from_fn(|channel| {
+            let mut input: Vec<f64> = section.iter().map(|f| f[channel] as f64).collect();
             let mut output = fft.make_output_vec();
             fft.process(&mut input, &mut output)
                 .expect("section length");
-            for (bin, value) in output.iter().enumerate() {
-                let hz = bin as f64 * rate as f64 / n as f64;
-                for (b, (low, high)) in BANDS_HZ.iter().enumerate() {
-                    if hz >= *low && hz < *high {
-                        power[b] += value.norm_sqr();
-                    }
+            output
+        });
+        let band = |bin: usize| {
+            let hz = bin as f64 * rate as f64 / n as f64;
+            BANDS_HZ
+                .iter()
+                .position(|(low, high)| hz >= *low && hz < *high)
+        };
+        // The frequency of a bin rises with the bin, so the bins from the
+        // first bin at the top of the held bands are in no band: 99% of the
+        // bins of a section of 15 s (D309).
+        let top = BANDS_HZ.iter().fold(0.0f64, |top, band| top.max(band.1));
+        let bins = (0..spectra[0].len())
+            .find(|&bin| bin as f64 * rate as f64 / n as f64 >= top)
+            .unwrap_or(spectra[0].len());
+        let (mut power, mut side) = ([0.0f64; 2], [0.0f64; 2]);
+        for spectrum in &spectra {
+            for (bin, value) in spectrum[..bins].iter().enumerate() {
+                if let Some(b) = band(bin) {
+                    power[b] += value.norm_sqr();
                 }
             }
         }
+        // L^2 + R^2 is twice the power of the mid and the side.
+        let mut low = vec![[0.0f64; 2]; BANDS_HZ.len() * LOW_SPLITS];
+        for (bin, (l, r)) in spectra[0][..bins]
+            .iter()
+            .zip(&spectra[1][..bins])
+            .enumerate()
+        {
+            if let Some(b) = band(bin) {
+                side[b] += 0.5 * (l - r).norm_sqr();
+            }
+            if let Some(k) = low_band(bin as f64 * rate as f64 / n as f64) {
+                low[k][0] += 0.5 * (l + r).norm_sqr();
+                low[k][1] += 0.5 * (l - r).norm_sqr();
+            }
+        }
+        let db = |p: [f64; 2]| p.map(|p| 10.0 * (p / n as f64).max(1e-30).log10());
         result.starts.push(start);
         result.ends.push(end);
-        result
-            .power_db
-            .push(power.map(|p| 10.0 * (p / n as f64).max(1e-30).log10()));
+        result.power_db.push(db(power));
+        result.side_db.push(db(side));
+        result.low_db.push(low.into_iter().map(db).collect());
         start = end;
     }
-    result
+    Ok(result)
 }
 
-/// The change of each held band that the static tone of `spec` intends: the
-/// low shelves of the static tone, the equal-loudness bass shelf
-/// (`broad_tone::Move::LevelBass`), the shelves of a captured recording
-/// (`broad_tone::Move::CaptureLowBand`) and the bass shelves of a bass
-/// version (`set.bass-version.v4`), at matched loudness. The hold keeps the
-/// version there, not at Natural.
+/// The change of each held band that the low shelves of the static tone of
+/// `spec` intend, at matched loudness. The hold keeps the version there, not
+/// at Natural.
 pub fn intended_db(spec: &Spec, spectrum: &crate::Spectrum) -> [f64; 2] {
     tone_intended_db(&spec.tone, spectrum)
 }
@@ -299,6 +379,29 @@ pub fn worst_db(changes: &[[Option<f64>; 2]]) -> Option<f64> {
         .flatten()
         .copied()
         .min_by(f64::total_cmp)
+}
+
+/// The change of each held band against the K-weighted loudness that a
+/// restoration pass from the restoring gains `from` to the gains `to` adds,
+/// from the source spectrum, in dB.
+pub fn restoration_shift_db(
+    spectrum: &crate::Spectrum,
+    from: &[f64; 6],
+    to: &[f64; 6],
+) -> [f64; 2] {
+    let sum = |gains: &[f64; 6]| {
+        crate::treatment_render::filters_of(gains)
+            .iter()
+            .fold([0.0f64; 2], |mut total, filter| {
+                let (held, loudness) = effect(spectrum, filter, Domain::Stereo);
+                for b in 0..2 {
+                    total[b] += held[b] - loudness;
+                }
+                total
+            })
+    };
+    let (before, after) = (sum(from), sum(to));
+    [after[0] - before[0], after[1] - before[1]]
 }
 
 /// Change of each held band, and of the K-weighted loudness, when `band`
@@ -420,7 +523,7 @@ fn hold_points(sections: &Sections, wet: &[f64], frames: usize) -> Vec<BlendPoin
 }
 
 /// State of the hold between renders.
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Step {
     pub render: usize,
     pub worst_db: Option<f64>,
@@ -720,6 +823,135 @@ mod tests {
                 [x, x]
             })
             .collect()
+    }
+
+    #[test]
+    fn the_sections_give_the_sums_of_each_bin_of_the_spectrum() {
+        // The powers of each bin of the spectrum, as the sections took them
+        // before D309.
+        use std::f64::consts::PI;
+        for rate in [44100, 48000] {
+            let frames = section_frames(rate) * 2 + section_frames(rate) / 2 + 17;
+            let audio: Vec<Stereo> = (0..frames)
+                .map(|i| {
+                    let t = i as f64 / rate as f64;
+                    let x = (2.0 * PI * 55.0 * t).sin() + 0.3 * (2.0 * PI * 180.0 * t).sin();
+                    let y = (2.0 * PI * 61.0 * t).sin() + 0.2 * (2.0 * PI * 3000.0 * t).sin();
+                    [(0.4 * x) as f32, (0.4 * y) as f32]
+                })
+                .collect();
+            let sections = sections(&audio, rate);
+            let span = section_frames(rate);
+            let mut planner = realfft::RealFftPlanner::<f64>::new();
+            for (s, &start) in sections.starts.iter().enumerate() {
+                let n = (start + span).min(frames) - start;
+                let fft = planner.plan_fft_forward(n);
+                let spectra: [_; 2] = std::array::from_fn(|c| {
+                    let mut input: Vec<f64> = audio[start..start + n]
+                        .iter()
+                        .map(|f| f[c] as f64)
+                        .collect();
+                    let mut output = fft.make_output_vec();
+                    fft.process(&mut input, &mut output).unwrap();
+                    output
+                });
+                let band = |bin: usize| {
+                    let hz = bin as f64 * rate as f64 / n as f64;
+                    BANDS_HZ
+                        .iter()
+                        .position(|(low, high)| hz >= *low && hz < *high)
+                };
+                let (mut power, mut side) = ([0.0f64; 2], [0.0f64; 2]);
+                for spectrum in &spectra {
+                    for (bin, value) in spectrum.iter().enumerate() {
+                        if let Some(b) = band(bin) {
+                            power[b] += value.norm_sqr();
+                        }
+                    }
+                }
+                let mut low = vec![[0.0f64; 2]; BANDS_HZ.len() * LOW_SPLITS];
+                for (bin, (l, r)) in spectra[0].iter().zip(&spectra[1]).enumerate() {
+                    if let Some(b) = band(bin) {
+                        side[b] += 0.5 * (l - r).norm_sqr();
+                    }
+                    if let Some(k) = low_band(bin as f64 * rate as f64 / n as f64) {
+                        low[k][0] += 0.5 * (l + r).norm_sqr();
+                        low[k][1] += 0.5 * (l - r).norm_sqr();
+                    }
+                }
+                let db =
+                    |p: [f64; 2]| p.map(|p| (10.0 * (p / n as f64).max(1e-30).log10()).to_bits());
+                assert_eq!(sections.power_db[s].map(f64::to_bits), db(power));
+                assert_eq!(sections.side_db[s].map(f64::to_bits), db(side));
+                let low: Vec<_> = low.into_iter().map(db).collect();
+                let got: Vec<_> = sections.low_db[s]
+                    .iter()
+                    .map(|p| p.map(f64::to_bits))
+                    .collect();
+                assert_eq!(got, low);
+            }
+        }
+    }
+
+    #[test]
+    fn the_sections_give_the_side_share_of_the_held_bands() {
+        let span = section_frames(48000);
+        // A tone in both channels, then in the left channel alone, then in
+        // anti-phase.
+        let mut audio = tone(80.0, 0.5, 3 * span);
+        for f in &mut audio[span..2 * span] {
+            f[1] = 0.0;
+        }
+        for f in &mut audio[2 * span..] {
+            f[1] = -f[1];
+        }
+        let s = sections(&audio, 48000);
+        let shares = s.side_shares().expect("the side of each section");
+        assert!(shares[0][0] < 1e-6, "{shares:?}");
+        assert!((shares[1][0] - 0.5).abs() < 1e-6, "{shares:?}");
+        assert!((shares[2][0] - 1.0).abs() < 1e-6, "{shares:?}");
+    }
+
+    #[test]
+    fn the_sections_give_the_spectrum_of_the_held_bands() {
+        // Each sub-band holds its part of the held band on a log axis.
+        assert_eq!(low_band(39.9), None);
+        assert_eq!(low_band(40.0), Some(0));
+        assert_eq!(low_band(119.9), Some(LOW_SPLITS - 1));
+        assert_eq!(low_band(120.0), Some(LOW_SPLITS));
+        assert_eq!(low_band(250.0), None);
+        for k in 0..2 * LOW_SPLITS {
+            assert_eq!(low_band(low_band_hz(k)), Some(k));
+        }
+        // A tone of 60 Hz in both channels, then a tone of 200 Hz in the
+        // left channel alone (D288).
+        let span = section_frames(48000);
+        let mut audio = tone(60.0, 0.5, span);
+        audio.extend(tone(200.0, 0.5, span).into_iter().map(|f| [f[0], 0.0]));
+        let s = sections(&audio, 48000);
+        assert_eq!(s.low_db.len(), 2);
+        let loudest = |low: &[[f64; 2]], part: usize| {
+            (0..low.len())
+                .max_by(|&a, &b| low[a][part].total_cmp(&low[b][part]))
+                .unwrap()
+        };
+        let [first, second] = [&s.low_db[0], &s.low_db[1]];
+        assert_eq!(loudest(first, 0), low_band(60.0).unwrap());
+        assert!(first[low_band(60.0).unwrap()][1] < -100.0, "{first:?}");
+        let k = low_band(200.0).unwrap();
+        assert_eq!(loudest(second, 0), k);
+        assert!((second[k][0] - second[k][1]).abs() < 1e-6, "{second:?}");
+        // The sub-bands of a held band sum to its power.
+        for (low, power) in s.low_db.iter().zip(&s.power_db) {
+            for b in 0..2 {
+                let sum: f64 = low[b * LOW_SPLITS..(b + 1) * LOW_SPLITS]
+                    .iter()
+                    .flatten()
+                    .map(|p| 10f64.powf(p / 10.0))
+                    .sum();
+                assert!((10.0 * sum.log10() - power[b]).abs() < 1e-9, "{power:?}");
+            }
+        }
     }
 
     #[test]

@@ -15,7 +15,7 @@
 use crate::{
     audio_io::{Result, Stereo},
     dsp::{self, LimiterSettings, TruePeak},
-    masking::{self, Channels, BANDS},
+    masking::{self, Channels, Measures, BANDS},
     render_blocks, scratch,
 };
 use serde::Serialize;
@@ -57,7 +57,7 @@ const PROBES: usize = 8;
 pub fn gain_residual(prefix: &[Stereo], output: &[Stereo], block: usize) -> Vec<Stereo> {
     let fit = GainFit::of(prefix, output, block);
     (0..fit.len())
-        .map(|i| fit.residual(prefix, output, i))
+        .map(|i| fit.residual(prefix[i], output[i], i))
         .collect()
 }
 
@@ -74,21 +74,47 @@ impl GainFit {
         let gains = (0..blocks)
             .map(|b| {
                 let range = b * block..(b + 1) * block;
-                let (mut xy, mut xx) = (0.0f64, 0.0f64);
-                for (x, y) in prefix[range.clone()].iter().zip(&output[range]) {
-                    for c in 0..2 {
-                        xy += x[c] as f64 * y[c] as f64;
-                        xx += (x[c] as f64).powi(2);
-                    }
-                }
-                if xx > 0.0 {
-                    xy / xx
-                } else {
-                    0.0
-                }
+                Self::gain(&prefix[range.clone()], &output[range])
             })
             .collect();
         Self { gains, block }
+    }
+
+    /// `of` of a prefix and an output in scratch storage, read 64 blocks
+    /// at a time.
+    fn of_frames(
+        prefix: &mut impl scratch::Frames,
+        output: &mut impl scratch::Frames,
+        block: usize,
+    ) -> Result<Self> {
+        let blocks = prefix.len().min(output.len()) / block;
+        let mut gains = Vec::with_capacity(blocks);
+        let (mut read, mut rendered) = (Vec::new(), Vec::new());
+        for first in (0..blocks).step_by(64) {
+            let count = 64.min(blocks - first);
+            prefix.read(first * block, count * block, &mut read)?;
+            let output = output.window(first * block, count * block, &mut rendered)?;
+            for (x, y) in read.chunks(block).zip(output.chunks(block)) {
+                gains.push(Self::gain(x, y));
+            }
+        }
+        Ok(Self { gains, block })
+    }
+
+    /// The least-squares gain of the frames `prefix` in the frames `output`.
+    fn gain(prefix: &[Stereo], output: &[Stereo]) -> f64 {
+        let (mut xy, mut xx) = (0.0f64, 0.0f64);
+        for (x, y) in prefix.iter().zip(output) {
+            for c in 0..2 {
+                xy += x[c] as f64 * y[c] as f64;
+                xx += (x[c] as f64).powi(2);
+            }
+        }
+        if xx > 0.0 {
+            xy / xx
+        } else {
+            0.0
+        }
     }
 
     /// Samples of the residual: a whole number of blocks.
@@ -96,10 +122,11 @@ impl GainFit {
         self.gains.len() * self.block
     }
 
-    /// Sample `i` of the residual of `output` against `prefix`, with the gain
-    /// interpolated between the block centres.
+    /// Sample `i` of the residual of the output against the prefix, from
+    /// their frames `x` and `y` at `i`, with the gain interpolated between
+    /// the block centres.
     #[inline]
-    fn residual(&self, prefix: &[Stereo], output: &[Stereo], i: usize) -> Stereo {
+    fn residual(&self, x: Stereo, y: Stereo, i: usize) -> Stereo {
         let (gains, block) = (&self.gains, self.block);
         let blocks = gains.len();
         let centre = |b: usize| (b * block + block / 2) as f64;
@@ -107,7 +134,15 @@ impl GainFit {
         let b = (position.floor().max(0.0) as usize).min(blocks.saturating_sub(2));
         let t = ((i as f64 - centre(b)) / block as f64).clamp(0.0, 1.0);
         let g = gains[b] + (gains[(b + 1).min(blocks - 1)] - gains[b]) * t;
-        std::array::from_fn(|c| (output[i][c] as f64 - g * prefix[i][c] as f64) as f32)
+        std::array::from_fn(|c| (y[c] as f64 - g * x[c] as f64) as f32)
+    }
+
+    /// The reference and the disturbance of the ratio at frame `i`, from the
+    /// frames `x` of the prefix and `y` of the output.
+    #[inline]
+    fn pair(&self, x: Stereo, y: Stereo, i: usize) -> [Stereo; 2] {
+        let r = self.residual(x, y, i);
+        [[y[0] - r[0], y[1] - r[1]], r]
     }
 }
 
@@ -116,8 +151,13 @@ impl GainFit {
 /// `rate`.
 pub fn total_nmr_db(reference: &[Stereo], disturbance: &[Stereo], rate: u32) -> f64 {
     let n = reference.len().min(disturbance.len());
-    let masker = masking::frames(&reference[..n], Channels::Both, rate);
-    let noise = masking::frames(&disturbance[..n], Channels::Both, rate);
+    let masker = masking::frames(
+        &reference[..n],
+        Channels::Both,
+        Measures::PowersAndFlatness,
+        rate,
+    );
+    let noise = masking::frames(&disturbance[..n], Channels::Both, Measures::Powers, rate);
     nmr_of(&masker, &noise, rate).total_db
 }
 
@@ -130,40 +170,73 @@ pub struct Ratios {
     pub loud_db: f64,
 }
 
+/// The measures of the frames of the masker and of the noise of a ratio.
+/// The threshold takes the flatness of the masker.
+const MASKER_AND_NOISE: [Measures; 2] = [Measures::PowersAndFlatness, Measures::Powers];
+
 /// The noise-to-mask ratios of the frames `noise` under the frames `masker`
 /// of audio at `rate`.
 fn nmr_of(masker: &masking::Frames, noise: &masking::Frames, rate: u32) -> Ratios {
-    let thresholds = masking::thresholds(masker, Channels::Both, rate);
-    let loudest = masker
-        .powers
-        .iter()
-        .map(|p| p.iter().sum::<f64>())
-        .fold(0.0, f64::max);
-    let ratios: Vec<f64> = masker
-        .powers
-        .iter()
-        .zip(&noise.powers)
-        .zip(&thresholds)
-        .filter(|((p, _), _)| p.iter().sum::<f64>() >= loudest * 10f64.powf(-QUIET_DB / 10.0))
-        .map(|((_, q), threshold)| {
-            (0..BANDS)
+    let mut ratios = FrameRatios::new(rate);
+    ratios.push(masker, noise);
+    ratios.finish()
+}
+
+/// The band power of the masker and the noise-to-mask ratio of each frame,
+/// from consecutive frames. A frame takes 16 bytes, against 416 bytes for
+/// its masking frames (D238).
+struct FrameRatios {
+    thresholds: masking::Thresholds,
+    frames: Vec<(f64, f64)>,
+}
+
+impl FrameRatios {
+    fn new(rate: u32) -> Self {
+        Self {
+            thresholds: masking::Thresholds::new(Channels::Both, rate),
+            frames: Vec::new(),
+        }
+    }
+
+    /// Add the frames `noise` under the next frames `masker`.
+    fn push(&mut self, masker: &masking::Frames, noise: &masking::Frames) {
+        for ((p, sfm), q) in masker
+            .powers
+            .iter()
+            .zip(&masker.flatness_db)
+            .zip(&noise.powers)
+        {
+            let threshold = self.thresholds.next(p, *sfm);
+            let ratio = (0..BANDS)
                 .map(|z| q[z] / threshold[z].max(1e-30))
                 .sum::<f64>()
-                / BANDS as f64
-        })
-        .collect();
-    let total = ratios.iter().sum::<f64>() / ratios.len().max(1) as f64;
-    let mut sorted = ratios;
-    sorted.sort_by(f64::total_cmp);
-    let loud = sorted
-        .get(((1.0 - LOUD_SHARE) * sorted.len() as f64) as usize)
-        .or(sorted.last())
-        .copied()
-        .unwrap_or(0.0);
-    let db = |x: f64| 10.0 * x.max(1e-30).log10();
-    Ratios {
-        total_db: db(total),
-        loud_db: db(loud),
+                / BANDS as f64;
+            self.frames.push((p.iter().sum::<f64>(), ratio));
+        }
+    }
+
+    /// The ratios over the frames within `QUIET_DB` of the loudest frame.
+    fn finish(self) -> Ratios {
+        let loudest = self.frames.iter().map(|f| f.0).fold(0.0, f64::max);
+        let ratios: Vec<f64> = self
+            .frames
+            .iter()
+            .filter(|(p, _)| *p >= loudest * 10f64.powf(-QUIET_DB / 10.0))
+            .map(|(_, ratio)| *ratio)
+            .collect();
+        let total = ratios.iter().sum::<f64>() / ratios.len().max(1) as f64;
+        let mut sorted = ratios;
+        sorted.sort_by(f64::total_cmp);
+        let loud = sorted
+            .get(((1.0 - LOUD_SHARE) * sorted.len() as f64) as usize)
+            .or(sorted.last())
+            .copied()
+            .unwrap_or(0.0);
+        let db = |x: f64| 10.0 * x.max(1e-30).log10();
+        Ratios {
+            total_db: db(total),
+            loud_db: db(loud),
+        }
     }
 }
 
@@ -179,34 +252,91 @@ pub fn peak_control_nmr_db(prefix: &[Stereo], output: &[Stereo], rate: u32) -> f
 /// The ratios of `peak_control_nmr_db`.
 pub fn peak_control_ratios(prefix: &[Stereo], output: &[Stereo], rate: u32) -> Ratios {
     let fit = GainFit::of(prefix, output, GAIN_BLOCK);
-    let pair = |i: usize| {
-        let (y, r) = (output[i], fit.residual(prefix, output, i));
-        [[y[0] - r[0], y[1] - r[1]], r]
-    };
-    let (masker, noise) = masking::frame_pairs_of(fit.len(), pair, Channels::Both, rate);
+    let pair = |i: usize| fit.pair(prefix[i], output[i], i);
+    let (masker, noise) =
+        masking::frame_pairs_of(fit.len(), pair, Channels::Both, MASKER_AND_NOISE, rate);
     nmr_of(&masker, &noise, rate)
 }
 
+/// Hops of the masking frames in each span of a prefix in scratch storage:
+/// 1.05 million frames, 8.4 MB. A span of 8.4 million frames grew the
+/// linear memory of the browser engine by 64 MiB (D235).
+const SPAN_HOPS: usize = 4 * crate::stft::PAIR_RANGE;
+
+/// `peak_control_ratios` of a prefix and an output in scratch storage. The
+/// masking frames come from consecutive spans of the prefix and the
+/// output, so a long prefix or render is not held in memory; they equal
+/// the frames of the whole prefix. Each span gives the ratio of each of its
+/// frames (D235, D248).
+pub(crate) fn peak_control_ratios_of(
+    prefix: &mut impl scratch::Frames,
+    output: &mut impl scratch::Frames,
+    rate: u32,
+) -> Result<Ratios> {
+    let fit = GainFit::of_frames(prefix, output, GAIN_BLOCK)?;
+    let hops = fit.len() / masking::HOP;
+    let mut ratios = FrameRatios::new(rate);
+    let (mut span, mut rendered) = (Vec::new(), Vec::new());
+    for start in (0..hops).step_by(SPAN_HOPS) {
+        let part = start..(start + SPAN_HOPS).min(hops);
+        let reads = masking::pair_reads(part.clone());
+        prefix.read(reads.start, reads.len(), &mut span)?;
+        let output = output.window(reads.start, reads.len(), &mut rendered)?;
+        let pair = |i: usize| fit.pair(span[i - reads.start], output[i - reads.start], i);
+        let (masker, noise) =
+            masking::frame_pairs_in(part, pair, Channels::Both, MASKER_AND_NOISE, rate);
+        ratios.push(&masker, &noise);
+    }
+    Ok(ratios.finish())
+}
+
+/// The prefix of a point search: in memory, or in scratch storage, where
+/// the ratios read it in spans.
+pub(crate) enum Prefix<'a> {
+    Whole(&'a [Stereo]),
+    /// A prefix that its 4x frames can also read (D251).
+    Shared(scratch::Shared<'a>),
+}
+
+impl Prefix<'_> {
+    /// `peak_control_ratios` of `output` against the prefix.
+    pub(crate) fn ratios(
+        &mut self,
+        output: &mut impl scratch::Frames,
+        rate: u32,
+    ) -> Result<Ratios> {
+        match self {
+            Prefix::Whole(prefix) => {
+                peak_control_ratios_of(&mut scratch::Slice(prefix), output, rate)
+            }
+            Prefix::Shared(prefix) => peak_control_ratios_of(prefix, output, rate),
+        }
+    }
+}
+
 /// Peak control of the set on the 4x oversampled prefix `up` at one drive,
-/// trimmed to the ceiling, at the base rate `rate`.
+/// trimmed to the ceiling, at the base rate `rate`. The render goes to a new
+/// scratch file (D248).
 pub(crate) fn peak_control(
-    up: &mut scratch::Pcm,
+    up: &mut impl scratch::Frames,
     drive_db: f64,
     clipper_db: f64,
     ceiling_dbtp: f64,
     limiter: LimiterSettings,
     true_peak: TruePeak,
     rate: u32,
-) -> Result<(Vec<Stereo>, render_blocks::TruePeakFit)> {
-    let (mut audio, _, _, _) = render_blocks::render_peak_control(
+) -> Result<(scratch::Pcm, render_blocks::TruePeakFit)> {
+    let mut audio = scratch::Pcm::new(scratch::temporary()?);
+    render_blocks::render_peak_control_audio_into(
         up,
         drive_db,
         clipper_db,
         dsp::gain(ceiling_dbtp - 0.1),
         limiter,
         rate,
+        &mut audio,
     )?;
-    let (_, fit) = render_blocks::fit_true_peak(&mut audio, ceiling_dbtp, true_peak, rate);
+    let (_, fit) = render_blocks::fit_true_peak_stored(&mut audio, ceiling_dbtp, true_peak, rate)?;
     Ok((audio, fit))
 }
 
@@ -225,8 +355,8 @@ const RENDERS: usize = 3;
 /// rate `rate`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_at(
-    up: &mut scratch::Pcm,
-    prefix: &[Stereo],
+    up: &mut impl scratch::Frames,
+    prefix: &mut Prefix<'_>,
     point: &Point,
     target_lufs: f64,
     clipper_db: f64,
@@ -235,11 +365,11 @@ pub(crate) fn render_at(
     true_peak: TruePeak,
     mix: Option<&crate::analysis::Temporal>,
     rate: u32,
-) -> Result<(f64, Vec<Stereo>, render_blocks::TruePeakFit, Probe)> {
+) -> Result<(f64, scratch::Pcm, render_blocks::TruePeakFit, Probe)> {
     let mut drive_db = point.drive_for(target_lufs);
     let mut last: Option<(f64, f64)> = None;
     for render in 1..=RENDERS {
-        let (audio, fit) = peak_control(
+        let (mut audio, fit) = peak_control(
             up,
             drive_db,
             clipper_db,
@@ -248,9 +378,10 @@ pub(crate) fn render_at(
             true_peak,
             rate,
         )?;
-        let lufs = dsp::loudness(&audio, rate).ok_or("Missing output loudness")?;
+        let lufs = dsp::loudness_read(&mut audio, rate)?.ok_or("Missing output loudness")?;
         if (lufs - target_lufs).abs() <= RENDER_TOLERANCE_LU || render == RENDERS {
-            let probe = Probe::of(prefix, &audio, drive_db, mix, rate)?;
+            let ratios = prefix.ratios(&mut audio, rate)?;
+            let probe = Probe::with_ratios(ratios, &mut audio, drive_db, mix, rate)?;
             return Ok((drive_db, audio, fit, probe));
         }
         // The loudness rises by at most one LU per dB of drive; the limiter
@@ -339,14 +470,37 @@ impl Probe {
         mix: Option<&crate::analysis::Temporal>,
         rate: u32,
     ) -> Result<Self> {
-        let ratios = peak_control_ratios(prefix, audio, rate);
+        Self::with_ratios(
+            peak_control_ratios(prefix, audio, rate),
+            &mut scratch::Slice(audio),
+            drive_db,
+            mix,
+            rate,
+        )
+    }
+
+    /// `of` with the ratios of `audio` against the prefix.
+    fn with_ratios(
+        ratios: Ratios,
+        audio: &mut impl scratch::Frames,
+        drive_db: f64,
+        mix: Option<&crate::analysis::Temporal>,
+        rate: u32,
+    ) -> Result<Self> {
+        let lufs = dsp::loudness_read(audio, rate)?.ok_or("Missing output loudness")?;
+        let attack_loss_db = match mix {
+            Some(m) => {
+                let blocks = crate::analysis::blocks_read(audio, rate)?;
+                crate::analysis::compare_blocks(m, &blocks).attack_loss_p90_db
+            }
+            None => None,
+        };
         Ok(Probe {
             drive_db,
-            lufs: dsp::loudness(audio, rate).ok_or("Missing output loudness")?,
+            lufs,
             nmr_db: ratios.total_db,
             loud_nmr_db: ratios.loud_db,
-            attack_loss_db: mix
-                .and_then(|m| crate::analysis::compare(m, audio, rate).attack_loss_p90_db),
+            attack_loss_db,
         })
     }
 
@@ -393,7 +547,7 @@ pub fn point(
     let mut up = scratch::Pcm::new(scratch::temporary()?);
     render_blocks::upsample_into(prefix, &mut up, rate)?;
     point_on(
-        prefix,
+        &mut Prefix::Whole(prefix),
         &mut up,
         initial_drive_db,
         clipper_db,
@@ -420,8 +574,34 @@ pub fn probe(
 ) -> Result<Probe> {
     let mut up = scratch::Pcm::new(scratch::temporary()?);
     render_blocks::upsample_into(prefix, &mut up, rate)?;
-    let (audio, _) = peak_control(
+    probe_on(
+        &mut Prefix::Whole(prefix),
         &mut up,
+        drive_db,
+        clipper_db,
+        ceiling_dbtp,
+        limiter,
+        true_peak,
+        mix,
+        rate,
+    )
+}
+
+/// `probe` on `up`, the 4x prefix of `prefix`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn probe_on(
+    prefix: &mut Prefix,
+    up: &mut impl scratch::Frames,
+    drive_db: f64,
+    clipper_db: f64,
+    ceiling_dbtp: f64,
+    limiter: LimiterSettings,
+    true_peak: TruePeak,
+    mix: Option<&crate::analysis::Temporal>,
+    rate: u32,
+) -> Result<Probe> {
+    let (mut audio, _) = peak_control(
+        up,
         drive_db,
         clipper_db,
         ceiling_dbtp,
@@ -429,14 +609,15 @@ pub fn probe(
         true_peak,
         rate,
     )?;
-    Probe::of(prefix, &audio, drive_db, mix, rate)
+    let ratios = prefix.ratios(&mut audio, rate)?;
+    Probe::with_ratios(ratios, &mut audio, drive_db, mix, rate)
 }
 
 /// `point` on `up`, the 4x prefix of `prefix` (`render_blocks::upsample_into`).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn point_on(
-    prefix: &[Stereo],
-    up: &mut scratch::Pcm,
+    prefix: &mut Prefix,
+    up: &mut impl scratch::Frames,
     initial_drive_db: f64,
     clipper_db: f64,
     ceiling_dbtp: f64,
@@ -446,16 +627,17 @@ pub(crate) fn point_on(
     rate: u32,
 ) -> Result<Option<Point>> {
     let mut probe = |drive_db: f64| -> Result<Probe> {
-        let (audio, _) = peak_control(
+        probe_on(
+            prefix,
             up,
             drive_db,
             clipper_db,
             ceiling_dbtp,
             limiter,
             true_peak,
+            mix,
             rate,
-        )?;
-        Probe::of(prefix, &audio, drive_db, mix, rate)
+        )
     };
     let first = probe(initial_drive_db)?;
     let step = if first.excess_db() < 0.0 {
@@ -540,6 +722,48 @@ mod tests {
             peak_control_nmr_db(&prefix, &output, 48_000).to_bits(),
             total_nmr_db(&reference, &residual, 48_000).to_bits()
         );
+    }
+
+    #[test]
+    fn the_ratios_of_a_stored_prefix_equal_those_of_the_whole_prefix() {
+        // Longer than one span of `SPAN_HOPS`, and not a whole number of
+        // gain blocks or hops.
+        let frames = SPAN_HOPS * masking::HOP + 3 * GAIN_BLOCK + 777;
+        let prefix: Vec<Stereo> = (0..frames)
+            .map(|i| {
+                let t = i as f64 / 48_000.0;
+                let x = 0.5 * (2.0 * std::f64::consts::PI * 220.0 * t).sin()
+                    + 0.2 * (2.0 * std::f64::consts::PI * 3_100.0 * t).sin() * (0.3 * t).cos();
+                [x as f32, (0.8 * x) as f32]
+            })
+            .collect();
+        let output: Vec<Stereo> = prefix
+            .iter()
+            .map(|f| f.map(|x| (1.3 * x).clamp(-0.6, 0.6)))
+            .collect();
+        let mut stored = scratch::Pcm::new(scratch::memory().unwrap());
+        for block in prefix.chunks(65_536) {
+            stored.push(block).unwrap();
+        }
+        let whole = peak_control_ratios(&prefix, &output, 48_000);
+        // A stored render gives the ratios of the render in memory (D248).
+        let mut rendered = scratch::Pcm::new(scratch::memory().unwrap());
+        rendered.push(&output).unwrap();
+        let stored = std::cell::RefCell::new(stored);
+        for spans in [
+            Prefix::Shared(scratch::Shared(&stored))
+                .ratios(&mut scratch::Slice(&output), 48_000)
+                .unwrap(),
+            Prefix::Shared(scratch::Shared(&stored))
+                .ratios(&mut rendered, 48_000)
+                .unwrap(),
+            Prefix::Whole(&prefix)
+                .ratios(&mut rendered, 48_000)
+                .unwrap(),
+        ] {
+            assert_eq!(whole.total_db.to_bits(), spans.total_db.to_bits());
+            assert_eq!(whole.loud_db.to_bits(), spans.loud_db.to_bits());
+        }
     }
 
     #[test]

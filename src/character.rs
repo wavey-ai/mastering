@@ -1,11 +1,15 @@
-//! The character of each version of a set (`set.version-character.v1`,
-//! D206). Each version moves five tone regions of the mix by its own amount
-//! and widens each stereo band by its own amount. The amounts come from the
-//! single: the master of the album pairs of D177 that moves the mix most. `master`
-//! takes the moves of the single, and the other versions sit around it.
+//! The character of each version of a set (`set.version-character.v3`,
+//! D206, D215, D273). Each version moves five tone regions of the mix by its own
+//! amount and widens each stereo band by its own amount. The amounts come
+//! from the single: the master of the album pairs of D177 that moves the mix
+//! most. `master` takes the moves of the single, and the other versions sit
+//! around it.
 //! The gain of each filter is solved so that its predicted region move on
 //! the spectrum of the mix equals the wanted move. A move stops where the
-//! mix reaches the bound of its region.
+//! mix reaches the bound of its region. In album mode, each move is planned
+//! on the mean regions of the album mixes first, so the tracks of an album
+//! take the same moves, and each version keeps the air against presence of
+//! the mix.
 use crate::{
     broad_tone,
     dsp::{EqBand, Kind},
@@ -13,9 +17,9 @@ use crate::{
     width::SideGain,
     Spectrum,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-pub const RULE: &str = "set.version-character.v1";
+pub const RULE: &str = "set.version-character.v3";
 
 /// The regions of the measures of the album pairs, in Hz.
 pub const SUB_HZ: (f64, f64) = crate::open::SUB_HZ;
@@ -129,7 +133,8 @@ pub const LOW_MID_BELL_HZ: f64 = 354.0;
 pub const LOW_MID_BELL_Q: f64 = 1.4;
 
 /// The five region measures of a spectrum, in dB.
-#[derive(Clone, Copy, Debug, Default, Serialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Regions {
     pub low_mid_db: f64,
     pub presence_db: f64,
@@ -138,7 +143,18 @@ pub struct Regions {
     pub bass_db: f64,
 }
 
+/// Largest size of a region measure of a mix, in dB. The region measures
+/// of the eight album mixes of D177 lie from −8.43 to +8.16 dB.
+pub const REGION_LIMIT_DB: f64 = 40.0;
+
 impl Regions {
+    /// The regions when each measure is finite and within
+    /// `REGION_LIMIT_DB`: the check of the album regions of a job.
+    pub fn checked(self) -> Option<Self> {
+        (0..5)
+            .all(|i| self.get(i).is_finite() && self.get(i).abs() <= REGION_LIMIT_DB)
+            .then_some(self)
+    }
     fn get(&self, i: usize) -> f64 {
         [
             self.low_mid_db,
@@ -148,6 +164,10 @@ impl Regions {
             self.bass_db,
         ][i]
     }
+}
+
+/// The regions in the order low mid, presence, air, sub, bass.
+impl From<[f64; 5]> for Regions {
     fn from(values: [f64; 5]) -> Self {
         Regions {
             low_mid_db: values[0],
@@ -184,6 +204,8 @@ pub struct Plan {
     pub character: Character,
     /// The regions of the mix.
     pub mix: Regions,
+    /// The mean regions of the album mixes, in album mode.
+    pub album: Option<Regions>,
     /// The wanted moves after the bounds of the outcome.
     pub wanted: Regions,
     /// The moves that the solved filters predict.
@@ -227,18 +249,21 @@ fn bounded(want: f64, now: f64, low: f64, high: f64) -> f64 {
     }
 }
 
-/// The tone that moves the regions of `spectrum` by `character`. The moves
-/// are from the mix; the tone reaches them on top of `base`, the stem focus
-/// of the version, with the widening `side`, as the pairs measure a master
-/// against its mix. The five gains are solved in turns: each filter takes
-/// the wanted move of its region less what the other filters give it.
-pub fn plan(
-    spectrum: &Spectrum,
-    character: Character,
-    base: &Tone,
-    side: Option<&SideGain>,
-) -> Plan {
-    let mix = regions(spectrum, &[], &[], None);
+/// The bounds of the outcome of each region, lower and upper, in dB.
+const BOUNDS: [(f64, f64); 5] = [
+    (LOW_MID_MINIMUM_DB, LOW_MID_MAXIMUM_DB),
+    (PRESENCE_MINIMUM_DB, PRESENCE_MAXIMUM_DB),
+    (AIR_MINIMUM_DB, f64::INFINITY),
+    (f64::NEG_INFINITY, crate::open::SUB_MINUS_BASS_MAXIMUM_DB),
+    (f64::NEG_INFINITY, crate::open::BASS_MINUS_BODY_MAXIMUM_DB),
+];
+
+/// The wanted moves of `character` from `mix`. A move that follows the mix
+/// takes its direction from the reference: the album regions in album
+/// mode, else the mix. Each move stops at the bound of its region from the
+/// reference, and then from `mix`.
+fn wanted(character: Character, mix: &Regions, album: Option<&Regions>) -> Regions {
+    let reference = album.unwrap_or(mix);
     // A move that follows the mix points toward the median outcome.
     let toward = |size: f64, now: f64, median: f64| {
         if !character.follow_mix {
@@ -251,40 +276,60 @@ pub fn plan(
     };
     // A single master of D206 cuts the low mid of a mix above the median and
     // leaves a mix under it: a low-mid move that follows the mix only cuts.
-    let low_mid = toward(character.low_mid_db, mix.low_mid_db, LOW_MID_MEDIAN_DB);
+    let low_mid = toward(
+        character.low_mid_db,
+        reference.low_mid_db,
+        LOW_MID_MEDIAN_DB,
+    );
     let low_mid = if character.follow_mix {
         low_mid.min(0.0)
     } else {
         low_mid
     };
-    let presence = toward(character.presence_db, mix.presence_db, PRESENCE_MEDIAN_DB);
-    let wanted = Regions {
-        low_mid_db: bounded(
-            low_mid,
-            mix.low_mid_db,
-            LOW_MID_MINIMUM_DB,
-            LOW_MID_MAXIMUM_DB,
-        ),
-        presence_db: bounded(
-            presence,
-            mix.presence_db,
-            PRESENCE_MINIMUM_DB,
-            PRESENCE_MAXIMUM_DB,
-        ),
-        air_db: bounded(character.air_db, mix.air_db, AIR_MINIMUM_DB, f64::INFINITY),
-        sub_db: bounded(
-            character.sub_db,
-            mix.sub_db,
-            f64::NEG_INFINITY,
-            crate::open::SUB_MINUS_BASS_MAXIMUM_DB,
-        ),
-        bass_db: bounded(
-            character.bass_db,
-            mix.bass_db,
-            f64::NEG_INFINITY,
-            crate::open::BASS_MINUS_BODY_MAXIMUM_DB,
-        ),
+    let presence = toward(
+        character.presence_db,
+        reference.presence_db,
+        PRESENCE_MEDIAN_DB,
+    );
+    // The album masters of D177 keep the air against presence of each mix,
+    // where the single master cuts it (D273).
+    let air = if album.is_some() {
+        0.0
+    } else {
+        character.air_db
     };
+    let moves = [low_mid, presence, air, character.sub_db, character.bass_db];
+    Regions::from(std::array::from_fn(|i| {
+        let (low, high) = BOUNDS[i];
+        bounded(
+            bounded(moves[i], reference.get(i), low, high),
+            mix.get(i),
+            low,
+            high,
+        )
+    }))
+}
+
+/// The tone that moves the regions of `spectrum` by `character`. The moves
+/// are from the mix; the tone reaches them on top of `base`, the stem focus
+/// of the version, with the widening `side`, as the pairs measure a master
+/// against its mix. The five gains are solved in turns: each filter takes
+/// the wanted move of its region less what the other filters give it.
+///
+/// With `album`, the mean regions of the album mixes, each track of an
+/// album takes the moves of the album mean within the bounds of its mix,
+/// and keeps the air against presence of its mix. The album masters of
+/// D177 keep the tonal differences between the tracks
+/// (`docs/ALBUM_MODE_RUN.md`, `docs/ALBUM_AIR_RUN.md`).
+pub fn plan(
+    spectrum: &Spectrum,
+    character: Character,
+    base: &Tone,
+    side: Option<&SideGain>,
+    album: Option<&Regions>,
+) -> Plan {
+    let mix = regions(spectrum, &[], &[], None);
+    let wanted = wanted(character, &mix, album);
     let mut gains = [0.0f64; 5];
     let bands = |gains: &[f64; 5]| -> Vec<EqBand> {
         base.stereo
@@ -344,6 +389,7 @@ pub fn plan(
         rule: RULE,
         character,
         mix,
+        album: album.copied(),
         wanted,
         predicted,
         scale,
@@ -384,7 +430,7 @@ mod tests {
             ("open", WARM),
             ("bold", WIDE),
         ] {
-            let plan = plan(&spectrum, character, &Tone::default(), None);
+            let plan = plan(&spectrum, character, &Tone::default(), None, None);
             for i in 0..5 {
                 assert!(
                     (plan.predicted.get(i) - plan.wanted.get(i)).abs() < 0.05,
@@ -407,12 +453,43 @@ mod tests {
         assert_eq!(bounded(-2.1, 1.0, 1.17, 3.45), 0.0);
     }
 
+    fn close(a: Regions, b: [f64; 5]) -> bool {
+        (0..5).all(|i| (a.get(i) - b[i]).abs() < 1e-9)
+    }
+
+    #[test]
+    fn an_album_track_takes_the_moves_of_the_album_mean_within_its_bounds() {
+        // A bright mix with a full low mid, in an album that is darker and
+        // leaner on average.
+        let mix = Regions::from([3.55, -3.69, -3.10, 3.83, 3.92]);
+        let album = Regions::from([2.2, -5.5, -5.85, 1.2, 4.2]);
+        let single = wanted(FULL, &mix, None);
+        assert!(close(single, [-2.1, -1.3, -2.3, 1.6, -1.2]), "{single:?}");
+        let track = wanted(FULL, &mix, Some(&album));
+        // The album is under the low-mid median: no cut. It is under the
+        // presence median: a lift, stopped at the bound of the mix. The air
+        // keeps its balance against presence (D273).
+        assert!(
+            close(track, [0.0, -3.30 + 3.69, 0.0, 1.6, -1.2]),
+            "{track:?}"
+        );
+        // A version that keeps its directions keeps them in an album.
+        let warm = wanted(WARM, &mix, Some(&album));
+        assert!(close(warm, [0.0, -0.3, 0.0, 5.74 - 3.83, 2.5]), "{warm:?}");
+        // Each version of an album track keeps the air of its mix against
+        // presence, also with room above the air bound.
+        for character in [ESSENTIAL, FULL, WARM, WIDE] {
+            assert_eq!(wanted(character, &mix, Some(&album)).air_db, 0.0);
+            assert!(wanted(character, &mix, None).air_db < 0.0);
+        }
+    }
+
     #[test]
     fn the_versions_differ_by_more_than_a_duplicate() {
         let spectrum = spectrum();
         let plans: Vec<Plan> = [ESSENTIAL, FULL, WARM, WIDE]
             .into_iter()
-            .map(|c| plan(&spectrum, c, &Tone::default(), None))
+            .map(|c| plan(&spectrum, c, &Tone::default(), None, None))
             .collect();
         for (a, pa) in plans.iter().enumerate() {
             for pb in plans.iter().skip(a + 1) {

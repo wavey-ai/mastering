@@ -5,15 +5,18 @@ use crate::{
     audio_io::{Result, Stereo},
     foundation::{self, SpatialBands},
     resample,
+    scratch::{self, Frames},
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 const FFT: usize = 8192;
 const HOP: usize = 4096;
 const BANDS: usize = 29;
+/// Frames of each read of a mix in scratch storage.
+const BLOCK: usize = 65_536;
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct Band {
     pub low_hz: f64,
     pub high_hz: f64,
@@ -35,13 +38,14 @@ pub const STEM_SUM_RESIDUAL_DB: f64 = -15.0;
 /// The stereo image of one stem per stereo analysis band
 /// (`stereo::BAND_EDGES_HZ`), for the source condition of an anti-phase
 /// instrument group (`source_condition::antiphase_stems`).
-#[derive(Clone, Serialize, Debug)]
+#[derive(Clone, PartialEq, Serialize, Deserialize, Debug)]
 pub struct StemImage {
+    #[serde(deserialize_with = "crate::static_text::text")]
     pub role: &'static str,
     pub bands: Vec<StemImageBand>,
 }
 
-#[derive(Clone, Serialize, Debug)]
+#[derive(Clone, PartialEq, Serialize, Deserialize, Debug)]
 pub struct StemImageBand {
     /// Whole-file left/right correlation, cross-spectrum phase and its
     /// resultant (`stereo::BandMetrics`).
@@ -60,7 +64,19 @@ pub struct StemImageBand {
 
 /// The stereo image of a stem at `rate`.
 pub fn stem_image(role: &'static str, audio: &[Stereo], rate: u32) -> Result<StemImage> {
-    let image = crate::stereo::analyze(audio, rate)?;
+    image_of(role, crate::stereo::analyze(audio, rate)?, rate)
+}
+
+/// `stem_image` of the frames of `frames`, read in spans.
+fn stem_image_read(role: &'static str, frames: &mut impl Frames, rate: u32) -> Result<StemImage> {
+    image_of(role, crate::stereo::analyze_read(frames, rate)?, rate)
+}
+
+fn image_of(
+    role: &'static str,
+    image: crate::stereo::StereoAnalysis,
+    rate: u32,
+) -> Result<StemImage> {
     let bands = image
         .whole
         .bands
@@ -95,10 +111,13 @@ pub fn stem_image(role: &'static str, audio: &[Stereo], rate: u32) -> Result<Ste
     Ok(StemImage { role, bands })
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct Evidence {
+    #[serde(deserialize_with = "crate::static_text::text")]
     pub rule: &'static str,
+    #[serde(deserialize_with = "crate::static_text::text")]
     pub validation_status: &'static str,
+    #[serde(deserialize_with = "crate::static_text::four")]
     pub roles: [&'static str; 4],
     pub source_pcm_sha256: String,
     pub source_frames: usize,
@@ -109,6 +128,7 @@ pub struct Evidence {
     pub sum_residual_relative_db: f64,
     pub sum_source_cosine: f64,
     pub usable: bool,
+    #[serde(deserialize_with = "crate::static_text::text")]
     pub reason: &'static str,
     pub vocal_active_seconds: f64,
     /// Seconds each role is active: above its P95 minus 25 dB and above 2%
@@ -135,8 +155,25 @@ pub struct Evidence {
     pub foundation: Option<foundation::Foundation>,
     /// The stereo image of each stem (`stem_image`), in role order.
     pub stem_images: Vec<StemImage>,
-    #[serde(skip_serializing)]
+    #[serde(skip)]
     pub auto_focus: Option<crate::source_treatments::ProposalSet>,
+}
+
+/// The evidence of a plan in two invocations (D263), with the fields that
+/// the evidence of a plan record leaves out.
+#[derive(Serialize)]
+struct StoredRef<'a> {
+    evidence: &'a Evidence,
+    low_mid_depth_db: Option<&'a [f32]>,
+    auto_focus: Option<&'a crate::source_treatments::ProposalSet>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, bound(deserialize = "'de: 'static"))]
+struct Stored {
+    evidence: Evidence,
+    low_mid_depth_db: Option<Vec<f32>>,
+    auto_focus: Option<crate::source_treatments::ProposalSet>,
 }
 
 impl Evidence {
@@ -157,21 +194,80 @@ impl Evidence {
                 / bands.len() as f64
         })
     }
+
+    /// The evidence as JSON for a later invocation of the plan (D263), or
+    /// `None` when the JSON reads back as other evidence. A non-finite
+    /// number reads back as another value.
+    pub fn stored(&self) -> Result<Option<Vec<u8>>> {
+        let bytes = serde_json::to_vec(&StoredRef {
+            evidence: self,
+            low_mid_depth_db: self.low_mid.as_ref().map(|key| key.depth_db.as_slice()),
+            auto_focus: self.auto_focus.as_ref(),
+        })?;
+        let same = Self::from_stored(&bytes).is_ok_and(|read| read == *self);
+        Ok(same.then_some(bytes))
+    }
+
+    /// The evidence of `stored`.
+    pub fn from_stored(bytes: &[u8]) -> Result<Self> {
+        // The `&'static str` fields read their texts into `static_text`. A
+        // reader lends no text of the input to the evidence.
+        let mut input = serde_json::Deserializer::from_reader(bytes);
+        let Stored {
+            mut evidence,
+            low_mid_depth_db,
+            auto_focus,
+        } = Stored::deserialize(&mut input)?;
+        input.end()?;
+        if let (Some(key), Some(depth_db)) = (evidence.low_mid.as_mut(), low_mid_depth_db) {
+            key.depth_db = depth_db;
+        }
+        evidence.auto_focus = auto_focus;
+        Ok(evidence)
+    }
 }
 
 pub fn fingerprint(audio: &[Stereo]) -> String {
-    // The little-endian samples in 64 KiB pieces: the same bytes as one
-    // sample at a time, without a hash call for each sample.
-    let mut hash = Sha256::new();
-    let mut bytes = Vec::with_capacity(8192 * 8);
-    for frames in audio.chunks(8192) {
-        bytes.clear();
-        for sample in frames.iter().flatten() {
-            bytes.extend_from_slice(&sample.to_le_bytes());
-        }
-        hash.update(&bytes);
+    let mut hash = Fingerprint::default();
+    hash.take(audio);
+    hash.finish()
+}
+
+/// `fingerprint` of the frames of `audio`, read in blocks of 65,536 frames.
+pub(crate) fn fingerprint_read(audio: &mut impl Frames) -> Result<String> {
+    const BLOCK: usize = 65_536;
+    let frames = audio.len();
+    let mut hash = Fingerprint::default();
+    let mut block = Vec::new();
+    for start in (0..frames).step_by(BLOCK) {
+        hash.take(audio.window(start, BLOCK.min(frames - start), &mut block)?);
     }
-    format!("{:x}", hash.finalize())
+    Ok(hash.finish())
+}
+
+/// `fingerprint` of a recording that arrives in blocks.
+#[derive(Default)]
+pub(crate) struct Fingerprint {
+    hash: Sha256,
+    bytes: Vec<u8>,
+}
+
+impl Fingerprint {
+    pub(crate) fn take(&mut self, audio: &[Stereo]) {
+        // The little-endian samples in 64 KiB pieces: the same bytes as one
+        // sample at a time, without a hash call for each sample.
+        for frames in audio.chunks(8192) {
+            self.bytes.clear();
+            for sample in frames.iter().flatten() {
+                self.bytes.extend_from_slice(&sample.to_le_bytes());
+            }
+            self.hash.update(&self.bytes);
+        }
+    }
+
+    pub(crate) fn finish(self) -> String {
+        format!("{:x}", self.hash.finalize())
+    }
 }
 
 /// Frames where `role` is above its P95 minus 25 dB and above 2% of total
@@ -190,6 +286,14 @@ fn active_frames(powers: &[Vec<[f64; BANDS]>], role: usize) -> Vec<usize> {
 }
 
 fn band_frames(audio: &[Stereo], rate: u32) -> (Vec<[f64; BANDS]>, Vec<SpatialBands>) {
+    band_frames_read(&mut scratch::Slice(audio), rate).expect("frames of a slice")
+}
+
+/// `band_frames` of the frames of `frames`, read in spans.
+fn band_frames_read(
+    frames: &mut impl Frames,
+    rate: u32,
+) -> Result<(Vec<[f64; BANDS]>, Vec<SpatialBands>)> {
     let bin_bands: Vec<_> = (0..=FFT / 2)
         .map(|bin| {
             let hz = bin as f64 * rate as f64 / FFT as f64;
@@ -197,7 +301,10 @@ fn band_frames(audio: &[Stereo], rate: u32) -> (Vec<[f64; BANDS]>, Vec<SpatialBa
             (index >= 0.0 && index < BANDS as f64).then_some(index as usize)
         })
         .collect();
-    crate::stft::stereo_frames(audio, FFT, HOP, |l, r| {
+    let count = crate::stft::frame_count(frames.len() / HOP, FFT, HOP);
+    let (mut powers, mut spatial) = (Vec::with_capacity(count), Vec::with_capacity(count));
+    let frame = |l: &[rustfft::num_complex::Complex<f64>],
+                 r: &[rustfft::num_complex::Complex<f64>]| {
         let mut bands = [0.0; BANDS];
         let mut domains = SpatialBands {
             mid: [0.0; BANDS],
@@ -213,28 +320,67 @@ fn band_frames(audio: &[Stereo], rate: u32) -> (Vec<[f64; BANDS]>, Vec<SpatialBa
             }
         }
         (bands, domains)
-    })
-    .into_iter()
-    .unzip()
+    };
+    crate::stft::stereo_frames_read(
+        frames,
+        FFT,
+        HOP,
+        |x| x,
+        frame,
+        |(bands, domains)| {
+            powers.push(bands);
+            spatial.push(domains);
+        },
+    )?;
+    Ok((powers, spatial))
 }
 
 /// Drum envelope peaks with a local rise and a measured 6 dB decay. Timing
 /// comes from the estimated drum waveform, not sparse onsets in the full mix.
-fn drum_decay(audio: &[Stereo], rate: u32) -> (usize, Option<f64>, Option<[f64; 3]>, Option<f64>) {
-    let block = rate as usize / 100;
-    let levels: Vec<_> = audio
-        .chunks_exact(block)
-        .map(|frames| {
-            let p = frames
-                .iter()
-                .flatten()
-                .map(|&v| (v as f64).powi(2))
-                .sum::<f64>()
-                / (frames.len() * 2) as f64;
-            10.0 * p.max(1e-30).log10()
-        })
-        .collect();
-    let gate = percentile(&levels, 0.95) - 15.0;
+fn drum_decay(audio: &[Stereo], rate: u32) -> DrumDecay {
+    let mut levels = Levels::new(rate);
+    levels.take(audio);
+    decay_of(&levels.levels)
+}
+
+/// The level of each whole 10 ms block of a recording at `rate`, in dB, as
+/// the recording arrives in blocks of any length (`drum_decay`).
+struct Levels {
+    block: usize,
+    /// The power and the frames of the block in progress.
+    power: f64,
+    frames: usize,
+    levels: Vec<f64>,
+}
+
+impl Levels {
+    fn new(rate: u32) -> Self {
+        Self {
+            block: rate as usize / 100,
+            power: 0.0,
+            frames: 0,
+            levels: Vec::new(),
+        }
+    }
+
+    fn take(&mut self, audio: &[Stereo]) {
+        for frame in audio {
+            for &v in frame {
+                self.power += (v as f64).powi(2);
+            }
+            self.frames += 1;
+            if self.frames == self.block {
+                let p = self.power / (self.block * 2) as f64;
+                self.levels.push(10.0 * p.max(1e-30).log10());
+                (self.power, self.frames) = (0.0, 0);
+            }
+        }
+    }
+}
+
+/// `drum_decay` of the 10 ms levels `levels`.
+fn decay_of(levels: &[f64]) -> DrumDecay {
+    let gate = percentile(levels, 0.95) - 15.0;
     let mut decays = Vec::new();
     let mut intervals = Vec::new();
     let mut last = 0;
@@ -317,8 +463,9 @@ pub fn analyze_with_reconstruction(
         spatial.push(domains);
         images.push(stem_image(role, stem, stem_rate)?);
     }
-    let (mut evidence, reconstructed) = finish_evidence(
-        input,
+    let mut evidence = finish_evidence(
+        &mut scratch::Slice(input),
+        fingerprint(input),
         Observations {
             rate: stem_rate,
             frames: stems[0].len(),
@@ -328,7 +475,7 @@ pub fn analyze_with_reconstruction(
             drum: drum_decay(stems[0], stem_rate),
             images,
         },
-        reconstructed,
+        &mut scratch::Slice(&reconstructed),
         rate,
     )?;
     if evidence.usable {
@@ -337,46 +484,49 @@ pub fn analyze_with_reconstruction(
         // stems serve the de-esser key.
         let mut roles = Vec::with_capacity(4);
         let mut others: [Vec<f64>; 3] = Default::default();
-        let mut converted = Vec::new();
         for (role, stem) in stems.iter().enumerate() {
-            let at_rate = at_render_rate(stem, stem_rate, rate, &mut converted)?;
-            let frames =
-                crate::masking::frames(at_rate, crate::masking::Channels::Both, rate).powers;
+            let at_rate = resample::at_rate(stem, stem_rate, rate)?;
+            let frames = crate::masking::frames(
+                &at_rate,
+                crate::masking::Channels::Both,
+                crate::masking::Measures::Powers,
+                rate,
+            )
+            .powers;
             if role < 3 {
-                others[role] = crate::deesser::sibilant_powers(at_rate, rate);
+                others[role] = crate::deesser::sibilant_powers(&at_rate, rate);
             } else {
-                evidence.deesser_key =
-                    crate::deesser::key_with_frames(at_rate, &frames, &others, input, rate);
+                evidence.deesser_key = crate::deesser::key_with_frames(
+                    &crate::deesser::mid_powers(&at_rate, rate),
+                    &frames,
+                    &others,
+                    &crate::deesser::mid_powers(input, rate),
+                );
             }
             roles.push(frames);
         }
-        evidence.low_mid = low_mid_key(&evidence, input, &roles, rate);
+        evidence.low_mid = low_mid_key(&evidence, || mix_flatness(input, rate), &roles, rate);
     }
     Ok((evidence, reconstructed))
 }
 
-/// A stem at `stem_rate` at the render rate `rate`. A stem at another rate
-/// converts into `converted`: in the browser engine, frames that convert
-/// each sample as they read it take more CPU time for the set.
-fn at_render_rate<'a>(
-    stem: &'a [Stereo],
-    stem_rate: u32,
-    rate: u32,
-    converted: &'a mut Vec<Stereo>,
-) -> Result<&'a [Stereo]> {
-    if stem_rate == rate {
-        return Ok(stem);
-    }
-    resample::convert_into(stem, stem_rate, rate, converted)?;
-    Ok(converted)
+/// The spectral flatness of each masking frame of `input` at `rate`.
+fn mix_flatness(input: &[Stereo], rate: u32) -> Vec<f64> {
+    crate::masking::frames(
+        input,
+        crate::masking::Channels::Both,
+        crate::masking::Measures::PowersAndFlatness,
+        rate,
+    )
+    .flatness_db
 }
 
 /// The low-mid key of the lead role against the power sum of the other
-/// roles, with the tonality of the mix. `input` and the frames of the roles
-/// are at `rate`.
+/// roles, with the tonality of the mix (`mix_flatness`). The frames of the
+/// roles are at the rate of the mix, `rate`.
 fn low_mid_key(
     evidence: &Evidence,
-    input: &[Stereo],
+    mix_flatness: impl FnOnce() -> Vec<f64>,
     roles: &[Vec<[f64; crate::masking::BANDS]>],
     rate: u32,
 ) -> Option<crate::low_mid::Key> {
@@ -392,11 +542,10 @@ fn low_mid_key(
             })
         })
         .collect();
-    let mix = crate::masking::frames(input, crate::masking::Channels::Both, rate);
     crate::low_mid::key(
         &roles[lead.index],
         &others,
-        &mix.flatness_db,
+        &mix_flatness(),
         lead.index,
         rate,
     )
@@ -413,30 +562,35 @@ struct Observations {
     images: Vec<StemImage>,
 }
 
-/// Measure each raw stem and release it before loading the next role.
-/// `input` is at the render rate `rate`.
+/// Measure each raw stem in turn. `input` is at the render rate `rate`.
+/// `load(role, each)` gives the frames of the stem of `role` to `each`,
+/// block by block, with the sample rate of the stem. Each stem waits in
+/// scratch storage, and its measures read it in spans (D245).
 pub fn analyze_sequential(
     input: &[Stereo],
     rate: u32,
-    mut load: impl FnMut(&'static str) -> Result<crate::audio_io::Source>,
+    mut load: impl FnMut(&'static str, &mut Blocks<'_>) -> Result<()>,
     proposals: Option<&crate::source_treatments::ProposalSet>,
     refine: bool,
 ) -> Result<Evidence> {
-    analyze_sequential_inner(input, rate, &mut load, proposals, refine, None)
+    analyze_sequential_inner(Mix::Whole(input), rate, &mut load, proposals, refine, None)
 }
 
 /// Set analysis uses the same local auditory measurement on native and WASM.
 /// Imported diagnostics still take precedence when explicitly supplied.
-/// `input` is at the render rate `rate`.
+/// `input` is at the render rate `rate`, and `load` is that of
+/// `analyze_sequential`. While the stems load, `input` waits in scratch
+/// storage (`scratch::temporary`) and holds no frames; it holds the mix
+/// again when the analysis returns.
 pub fn analyze_set(
-    input: &[Stereo],
+    input: &mut Vec<Stereo>,
     rate: u32,
-    mut load: impl FnMut(&'static str) -> Result<crate::audio_io::Source>,
+    mut load: impl FnMut(&'static str, &mut Blocks<'_>) -> Result<()>,
     proposals: Option<&crate::source_treatments::ProposalSet>,
     source_file_sha256: &str,
 ) -> Result<Evidence> {
     analyze_sequential_inner(
-        input,
+        Mix::Held(input),
         rate,
         &mut load,
         proposals,
@@ -445,18 +599,216 @@ pub fn analyze_set(
     )
 }
 
+/// `analyze_set` of a mix in scratch storage (D250).
+pub fn analyze_set_stored(
+    mix: &mut crate::audio_io::StoredSource,
+    mut load: impl FnMut(&'static str, &mut Blocks<'_>) -> Result<()>,
+    proposals: Option<&crate::source_treatments::ProposalSet>,
+    source_file_sha256: &str,
+) -> Result<Evidence> {
+    let rate = mix.sample_rate;
+    analyze_sequential_inner(
+        Mix::Stored(&mut mix.audio),
+        rate,
+        &mut load,
+        proposals,
+        true,
+        Some(source_file_sha256),
+    )
+}
+
+/// The mix of a sequential stem analysis.
+enum Mix<'a> {
+    Whole(&'a [Stereo]),
+    /// The mix of the caller, which waits in scratch storage while the stems
+    /// load.
+    Held(&'a mut Vec<Stereo>),
+    /// A mix in scratch storage.
+    Stored(&'a mut scratch::Pcm),
+}
+
+/// The frames of a `Mix` after the measures that read the whole mix.
+enum MixFrames<'a> {
+    Whole(scratch::Slice<'a>),
+    Held {
+        stored: scratch::Pcm,
+        audio: &'a mut Vec<Stereo>,
+    },
+    Stored(&'a mut scratch::Pcm),
+}
+
+impl<'a> Mix<'a> {
+    /// The measures of the whole mix at `rate`, and an error for a mix
+    /// shorter than three seconds or with a sample that is not finite. A
+    /// stored mix reads in blocks and spans (D250).
+    fn measures(&mut self, rate: u32) -> Result<MixMeasures> {
+        let input = match self {
+            Mix::Whole(audio) => &audio[..],
+            Mix::Held(audio) => &audio[..],
+            Mix::Stored(stored) => return measures_read(stored, rate),
+        };
+        if input.len() < 3 * rate as usize || input.iter().flatten().any(|x| !x.is_finite()) {
+            return Err("Stem evidence requires finite source PCM".into());
+        }
+        Ok(MixMeasures {
+            frames: input.len(),
+            pcm_sha256: fingerprint(input),
+            mid: crate::deesser::mid_powers(input, rate),
+            flatness: mix_flatness(input, rate),
+        })
+    }
+
+    /// The frames of the mix. A held mix moves to scratch storage, and its
+    /// buffer is freed. In the browser engine the buffer waits empty for
+    /// the mix to read back into it (`MixFrames::restore`).
+    fn frames(self) -> Result<MixFrames<'a>> {
+        Ok(match self {
+            Mix::Whole(audio) => MixFrames::Whole(scratch::Slice(audio)),
+            Mix::Held(audio) => {
+                let stored = scratch::Pcm::temporary_of(audio)?;
+                // The linear memory of a module never shrinks, and the
+                // allocations of the stem stages split a freed buffer, so
+                // that the restored mix would grow the linear memory by one
+                // buffer (D235, D246).
+                if cfg!(target_arch = "wasm32") {
+                    audio.clear();
+                } else {
+                    *audio = Vec::new();
+                }
+                MixFrames::Held { stored, audio }
+            }
+            Mix::Stored(stored) => MixFrames::Stored(stored),
+        })
+    }
+}
+
+/// `Mix::measures` of a mix in scratch storage: one pass over blocks of
+/// 65,536 frames for the checks and the fingerprint, and the masking frames
+/// of the mid channel and of the mix in spans.
+fn measures_read(mix: &mut scratch::Pcm, rate: u32) -> Result<MixMeasures> {
+    const BLOCK: usize = 65_536;
+    let frames = mix.len();
+    if frames < 3 * rate as usize {
+        return Err("Stem evidence requires finite source PCM".into());
+    }
+    let mut hash = Fingerprint::default();
+    let mut block = Vec::new();
+    for start in (0..frames).step_by(BLOCK) {
+        mix.read(start, BLOCK.min(frames - start), &mut block)?;
+        if block.iter().flatten().any(|x| !x.is_finite()) {
+            return Err("Stem evidence requires finite source PCM".into());
+        }
+        hash.take(&block);
+    }
+    let mid = crate::masking::frames_read(
+        mix,
+        |x| [crate::deesser::mid(x); 2],
+        crate::masking::Channels::Left,
+        crate::masking::Measures::Powers,
+        rate,
+    )?
+    .powers;
+    let flatness = crate::masking::frames_read(
+        mix,
+        |x| x,
+        crate::masking::Channels::Both,
+        crate::masking::Measures::PowersAndFlatness,
+        rate,
+    )?
+    .flatness_db;
+    Ok(MixMeasures {
+        frames,
+        pcm_sha256: hash.finish(),
+        mid,
+        flatness,
+    })
+}
+
+impl MixFrames<'_> {
+    /// Read a held mix back into the buffer of the caller.
+    fn restore(self) -> Result<()> {
+        if let MixFrames::Held { mut stored, audio } = self {
+            let frames = stored.len();
+            stored.read(0, frames, audio)?;
+        }
+        Ok(())
+    }
+}
+
+impl Frames for MixFrames<'_> {
+    fn len(&self) -> usize {
+        match self {
+            MixFrames::Whole(audio) => audio.len(),
+            MixFrames::Held { stored, .. } => stored.len(),
+            MixFrames::Stored(stored) => stored.len(),
+        }
+    }
+
+    fn read(&mut self, start: usize, count: usize, output: &mut Vec<Stereo>) -> Result<()> {
+        match self {
+            MixFrames::Whole(audio) => audio.read(start, count, output),
+            MixFrames::Held { stored, .. } => stored.read(start, count, output),
+            MixFrames::Stored(stored) => stored.read(start, count, output),
+        }
+    }
+}
+
+/// The measures of the whole mix that the stem analysis uses.
+struct MixMeasures {
+    frames: usize,
+    pcm_sha256: String,
+    /// The mid band powers of the de-esser key (`deesser::mid_powers`).
+    mid: Vec<[f64; crate::masking::BANDS]>,
+    /// The tonality of the low-mid key (`mix_flatness`).
+    flatness: Vec<f64>,
+}
+
+/// The receiver of the blocks of a stem: the sample rate of the stem and
+/// its next frames.
+pub type Blocks<'a> = dyn FnMut(u32, &[Stereo]) -> Result<()> + 'a;
+
 fn analyze_sequential_inner(
-    input: &[Stereo],
+    mix: Mix<'_>,
     rate: u32,
-    load: &mut impl FnMut(&'static str) -> Result<crate::audio_io::Source>,
+    load: &mut impl FnMut(&'static str, &mut Blocks<'_>) -> Result<()>,
     proposals: Option<&crate::source_treatments::ProposalSet>,
     refine: bool,
     auto_source_hash: Option<&str>,
 ) -> Result<Evidence> {
     crate::audio_io::check_render_rate(rate)?;
-    if input.len() < 3 * rate as usize || input.iter().flatten().any(|x| !x.is_finite()) {
-        return Err("Stem evidence requires finite source PCM".into());
-    }
+    let mut mix = mix;
+    let measures = mix.measures(rate)?;
+    let mut input = mix.frames()?;
+    let evidence = analyze_stems(
+        &mut input,
+        measures,
+        rate,
+        load,
+        proposals,
+        refine,
+        auto_source_hash,
+    );
+    input.restore()?;
+    evidence
+}
+
+/// The stem loop of `analyze_sequential_inner`, with the frames of the mix
+/// and its `measures`.
+fn analyze_stems(
+    input: &mut MixFrames<'_>,
+    measures: MixMeasures,
+    rate: u32,
+    load: &mut impl FnMut(&'static str, &mut Blocks<'_>) -> Result<()>,
+    proposals: Option<&crate::source_treatments::ProposalSet>,
+    refine: bool,
+    auto_source_hash: Option<&str>,
+) -> Result<Evidence> {
+    let MixMeasures {
+        frames: mix_frames,
+        pcm_sha256,
+        mid: mix_mid,
+        flatness,
+    } = measures;
     let mut observations = Observations {
         rate: 0,
         frames: 0,
@@ -466,16 +818,20 @@ fn analyze_sequential_inner(
         drum: (0, None, None, None),
         images: Vec::new(),
     };
-    let mut sum: Vec<Stereo> = Vec::new();
-    let mut vocal = None;
+    // The sum of the stems waits in scratch storage, and each stem adds to it
+    // as it decodes (D234): the drum stem starts the sum.
+    let mut sum: Option<scratch::Pcm> = None;
+    // With an automatic focus, the accompaniment gives its auditory frames
+    // at the end of the other stage.
+    let auto_source_hash = auto_source_hash.filter(|_| proposals.is_none());
+    let mut accompaniment: Option<crate::auditory::Measured> = None;
+    // The vocal at the render rate, in scratch storage for the refinement.
+    let mut vocal: Option<scratch::Pcm> = None;
     let mut deesser_key = crate::deesser::Key::default();
     // The mid 5 to 10 kHz power of each frame of the drum, bass and other
     // stems at the render rate, for the de-esser key.
     let mut others: [Vec<f64>; 3] = Default::default();
     let mut role_masking = Vec::with_capacity(4);
-    // The stems at the render rate share one buffer: a buffer freed after
-    // each stem leaves holes that later allocations split.
-    let mut converted: Vec<Stereo> = Vec::new();
     let mut auto_focus = None;
     for (role, name) in ["drums", "bass", "other", "vocals"].into_iter().enumerate() {
         crate::progress::report(crate::progress::Stage {
@@ -485,121 +841,233 @@ fn analyze_sequential_inner(
             count: Some(4),
             ..Default::default()
         });
-        let stem = load(name)?;
+        let mut reader = StemReader {
+            role,
+            rate: (role > 0).then_some(observations.rate),
+            frames: 0,
+            limit: if role == 0 {
+                usize::MAX
+            } else {
+                observations.frames
+            },
+            stored: scratch::Pcm::new(scratch::temporary()?),
+            hash: Fingerprint::default(),
+            levels: None,
+            sum: sum.as_mut(),
+        };
+        load(name, &mut |stem_rate, block| reader.take(stem_rate, block))?;
+        let StemReader {
+            rate: stem_rate,
+            frames,
+            stored: mut stem,
+            hash,
+            levels,
+            ..
+        } = reader;
+        let stem_rate = stem_rate.unwrap_or(0);
         if role == 0 {
-            observations.rate = stem.sample_rate;
-            observations.frames = stem.audio.len();
-            let expected =
-                (stem.audio.len() as f64 * rate as f64 / stem.sample_rate as f64).round() as usize;
-            if !resample::RATES.contains(&stem.sample_rate)
-                || stem.audio.is_empty()
-                || expected.abs_diff(input.len()) > 1
+            observations.rate = stem_rate;
+            observations.frames = frames;
+            let expected = (frames as f64 * rate as f64 / stem_rate as f64).round() as usize;
+            if !resample::RATES.contains(&stem_rate)
+                || frames == 0
+                || expected.abs_diff(mix_frames) > 1
             {
                 return Err("Stem duration or sample rate does not match the original mix".into());
             }
-            // The sum converts to the render rate in its own buffer
-            // (`resample::convert_owned`).
-            sum.reserve_exact(
-                resample::converted_frames(stem.audio.len(), stem.sample_rate, rate)
-                    .max(stem.audio.len()),
-            );
-            sum.resize(stem.audio.len(), [-0.0; 2]);
         }
-        if stem.sample_rate != observations.rate
-            || stem.audio.len() != observations.frames
-            || stem.audio.iter().flatten().any(|x| !x.is_finite())
-        {
+        if stem_rate != observations.rate || frames != observations.frames {
             return Err("Stem evidence requires finite, aligned estimates at one rate".into());
         }
-        observations.hashes[role] = fingerprint(&stem.audio);
-        let (powers, spatial) = band_frames(&stem.audio, observations.rate);
+        observations.hashes[role] = hash.finish();
+        let (powers, spatial) = band_frames_read(&mut stem, stem_rate)?;
         observations.powers.push(powers);
         observations.spatial.push(spatial);
         observations
             .images
-            .push(stem_image(name, &stem.audio, observations.rate)?);
+            .push(stem_image_read(name, &mut stem, stem_rate)?);
+        if let Some(levels) = levels {
+            observations.drum = decay_of(&levels.levels);
+        }
+        if role < 3 {
+            let (frames, mid) = masking_pairs(&mut stem, stem_rate, rate)?;
+            role_masking.push(frames.powers);
+            others[role] = crate::deesser::sibilant_of(&mid.powers);
+        } else if let (Some(source_hash), Some(frames)) = (auto_source_hash, accompaniment.take()) {
+            let vocal_frames = crate::auditory::measure_stem_read(&mut stem, stem_rate)?;
+            auto_focus = Some(crate::auditory::propose_from_measured(
+                &vocal_frames,
+                &frames,
+                source_hash,
+                &pcm_sha256,
+                rate,
+            )?);
+        }
         if role == 0 {
-            observations.drum = drum_decay(&stem.audio, observations.rate);
-        }
-        // The vocal at the render rate and its masking frames serve the
-        // low-mid key, the de-esser key and the refinement.
-        let mut vocal_at_rate = None;
-        if role == 3 {
-            // The vocal takes the buffer of the earlier conversions.
-            let resampled = if observations.rate != rate {
-                resample::convert_into(&stem.audio, observations.rate, rate, &mut converted)?;
-                Some(std::mem::take(&mut converted))
+            sum = Some(stem);
+        } else if role == 2 && auto_source_hash.is_some() {
+            let stored = sum.as_mut().unwrap();
+            accompaniment = Some(crate::auditory::measure_stem_read(stored, stem_rate)?);
+        } else if role == 3 {
+            // The vocal at the render rate and its masking frames serve the
+            // low-mid key, the de-esser key and the refinement.
+            let mut at_rate = if stem_rate == rate {
+                stem
             } else {
-                None
+                resample::convert_stored(&mut stem, stem_rate, rate)?
             };
-            let at_rate = resampled.as_deref().unwrap_or(&stem.audio);
-            let frames =
-                crate::masking::frames(at_rate, crate::masking::Channels::Both, rate).powers;
-            deesser_key = crate::deesser::key_with_frames(at_rate, &frames, &others, input, rate);
+            let frames = crate::masking::frames_read(
+                &mut at_rate,
+                |x| x,
+                crate::masking::Channels::Both,
+                crate::masking::Measures::Powers,
+                rate,
+            )?
+            .powers;
+            let stem_mid = crate::masking::frames_read(
+                &mut at_rate,
+                |x| [crate::deesser::mid(x); 2],
+                crate::masking::Channels::Left,
+                crate::masking::Measures::Powers,
+                rate,
+            )?
+            .powers;
+            deesser_key = crate::deesser::key_with_frames(&stem_mid, &frames, &others, &mix_mid);
             role_masking.push(frames);
-            vocal_at_rate = Some(resampled);
-        } else {
-            let at_rate = at_render_rate(&stem.audio, observations.rate, rate, &mut converted)?;
-            role_masking
-                .push(crate::masking::frames(at_rate, crate::masking::Channels::Both, rate).powers);
-            others[role] = crate::deesser::sibilant_powers(at_rate, rate);
-        }
-        if role == 3 && proposals.is_none() {
-            if let Some(source_hash) = auto_source_hash {
-                auto_focus = Some(crate::auditory::propose_from_stems(
-                    &stem.audio,
-                    &sum,
-                    observations.rate,
-                    source_hash,
-                    &fingerprint(input),
-                    rate,
-                )?);
+            if refine {
+                vocal = Some(at_rate);
             }
-        }
-        for (total, frame) in sum.iter_mut().zip(&stem.audio) {
-            for channel in 0..2 {
-                total[channel] += frame[channel];
-            }
-        }
-        if let (Some(resampled), true) = (vocal_at_rate, refine) {
-            vocal = Some(resampled.unwrap_or(stem.audio));
         }
     }
     crate::progress::step("stems");
-    let reconstructed = resample::convert_owned(sum, observations.rate, rate)?;
-    let (mut evidence, reconstructed) = finish_evidence(input, observations, reconstructed, rate)?;
+    // The sum stays in scratch storage at the render rate (D246). The sum
+    // at the rate of the stems is freed after the conversion.
+    let sum = sum.ok_or("Stem evidence requires four stems")?;
+    let mut reconstructed = if observations.rate == rate {
+        sum
+    } else {
+        let mut sum = sum;
+        resample::convert_stored(&mut sum, observations.rate, rate)?
+    };
+    let mut evidence = finish_evidence(input, pcm_sha256, observations, &mut reconstructed, rate)?;
     if evidence.usable {
         evidence.auto_focus = auto_focus;
         evidence.deesser_key = deesser_key;
-        evidence.low_mid = low_mid_key(&evidence, input, &role_masking, rate);
+        evidence.low_mid = low_mid_key(&evidence, || flatness, &role_masking, rate);
     }
     drop(role_masking);
     if refine {
         crate::progress::step("focus");
+        // With `refine`, the vocal stage stored the vocal.
         evidence.refinement = Some(crate::refinement::analyze_matched(
             input,
-            if evidence.usable {
-                vocal.unwrap()
-            } else {
-                Vec::new()
-            },
+            vocal.as_mut().unwrap(),
             &evidence,
             proposals.or(evidence.auto_focus.as_ref()),
-            reconstructed,
+            &mut reconstructed,
             rate,
         )?);
     }
     Ok(evidence)
 }
 
-/// The evidence of `observations` against `input`; `input` and
-/// `reconstructed` are at the render rate `render_rate`.
+/// The receiver of the blocks of one stem. It stores the stem, and it
+/// takes the measures that read each frame once: the fingerprint, the
+/// 10 ms levels of the drums and the sum of the stems.
+struct StemReader<'a> {
+    role: usize,
+    /// The sample rate of the stem: for each stem after the first, the
+    /// rate of the first.
+    rate: Option<u32>,
+    frames: usize,
+    /// The frames of the first stem, for each stem after it.
+    limit: usize,
+    stored: scratch::Pcm,
+    hash: Fingerprint,
+    levels: Option<Levels>,
+    /// The sum of the stems before this one.
+    sum: Option<&'a mut scratch::Pcm>,
+}
+
+impl StemReader<'_> {
+    fn take(&mut self, rate: u32, block: &[Stereo]) -> Result<()> {
+        if self.role == 0 && self.rate.is_none() {
+            if !resample::RATES.contains(&rate) {
+                return Err("Stem duration or sample rate does not match the original mix".into());
+            }
+            self.rate = Some(rate);
+            self.levels = Some(Levels::new(rate));
+        }
+        if self.rate != Some(rate)
+            || block.len() > self.limit - self.frames
+            || block.iter().flatten().any(|x| !x.is_finite())
+        {
+            return Err("Stem evidence requires finite, aligned estimates at one rate".into());
+        }
+        self.hash.take(block);
+        if let Some(levels) = self.levels.as_mut() {
+            levels.take(block);
+        }
+        // The first stem is the sum: -0.0 + x is x.
+        if let Some(sum) = self.sum.as_mut() {
+            sum.add_at(self.frames, block)?;
+        }
+        self.stored.push(block)?;
+        self.frames += block.len();
+        Ok(())
+    }
+}
+
+/// The masking frames of the stem in `stem` at `stem_rate`, at the render
+/// rate `rate`, and those of its mid channel with a silent right channel:
+/// its power in both channels is the power of the mid channel
+/// (`deesser::sibilant_powers`). The stem converts to `rate` one span of
+/// frames at a time. The frames hold the band powers (D317).
+fn masking_pairs(
+    stem: &mut impl Frames,
+    stem_rate: u32,
+    rate: u32,
+) -> Result<(crate::masking::Frames, crate::masking::Frames)> {
+    use crate::masking;
+    let at_rate = resample::Windowed::new(stem.len(), stem_rate, rate)?;
+    let hops = at_rate.frames() / masking::HOP;
+    let count = crate::stft::frame_count(hops, masking::FFT, masking::HOP);
+    let mut pairs = [(); 2].map(|_| masking::Frames::with_capacity(count));
+    // Each span starts at a multiple of `stft::PAIR_RANGE`, so its frames
+    // equal those frames of the whole stem.
+    let span = crate::stft::PAIR_RANGE * crate::dsp::threads().min(8);
+    let (mut window, mut frames) = (Vec::new(), Vec::new());
+    for first in (0..hops).step_by(span) {
+        let range = first..(first + span).min(hops);
+        let reads = masking::pair_reads(range.clone());
+        let source = at_rate.source_range(reads.clone());
+        stem.read(source.start, source.len(), &mut window)?;
+        frames.clear();
+        frames.resize(reads.len(), [0.0; 2]);
+        at_rate.fill_from(&window, source.start, reads.start, &mut frames);
+        let sample = |n: usize| {
+            let frame = frames[n - reads.start];
+            [frame, [crate::deesser::mid(frame), 0.0]]
+        };
+        let powers = [masking::Measures::Powers; 2];
+        let (a, b) = masking::frame_pairs_in(range, sample, masking::Channels::Both, powers, rate);
+        pairs[0].append(a);
+        pairs[1].append(b);
+    }
+    let [a, b] = pairs;
+    Ok((a, b))
+}
+
+/// The evidence of `observations` against `input`, whose fingerprint is
+/// `source_pcm_sha256`; `input` and the sum of the stems `reconstructed`
+/// are at the render rate `render_rate`. Each is read in blocks.
 fn finish_evidence(
-    input: &[Stereo],
+    input: &mut impl Frames,
+    source_pcm_sha256: String,
     observations: Observations,
-    reconstructed: Vec<Stereo>,
+    reconstructed: &mut impl Frames,
     render_rate: u32,
-) -> Result<(Evidence, Vec<Stereo>)> {
+) -> Result<Evidence> {
     let Observations {
         rate,
         frames,
@@ -610,13 +1078,22 @@ fn finish_evidence(
         images,
     } = observations;
     let (mut xx, mut yy, mut xy, mut residual) = (0.0, 0.0, 0.0, 0.0);
-    for (a, b) in input.iter().zip(&reconstructed) {
-        for c in 0..2 {
-            let (x, y) = (a[c] as f64, b[c] as f64);
-            xx += x * x;
-            yy += y * y;
-            xy += x * y;
-            residual += (x - y).powi(2);
+    let compared = input.len().min(reconstructed.len());
+    let mut hash = Fingerprint::default();
+    let (mut block, mut sum) = (Vec::new(), Vec::new());
+    for start in (0..reconstructed.len()).step_by(BLOCK) {
+        reconstructed.read(start, BLOCK.min(reconstructed.len() - start), &mut sum)?;
+        hash.take(&sum);
+        let count = BLOCK.min(compared.saturating_sub(start));
+        input.read(start, count, &mut block)?;
+        for (a, b) in block.iter().zip(&sum[..count]) {
+            for c in 0..2 {
+                let (x, y) = (a[c] as f64, b[c] as f64);
+                xx += x * x;
+                yy += y * y;
+                xy += x * y;
+                residual += (x - y).powi(2);
+            }
         }
     }
     let residual_db = 10.0 * (residual / xx.max(1e-30)).max(1e-30).log10();
@@ -684,7 +1161,7 @@ fn finish_evidence(
         .collect();
     let usable = aligned;
     let foundation = if usable {
-        foundation::propose(&spatial, input, &reconstructed, rate, render_rate)?
+        foundation::propose(&spatial, input, reconstructed, rate, render_rate)?
     } else {
         None
     };
@@ -732,46 +1209,43 @@ fn finish_evidence(
     } else {
         None
     };
-    Ok((
-        Evidence {
-            rule: "stem-evidence.2",
-            validation_status: "engineering-hypothesis",
-            roles: ["drums", "bass", "other", "vocals"],
-            source_pcm_sha256: fingerprint(input),
-            source_frames: input.len(),
-            stem_sample_rate: rate,
-            stem_frames: frames,
-            stem_pcm_sha256: hashes,
-            reconstruction_pcm_sha256: fingerprint(&reconstructed),
-            sum_residual_relative_db: residual_db,
-            sum_source_cosine: cosine,
-            usable,
-            reason: if !aligned {
-                "Stem sum does not sufficiently match the original mix; no stem-informed processing proposed"
-            } else {
-                "Aligned estimates inform drum recovery, bass headroom and vocal-band trials on the original mix"
-            },
-            vocal_active_seconds: active_seconds,
-            role_active_seconds,
-            any_active_seconds,
-            bands,
-            vocal_transient_band,
-            bass_peak_band,
-            drum_decay_events,
-            drum_decay_p50_ms,
-            bass_body_hz,
-            limiter_release_ms,
-            drum_decay_p10_p50_p90_ms,
-            drum_interval_p50_ms,
-            refinement: None,
-            deesser_key: crate::deesser::Key::default(),
-            low_mid: None,
-            foundation,
-            stem_images: images,
-            auto_focus: None,
+    Ok(Evidence {
+        rule: "stem-evidence.2",
+        validation_status: "engineering-hypothesis",
+        roles: ["drums", "bass", "other", "vocals"],
+        source_pcm_sha256,
+        source_frames: input.len(),
+        stem_sample_rate: rate,
+        stem_frames: frames,
+        stem_pcm_sha256: hashes,
+        reconstruction_pcm_sha256: hash.finish(),
+        sum_residual_relative_db: residual_db,
+        sum_source_cosine: cosine,
+        usable,
+        reason: if !aligned {
+            "Stem sum does not sufficiently match the original mix; no stem-informed processing proposed"
+        } else {
+            "Aligned estimates inform drum recovery, bass headroom and vocal-band trials on the original mix"
         },
-        reconstructed,
-    ))
+        vocal_active_seconds: active_seconds,
+        role_active_seconds,
+        any_active_seconds,
+        bands,
+        vocal_transient_band,
+        bass_peak_band,
+        drum_decay_events,
+        drum_decay_p50_ms,
+        bass_body_hz,
+        limiter_release_ms,
+        drum_decay_p10_p50_p90_ms,
+        drum_interval_p50_ms,
+        refinement: None,
+        deesser_key: crate::deesser::Key::default(),
+        low_mid: None,
+        foundation,
+        stem_images: images,
+        auto_focus: None,
+    })
 }
 
 #[cfg(test)]
@@ -789,5 +1263,246 @@ mod fingerprint_tests {
         }
         assert_eq!(fingerprint(&audio), format!("{:x}", hash.finalize()));
         assert_eq!(fingerprint(&[]), format!("{:x}", Sha256::new().finalize()));
+    }
+}
+
+#[cfg(test)]
+mod held_mix_tests {
+    use super::*;
+
+    /// A mix of 6.3 s at 48 kHz and its four stems: a drum burst, a bass, an
+    /// other part and a vocal with a treble burst.
+    fn material() -> (Vec<Stereo>, [Vec<Stereo>; 4]) {
+        let frames = 6 * 48_000 + 12_345;
+        let stems: [Vec<Stereo>; 4] = std::array::from_fn(|role| {
+            (0..frames)
+                .map(|i| {
+                    let t = i as f64 / 48_000.0;
+                    let burst = if i % 24_000 < 1_200 { 1.0 } else { 0.0 };
+                    let sine = |hz: f64| (std::f64::consts::TAU * hz * t).sin();
+                    let x = match role {
+                        0 => 0.025 * sine(170.0) * burst,
+                        1 => 0.025 * sine(75.0),
+                        2 => 0.015 * sine(1_700.0),
+                        _ => 0.03 * sine(700.0) + 0.14 * sine(7_000.0) * burst,
+                    };
+                    [x as f32, (0.8 * x) as f32]
+                })
+                .collect()
+        });
+        let mix = (0..frames)
+            .map(|i| [0, 1].map(|c| stems.iter().map(|s| s[i][c]).sum()))
+            .collect();
+        (mix, stems)
+    }
+
+    /// The evidence of `stems` at `rates`, each in blocks of `block` frames.
+    fn in_blocks(
+        mix: Mix<'_>,
+        stems: &[Vec<Stereo>; 4],
+        block: usize,
+        rates: [u32; 4],
+    ) -> Result<Evidence> {
+        analyze_sequential_inner(
+            mix,
+            48_000,
+            &mut |role, each| {
+                let index = ["drums", "bass", "other", "vocals"]
+                    .iter()
+                    .position(|r| *r == role)
+                    .unwrap();
+                for frames in stems[index].chunks(block) {
+                    each(rates[index], frames)?;
+                }
+                Ok(())
+            },
+            None,
+            true,
+            Some(&"0".repeat(64)),
+        )
+    }
+
+    fn evidence(mix: Mix<'_>, stems: &[Vec<Stereo>; 4]) -> Evidence {
+        in_blocks(mix, stems, 10_007, [48_000; 4]).unwrap()
+    }
+
+    #[test]
+    fn a_held_mix_gives_the_evidence_of_the_whole_mix_and_returns_to_its_caller() {
+        let (mix, stems) = material();
+        let whole = evidence(Mix::Whole(&mix), &stems);
+        let mut held = mix.clone();
+        let from_scratch = evidence(Mix::Held(&mut held), &stems);
+        assert!(whole.usable && whole.refinement.is_some());
+        assert_eq!(
+            serde_json::to_value(from_scratch).unwrap(),
+            serde_json::to_value(whole).unwrap()
+        );
+        assert_eq!(fingerprint(&held), fingerprint(&mix));
+        assert_eq!(held.len(), mix.len());
+    }
+
+    /// A mix in scratch storage gives the evidence of the mix in memory, and
+    /// a stored mix with a non-finite sample gives an error (D250).
+    #[test]
+    fn a_stored_mix_gives_the_evidence_of_the_whole_mix() {
+        let (mut mix, stems) = material();
+        let whole = serde_json::to_value(evidence(Mix::Whole(&mix), &stems)).unwrap();
+        let mut stored = scratch::Pcm::temporary_of(&mix).unwrap();
+        let from_storage = evidence(Mix::Stored(&mut stored), &stems);
+        assert_eq!(serde_json::to_value(from_storage).unwrap(), whole);
+        mix[70_001][0] = f32::NAN;
+        let mut stored = scratch::Pcm::temporary_of(&mix).unwrap();
+        assert!(in_blocks(Mix::Stored(&mut stored), &stems, 10_007, [48_000; 4]).is_err());
+    }
+
+    /// A stem gives one evidence in blocks of any length, and a stem with
+    /// another rate, another length or a non-finite sample gives an error
+    /// (D245).
+    #[test]
+    fn stems_in_blocks_of_any_length_give_one_evidence() {
+        let (mix, stems) = material();
+        // The evidence and its automatic focus, which the evidence does not
+        // serialize.
+        let json = |evidence: Evidence| {
+            let focus = serde_json::to_value(&evidence.auto_focus).unwrap();
+            (serde_json::to_value(evidence).unwrap(), focus)
+        };
+        let whole = json(in_blocks(Mix::Whole(&mix), &stems, usize::MAX, [48_000; 4]).unwrap());
+        assert!(whole.0["usable"].as_bool().unwrap() && !whole.1.is_null());
+        assert!(!whole.0["refinement"].is_null());
+        for block in [1_024, 65_536] {
+            let evidence = in_blocks(Mix::Whole(&mix), &stems, block, [48_000; 4]).unwrap();
+            assert_eq!(json(evidence), whole, "{block}");
+        }
+        let changes: [fn(&mut [Vec<Stereo>; 4]); 4] = [
+            |stems| stems[2].push([0.0; 2]),
+            |stems| stems[1].truncate(stems[1].len() - 1),
+            |stems| stems[0].truncate(1),
+            |stems| stems[3][12_345][1] = f32::NAN,
+        ];
+        for change in changes {
+            let mut changed = stems.clone();
+            change(&mut changed);
+            assert!(in_blocks(Mix::Whole(&mix), &changed, 10_007, [48_000; 4]).is_err());
+        }
+        let rates = [48_000, 48_000, 44_100, 48_000];
+        assert!(in_blocks(Mix::Whole(&mix), &stems, 10_007, rates).is_err());
+        assert!(in_blocks(Mix::Whole(&mix), &stems, 10_007, [44_000; 4]).is_err());
+    }
+
+    #[test]
+    fn the_automatic_focus_and_the_reconstruction_use_the_sum_from_scratch() {
+        let (mut mix, stems) = material();
+        let sum_of = |roles: std::ops::Range<usize>| -> Vec<Stereo> {
+            (0..mix.len())
+                .map(|i| {
+                    [0, 1].map(|c| {
+                        roles
+                            .clone()
+                            .fold(-0.0, |sum, role| sum + stems[role][i][c])
+                    })
+                })
+                .collect()
+        };
+        let (accompaniment, reconstruction) = (sum_of(0..3), sum_of(0..4));
+        let source = fingerprint(&mix);
+        let expected = crate::auditory::propose_from_stems(
+            &stems[3],
+            &accompaniment,
+            48_000,
+            &"0".repeat(64),
+            &source,
+            48_000,
+        )
+        .unwrap();
+        let evidence = evidence(Mix::Held(&mut mix), &stems);
+        assert!(evidence.usable);
+        assert_eq!(
+            evidence.reconstruction_pcm_sha256,
+            fingerprint(&reconstruction)
+        );
+        assert_eq!(
+            serde_json::to_value(evidence.auto_focus).unwrap(),
+            serde_json::to_value(Some(expected)).unwrap()
+        );
+    }
+}
+
+#[cfg(test)]
+mod stored_stem_tests {
+    use super::*;
+
+    fn stem(frames: usize) -> Vec<Stereo> {
+        let mut state = 0x2545_f491u32;
+        (0..frames)
+            .map(|i| {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                let noise = state as f32 / u32::MAX as f32 - 0.5;
+                let t = i as f32 / 44_100.0;
+                [0.3 * (t * 2_100.0).sin() + 0.05 * noise, 0.2 * noise]
+            })
+            .collect()
+    }
+
+    fn bits(audio: &[Stereo]) -> Vec<u32> {
+        audio.iter().flatten().map(|x| x.to_bits()).collect()
+    }
+
+    /// A stored stem converts in spans to the frames of `resample::convert`
+    /// (D245).
+    #[test]
+    fn a_stored_stem_converts_in_spans_to_the_frames_of_convert() {
+        let audio = stem(3 * resample::CONVERT_SPAN / 2 + 1_234);
+        for (from, to) in [(44_100, 48_000), (48_000, 44_100), (96_000, 48_000)] {
+            let mut stored = scratch::Pcm::temporary_of(&audio).unwrap();
+            let mut at_rate = resample::convert_stored(&mut stored, from, to).unwrap();
+            let mut read = Vec::new();
+            at_rate.read(0, at_rate.len(), &mut read).unwrap();
+            assert_eq!(
+                bits(&read),
+                bits(&resample::convert(&audio, from, to).unwrap())
+            );
+        }
+    }
+
+    /// The masking frames of a stored stem, converted in spans, equal the
+    /// frames of the stem converted as a whole (D245). The stem fills
+    /// several spans of eight threads.
+    #[test]
+    fn the_masking_frames_of_a_stored_stem_equal_those_of_the_whole_stem() {
+        use crate::masking;
+        let audio = stem(2_200_000);
+        let (from, to) = (44_100, 48_000);
+        let at_rate = resample::Converted::new(&audio, from, to).unwrap();
+        let (frames, mid) = masking::frame_pairs_read_of(
+            at_rate.frames(),
+            |start, pairs| {
+                let mut frames = [[0.0f32; 2]; masking::HOP];
+                let frames = &mut frames[..pairs.len()];
+                at_rate.fill_from(start, frames);
+                for (pair, &frame) in pairs.iter_mut().zip(&*frames) {
+                    *pair = [frame, [crate::deesser::mid(frame), 0.0]];
+                }
+            },
+            masking::Channels::Both,
+            [masking::Measures::Powers; 2],
+            to,
+        );
+        let mut stored = scratch::Pcm::temporary_of(&audio).unwrap();
+        let (read, read_mid) = masking_pairs(&mut stored, from, to).unwrap();
+        let powers = |frames: &masking::Frames| -> Vec<u64> {
+            frames
+                .powers
+                .iter()
+                .flatten()
+                .chain(&frames.flatness_db)
+                .map(|x| x.to_bits())
+                .collect()
+        };
+        assert!(frames.powers.len() > crate::stft::PAIR_RANGE * crate::dsp::threads().min(8));
+        assert_eq!(powers(&read), powers(&frames));
+        assert_eq!(powers(&read_mid), powers(&mid));
     }
 }

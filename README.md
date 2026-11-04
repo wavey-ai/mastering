@@ -126,12 +126,12 @@ The build writes the command-line tool to `target/release/master`.
 ```text
 master set INPUT.wav NEW_OUTPUT_DIRECTORY [--format pcm24|pcm16|float32]
   [--stems DIRECTORY] [--auditory-analysis ANALYSIS.json]
-  [--album-lufs N] [--deesser true|false]
+  [--album-lufs N] [--album-regions JSON] [--deesser true|false]
 master set-plan INPUT.wav NEW_PLAN.json [--stems DIRECTORY]
   [--auditory-analysis ANALYSIS.json]
 master render-family INPUT.wav PLAN.json FAMILY_ID NEW_OUTPUT_DIRECTORY
 master adjust INPUT.wav PLAN.json VERSIONS.json PARENT_ID NEW_OUTPUT_DIRECTORY
-  [--id ID] [--preset streaming|club|radio|mono|mono-safe]
+  [--id ID] [--preset streaming|radio|mono|mono-safe]
   [--bass N] [--presence N] [--air N] [--sibilance N] [--loudness N]
   [--width N] [--compression N] [--ceiling -N]
 master inspect INPUT.wav
@@ -191,8 +191,9 @@ Four aligned stems enable these stages:
 - Local auditory focus proposals and source refinement.
 
 Refinement measures the focus strength with the candidate filters. It
-derives the recovery timing from the drums and the bass. It eases the focus
-through passages that the measurements do not support. All output processing
+derives the recovery timing from the drums and the bass. It sets the gain
+of each focus bell from the passages where the vocal is under the
+accompaniment. All output processing
 uses the original stereo mix. When a measurement is unreliable, the stage
 keeps its default setting and reports the reason.
 
@@ -227,7 +228,7 @@ interruption, the partial results stay in the directory. A `failed` event in
 default. PCM16 and float32 are also available. Integer export receives
 final-stage TPDF dither.
 
-The reports include the strength probes, the passage controls and the timing
+The reports include the strength probes, the passage shares and the timing
 basis. Each progress event except `failed` gives the elapsed time
 (`elapsed_seconds`). Each delivery records the
 render, measurement and comparison time, and the WAV write and verification
@@ -240,7 +241,7 @@ A set has up to four versions, with the IDs `essential`, `master`, `bold` and
 and downloads.
 
 - `essential` keeps the tone and the stereo image of the mix.
-- `master` adds the tonal moves of the recording, the strongest stem focus
+- `master` adds the tone of its character, the strongest stem focus
   proposal, the de-esser, the low-mid correction from the stems, and the
   widening.
 - `bold` keeps the corrections of `master` and adds more presence, treble and
@@ -250,11 +251,9 @@ and downloads.
 
 ### `master`
 
-The tonal moves of `master` are these:
-
-- Equal-loudness compensation at the normalized playback level.
-- Presence balance, with a presence move of at most 0.94 dB.
-- The masking deficit of the lead role, from aligned stems.
+The tone of `master` comes from its character ("Names and character"). The
+masking deficit of the lead role, from aligned stems, sets the largest cut of
+the low-mid correction.
 
 The de-esser (`set.deesser.v4`) cuts only when the de-esser switch is on. The
 widening of the band from 120 to 500 Hz goes toward a fixed target within
@@ -317,13 +316,15 @@ as a diagnostic.
 ### Names and character
 
 After the last version, each delivered version gets a name and a description
-from its measured sound (`set.version-names.v1`). For example, the bass
+from its measured sound (`set.version-names.v2`). For example, the bass
 version is named Full. The names describe the measured changes in that
 recording, such as "More centre body" or "Broader low mids".
 
-Each version has a character (`set.version-character.v1`). The character is
+Each version has a character (`set.version-character.v3`). The character is
 a move of the low mids, the presence, the air, the sub and the bass, and a
-width for each of six bands.
+width for each of six bands. In album mode, each track takes the moves of
+the mean regions of the album mixes, within the bounds of its own mix, and
+keeps the air against presence of its own mix.
 
 ### Loudness
 
@@ -336,6 +337,10 @@ which these two conditions are true:
 
 `--album-lufs N` gives the target of the track in its album, in LUFS. Each
 version of the track sits at or under this target (`album.levels.v2`).
+`--album-regions JSON` gives the mean regions of the album mixes, for
+example `{"low_mid_db":2.2,"presence_db":-5.5,"air_db":-5.9,"sub_db":1.3,"bass_db":4.2}`.
+Each version of the track then takes the moves of the album mean, within
+the bounds of its own mix.
 
 ### De-esser
 
@@ -378,10 +383,7 @@ The engine aligns a source with an anti-phase band before every other stage.
 Each channel turns by half the measured phase where the phase is consistent
 and beyond 90°.
 
-The engine proposes a tonal move only when its gate band holds material
-energy.
 A captured recording is mono, has a codec low-pass or has an anti-phase band.
-A captured recording takes no equal-loudness move.
 
 A device capture is a captured recording that meets one of these conditions
 (`SourceCondition::device_capture`):
@@ -390,9 +392,9 @@ A device capture is a captured recording that meets one of these conditions
 - It has an anti-phase band.
 - It has a codec low-pass and arrives at −24 LUFS or less without a limiter.
 
-The `master` version of a device capture moves presence against body up to a
-fixed bound. Low shelves move its low band into a fixed range. An MP3 or AAC
-copy of a studio mix keeps the bounds of a mix.
+The `bold` version of a device capture steps its presence within a larger
+bound than that of a mix. An MP3 or AAC copy of a studio mix keeps the bounds
+of a mix.
 
 ## Audition page
 
@@ -420,6 +422,13 @@ target/release/master adjust mix.wav plan.json build/master/family.json \
 `--id ID` sets the ID of the new version. The default ID is
 `PARENT_ID-adjusted`.
 
+The reference of a request is the render that the Essential version of the
+set chose. The base of a set keeps its reference record
+(`adjust::Base::record`). The family result of `essential` gives the record
+in `reference_record`, and the manifest and `set.json` give it in
+`adjust.record`. `adjust` takes the record from the versions record. With
+no record, `adjust` renders the `essential` spec.
+
 ### Steps
 
 | Control | Steps | Step size |
@@ -427,15 +436,16 @@ target/release/master adjust mix.wav plan.json build/master/family.json \
 | `--bass`, `--presence`, `--air`, `--width` | −4 to +4 | 0.5 dB |
 | `--sibilance` | −4 to +4 | 0.5 dB |
 | `--loudness` | −4 to +4 | 0.5 LU |
-| `--compression` | −4 to +4 | 1 dB of compressor threshold |
+| `--compression` | −4 to +4 | 0.5 dB of mean compressor reduction |
 | `--ceiling` | 0 to −3 | 0.5 dB down from −0.5 dBTP |
 
 A Sibilance step moves from the de-esser cut of the render of the parent. A
 step down lowers the threshold to at most 12 dB under the reference excess.
 A step down also raises the largest cut to at most 12 dB. A step up lowers
 the cut to a minimum of 0 dB. On a version without a de-esser cut, Sibilance
-takes the steps down only. With a Compression step, the section make-up
-keeps the level of each section.
+takes the steps down only. A Compression step moves the threshold by the
+shift that the level distribution of the parent's compressor gives for the
+step. The section make-up keeps the level of each section.
 
 ### Presets
 
@@ -443,9 +453,6 @@ keeps the level of each section.
 (`range.presets`):
 
 - `streaming`: −14 LUFS for a louder version, and a ceiling of −1 dBTP.
-- `club`: the audibility point of the set at −1 dBTP less 0.5 LU, and a
-  ceiling of −1 dBTP. Each candidate stays at or under the audibility point
-  of its own prefix.
 - `radio`: −23 LUFS, a ceiling of −1 dBTP and the fold of `mono`.
 - `mono`: the fold. Each band that the version widens takes back the side/mid
   of the mix. Its mid takes the power of the added side.
@@ -463,7 +470,8 @@ render, `adjust.plan.json` and `adjust.json` (`mastering.adjust-result.2`).
 - The measured change against the parent at matched loudness, for each
   control.
 - `duplicate_of`, when the version sounds the same as the mix or another
-  version. The engine does not deliver a duplicate.
+  version. The engine does not deliver a duplicate. A change of 0.41 dB or
+  more in a requested control makes the version distinct.
 - The reason `outside-range`, when no share of the request is in the range
   of the version (`adjust::range`). The engine renders nothing.
 - `medium`, for a medium preset: the delivered level, ceiling and true peak,
@@ -474,6 +482,7 @@ render, `adjust.plan.json` and `adjust.json` (`mastering.adjust-result.2`).
   result.
 - `version`: the version record (`mastering.web-set-version.1`) with its
   name, description, `signature`, `measures` and `adjusted` fields.
+- `work`: the prepared prefixes and the probes of the family of the request.
 
 A version of a family result has no stored facts. `adjust` measures them
 from the WAV of the version beside `family.json`.
@@ -483,8 +492,16 @@ the shelves of its parent, including the sub lift, and renders no sub lift.
 
 ## Plan and report contract
 
-The worker plan (`mastering.worker-plan.8`) and the set manifest
-(`mastering.distributed-set.4`) keep the render rate of the set
+The worker plan (`mastering.worker-plan.9`) and the set manifest
+(`mastering.distributed-set.5`) hold each distinct value of the
+`deesser`, `low_mid` and `focus_envelopes` fields of their specs once,
+in `shared`. Each spec holds `{"shared": index}` in place of the value.
+A family decodes each spec of its plan with the values of `shared` in
+place. An ADJUST request puts the values back in the version records that
+it reads, and the other readers put the values back in each spec.
+
+The worker plan and the set manifest
+(`mastering.distributed-set.5`) keep the render rate of the set
 (`sample_rate`). They also keep the planner facts of a request
 (`adjust::Facts`):
 

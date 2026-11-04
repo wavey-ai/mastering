@@ -5,7 +5,7 @@ use crate::{
 };
 use serde::Serialize;
 use serde_json::json;
-use std::{cell::RefCell, rc::Rc, sync::Arc};
+use std::sync::{Arc, Mutex};
 
 #[derive(Clone, Serialize)]
 pub struct Spec {
@@ -117,12 +117,112 @@ pub struct DynamicReport {
     pub stats: finishing::BandStats,
 }
 
+/// The frames of a render: in memory, or in a scratch file from its peak
+/// control to its delivery for a long recording (D253). A clone shares the
+/// frames; the threads of a set share them (`set::render`).
+#[derive(Clone, Default)]
+pub struct RenderAudio(Kept);
+
+#[derive(Clone, Default)]
+enum Kept {
+    /// No frames: a report whose frames are freed.
+    #[default]
+    Empty,
+    Held(Arc<Vec<Stereo>>),
+    Stored(Arc<Mutex<crate::scratch::Pcm>>),
+}
+
+impl RenderAudio {
+    /// The frames `audio` in memory.
+    pub fn held(audio: Vec<Stereo>) -> Self {
+        Self(Kept::Held(Arc::new(audio)))
+    }
+
+    /// The frames of `pcm`, a scratch file.
+    fn stored(pcm: Arc<Mutex<crate::scratch::Pcm>>) -> Self {
+        Self(Kept::Stored(pcm))
+    }
+
+    pub fn len(&self) -> usize {
+        use crate::scratch::Frames;
+        match &self.0 {
+            Kept::Empty => 0,
+            Kept::Held(audio) => audio.len(),
+            Kept::Stored(pcm) => lock(pcm).len(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// The frames in memory; `None` for a stored render.
+    pub fn in_memory(&self) -> Option<&[Stereo]> {
+        match &self.0 {
+            Kept::Empty => Some(&[]),
+            Kept::Held(audio) => Some(audio),
+            Kept::Stored(_) => None,
+        }
+    }
+
+    /// The frames are in a scratch file.
+    pub fn is_stored(&self) -> bool {
+        matches!(self.0, Kept::Stored(_))
+    }
+
+    /// The frames in memory. A stored render is read from its file.
+    pub fn load(&self) -> Result<Arc<Vec<Stereo>>> {
+        use crate::scratch::Frames;
+        match &self.0 {
+            Kept::Empty => Ok(Arc::default()),
+            Kept::Held(audio) => Ok(audio.clone()),
+            Kept::Stored(pcm) => {
+                let mut pcm = lock(pcm);
+                let (frames, mut audio) = (pcm.len(), Vec::new());
+                pcm.read(0, frames, &mut audio)?;
+                Ok(Arc::new(audio))
+            }
+        }
+    }
+
+    /// A reader of the frames.
+    pub(crate) fn frames(&self) -> RenderFrames<'_> {
+        use crate::scratch::{Place, Slice};
+        match &self.0 {
+            Kept::Empty => Place::Memory(Slice(&[])),
+            Kept::Held(audio) => Place::Memory(Slice(audio)),
+            Kept::Stored(pcm) => Place::File(lock(pcm)),
+        }
+    }
+}
+
+/// A scratch file of a render. A reader that fails leaves the file
+/// unchanged, so a poisoned lock keeps its frames.
+fn lock(pcm: &Mutex<crate::scratch::Pcm>) -> std::sync::MutexGuard<'_, crate::scratch::Pcm> {
+    pcm.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+impl PartialEq for RenderAudio {
+    fn eq(&self, other: &Self) -> bool {
+        matches!((self.load(), other.load()), (Ok(a), Ok(b)) if a == b)
+    }
+}
+
+impl std::fmt::Debug for RenderAudio {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "RenderAudio({} frames)", self.len())
+    }
+}
+
+/// The frames of a `RenderAudio`.
+pub(crate) type RenderFrames<'a> =
+    crate::scratch::Place<'a, std::sync::MutexGuard<'a, crate::scratch::Pcm>>;
+
 #[derive(Clone, Serialize)]
 pub struct Rendered {
-    /// The rendered audio, shared between the threads of a set
-    /// (`set::render`).
     #[serde(skip)]
-    pub audio: Arc<Vec<Stereo>>,
+    pub audio: RenderAudio,
     pub lufs: f64,
     pub peak_estimate_dbtp: f64,
     /// The true-peak correction after the decimation.
@@ -146,6 +246,78 @@ pub struct Rendered {
     /// loss that the compressor and peak control cause. The loss against the
     /// mix (`analysis::compare`) also counts the tone of the version (D164).
     pub energy_attack_loss_p90_db: Option<f64>,
+    /// The drive response of the delivered render of a version, which its
+    /// family measures once (D281).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub drive_response: Option<DriveResponse>,
+}
+
+/// The change of the output loudness of peak control of the prefix of a
+/// render from a drive change of `shift_db` up and down and of `far_db` up,
+/// and the loudness that peak control takes at the drive of the render
+/// (D281, D283). A preview solves the drive of a new target from it, the
+/// change of each section of the low-end hold (D282) and the restoring
+/// gains (D284).
+#[derive(Clone, Debug, Serialize)]
+pub struct DriveResponse {
+    pub rule: &'static str,
+    pub shift_db: f64,
+    /// Loudness change at the drive `shift_db` up, in LU.
+    pub up_lu: f64,
+    /// Loudness change at the drive `shift_db` down, in LU.
+    pub down_lu: f64,
+    pub far_db: f64,
+    /// Loudness change at the drive `far_db` up, in LU.
+    pub far_lu: f64,
+    /// The loudness of the prefix with the drive and the true-peak trim,
+    /// less the output loudness, in LU.
+    pub loss_lu: f64,
+    /// The change of each held band in each section of the hold
+    /// (`low_end::sections`) against the output loudness, at the drive
+    /// `shift_db` down, in dB.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub sections_down_db: Vec<[f64; 2]>,
+    /// The same change at the drive `shift_db` up.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub sections_up_db: Vec<[f64; 2]>,
+    /// The same change without peak control: the prefix against the render.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub sections_free_db: Vec<[f64; 2]>,
+    /// The same change at the drive `far_db` up.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub sections_far_db: Vec<[f64; 2]>,
+    /// The local band change of the restoration (`local_change`) at the
+    /// drive `shift_db` down, less the local band change at the drive, in
+    /// dB (D284).
+    pub local_down_db: [f64; 6],
+    /// The same change at the drive `shift_db` up.
+    pub local_up_db: [f64; 6],
+    /// The same change at the drive `far_db` up.
+    pub local_far_db: [f64; 6],
+    /// The same change without peak control.
+    pub local_free_db: [f64; 6],
+    /// Gain of the restoring filter of 20–120 Hz of the shelf model: peak
+    /// control at the drive of the prefix with that filter, in dB.
+    pub shelf_db: f64,
+    /// Loudness change of the shelf model, in LU.
+    pub shelf_lu: f64,
+    /// The local band change of the shelf model, less the local band change
+    /// at the drive, in dB.
+    pub shelf_local_db: [f64; 6],
+    /// The change of each held band in each section of the shelf model, as
+    /// `sections_down_db`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub sections_shelf_db: Vec<[f64; 2]>,
+    /// The loudness that the restoring filter of the shelf model adds to
+    /// the prefix without peak control, in LU (D287).
+    pub shelf_free_lu: f64,
+    /// The local band change of the shelf model without peak control, less
+    /// the local band change at the drive, in dB (D287).
+    pub shelf_free_local_db: [f64; 6],
+    /// The change of each held band in each section of the shelf model
+    /// without peak control, as `sections_down_db` (D287).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub sections_shelf_free_db: Vec<[f64; 2]>,
 }
 
 /// A render meets its loudness target within this distance, in LU.
@@ -190,6 +362,9 @@ pub struct Restoration {
     /// dB: the change of the compressor and of peak control that the
     /// starting gains (`Spec::restoration_db`) leave.
     pub measured_change_db: [f64; 6],
+    /// Gains of the restoring filters of the first render, whose change is
+    /// `measured_change_db` (D285).
+    pub measured_gains_db: [f64; 6],
     pub filters: Vec<dsp::EqBand>,
     /// Change from the prefix to the delivered output after restoration.
     pub delivered_change_db: [f64; 6],
@@ -197,6 +372,116 @@ pub struct Restoration {
     pub renders: usize,
     /// Gains of the restoring filters of the delivered render, per band.
     pub gains_db: [f64; 6],
+}
+
+/// Transform of the window bands: a quarter of a restoration window.
+pub(crate) const WINDOW_FFT: usize = RESTORATION_WINDOW / 4;
+
+/// The band powers and the K-weighted power of blocks of `WINDOW_FFT`
+/// frames, as `WindowScan` adds them to its windows.
+pub(crate) struct BlockScan {
+    /// The band and the K-weighting power of each bin.
+    bins: Vec<(Option<usize>, f64)>,
+    stft: crate::stft::StereoStft,
+}
+
+impl BlockScan {
+    pub(crate) fn new(rate: u32) -> Self {
+        let edges = crate::stereo::BAND_EDGES_HZ;
+        let bins = (0..=WINDOW_FFT / 2)
+            .map(|bin| {
+                let hz = bin as f64 * rate as f64 / WINDOW_FFT as f64;
+                (
+                    edges.windows(2).position(|e| hz >= e[0] && hz < e[1]),
+                    dsp::k_weighting_power(hz, rate),
+                )
+            })
+            .collect();
+        Self {
+            bins,
+            stft: crate::stft::StereoStft::new(WINDOW_FFT, WINDOW_FFT),
+        }
+    }
+
+    /// Add the power of each band of `block`, `WINDOW_FFT` frames, to
+    /// `power`, its K-weighted power to `level`, and the K-weighted power of
+    /// each band to `weighted`.
+    pub(crate) fn add(
+        &mut self,
+        block: &[Stereo],
+        power: &mut [f64; 6],
+        level: &mut f64,
+        weighted: &mut [f64; 6],
+    ) {
+        if let Some((l, r)) = self.stft.add_with(WINDOW_FFT, |i| block[i]) {
+            for (bin, (band, weight)) in self.bins.iter().enumerate() {
+                let p = l[bin].norm_sqr() + r[bin].norm_sqr();
+                *level += p * weight;
+                if let Some(i) = band {
+                    power[*i] += p;
+                    weighted[*i] += p * weight;
+                }
+            }
+        }
+    }
+}
+
+/// `WindowBands::measure` of a signal of a known length whose frames arrive
+/// in spans.
+pub(crate) struct WindowScan {
+    scan: BlockScan,
+    /// The frames of the block in progress.
+    block: Vec<Stereo>,
+    /// The index of the next block, and the blocks of the complete windows.
+    index: usize,
+    blocks: usize,
+    bands: WindowBands,
+}
+
+impl WindowScan {
+    /// The scan of a signal of `frames` frames at `rate`.
+    pub(crate) fn new(frames: usize, rate: u32) -> Self {
+        let windows = frames / RESTORATION_WINDOW;
+        Self {
+            scan: BlockScan::new(rate),
+            block: Vec::with_capacity(WINDOW_FFT),
+            index: 0,
+            blocks: windows * 4,
+            bands: WindowBands {
+                bands: vec![[0.0; 6]; windows],
+                weighted: vec![0.0; windows],
+                weighted_bands: [0.0; 6],
+            },
+        }
+    }
+
+    /// Add the next frames of the signal.
+    pub(crate) fn push(&mut self, mut audio: &[Stereo]) {
+        while self.index < self.blocks && !audio.is_empty() {
+            let take = (WINDOW_FFT - self.block.len()).min(audio.len());
+            self.block.extend_from_slice(&audio[..take]);
+            audio = &audio[take..];
+            if self.block.len() == WINDOW_FFT {
+                self.add_block();
+            }
+        }
+    }
+
+    fn add_block(&mut self) {
+        let (index, bands) = (self.index, &mut self.bands);
+        self.scan.add(
+            &self.block,
+            &mut bands.bands[index / 4],
+            &mut bands.weighted[index / 4],
+            &mut bands.weighted_bands,
+        );
+        self.block.clear();
+        self.index += 1;
+    }
+
+    pub(crate) fn finish(self) -> WindowBands {
+        self.bands
+    }
 }
 
 /// Power per `stereo::BAND_EDGES_HZ` band and K-weighted energy in each
@@ -214,46 +499,22 @@ pub struct WindowBands {
 impl WindowBands {
     /// The window bands of `audio` at `rate`.
     pub fn measure(audio: &[Stereo], rate: u32) -> Self {
-        const FFT: usize = RESTORATION_WINDOW / 4;
-        let edges = crate::stereo::BAND_EDGES_HZ;
-        let bins: Vec<(Option<usize>, f64)> = (0..=FFT / 2)
-            .map(|bin| {
-                let hz = bin as f64 * rate as f64 / FFT as f64;
-                (
-                    edges.windows(2).position(|e| hz >= e[0] && hz < e[1]),
-                    dsp::k_weighting_power(hz, rate),
-                )
-            })
-            .collect();
-        let mut stft = crate::stft::StereoStft::new(FFT, FFT);
-        let windows = audio.len() / RESTORATION_WINDOW;
-        let mut bands = vec![[0.0; 6]; windows];
-        let mut weighted = vec![0.0; windows];
-        let mut weighted_bands = [0.0; 6];
-        for (index, block) in audio
-            .as_chunks::<FFT>()
-            .0
-            .iter()
-            .take(windows * 4)
-            .enumerate()
-        {
-            if let Some((l, r)) = stft.add_with(FFT, |i| block[i]) {
-                let (power, level) = (&mut bands[index / 4], &mut weighted[index / 4]);
-                for (bin, (band, weight)) in bins.iter().enumerate() {
-                    let p = l[bin].norm_sqr() + r[bin].norm_sqr();
-                    *level += p * weight;
-                    if let Some(i) = band {
-                        power[*i] += p;
-                        weighted_bands[*i] += p * weight;
-                    }
-                }
-            }
+        let mut scan = WindowScan::new(audio.len(), rate);
+        scan.push(audio);
+        scan.finish()
+    }
+
+    /// `measure` of the frames of `audio`, read in blocks of 65,536 frames:
+    /// a stored render (D253).
+    pub(crate) fn measure_read(audio: &mut impl crate::scratch::Frames, rate: u32) -> Result<Self> {
+        const BLOCK: usize = 65_536;
+        let frames = audio.len();
+        let mut scan = WindowScan::new(frames, rate);
+        let mut buffer = Vec::new();
+        for start in (0..frames).step_by(BLOCK) {
+            scan.push(audio.window(start, BLOCK.min(frames - start), &mut buffer)?);
         }
-        Self {
-            bands,
-            weighted,
-            weighted_bands,
-        }
+        Ok(scan.finish())
     }
 
     /// Band power summed over the windows.
@@ -322,7 +583,7 @@ pub fn local_change(before: &WindowBands, after: &WindowBands) -> [f64; 6] {
 
 /// One broad filter per band: shelves at the outer edges, bells at the
 /// geometric centres with a bandwidth near the band's width.
-fn restoring_filter(band: usize, gain_db: f64) -> dsp::EqBand {
+pub(crate) fn restoring_filter(band: usize, gain_db: f64) -> dsp::EqBand {
     let (kind, hz, q) = match band {
         0 => (dsp::Kind::LowShelf, 120.0, std::f64::consts::FRAC_1_SQRT_2),
         1 => (dsp::Kind::Peak, 245.0, 0.67),
@@ -382,25 +643,11 @@ pub fn next_gains(r: &Restoration, rate: u32) -> Option<[f64; 6]> {
 /// Gain of the restoring filter of each band (`restoring_filters`) at
 /// `rate`; 0 for a band that is not material.
 fn restoring_gains(change: &[f64; 6], material: &[bool; 6], rate: u32) -> [f64; 6] {
-    let edges = crate::stereo::BAND_EDGES_HZ;
     let used: Vec<usize> = (0..6).filter(|&i| material[i]).collect();
     let mut gains = [0.0f64; 6];
     if used.iter().all(|&i| restoration_target(change[i]) == 0.0) {
         return gains;
     }
-    let mean_response = |filter: &dsp::EqBand, band: usize| -> f64 {
-        let (low, high) = (edges[band].log2(), edges[band + 1].min(18000.0).log2());
-        let biquad = filter.filter(rate);
-        (0..32)
-            .map(|k| {
-                biquad.response_db(
-                    2f64.powf(low + (high - low) * (k as f64 + 0.5) / 32.0),
-                    rate,
-                )
-            })
-            .sum::<f64>()
-            / 32.0
-    };
     // Responses per dB of gain are nearly linear at these gains; solve the
     // square system over the material bands by Gaussian elimination.
     let n = used.len();
@@ -409,7 +656,7 @@ fn restoring_gains(change: &[f64; 6], material: &[bool; 6], rate: u32) -> [f64; 
         .map(|&band| {
             let mut row: Vec<f64> = used
                 .iter()
-                .map(|&f| mean_response(&restoring_filter(f, 1.0), band))
+                .map(|&f| restoring_response_db(f, band, rate))
                 .collect();
             row.push(restoration_target(change[band]));
             row
@@ -439,6 +686,23 @@ fn restoring_gains(change: &[f64; 6], material: &[bool; 6], rate: u32) -> [f64; 
     gains
 }
 
+/// The mean log-frequency response at `rate` of the restoring filter of
+/// band `filter` at 1 dB in band `band`, in dB.
+pub(crate) fn restoring_response_db(filter: usize, band: usize, rate: u32) -> f64 {
+    let edges = crate::stereo::BAND_EDGES_HZ;
+    let (low, high) = (edges[band].log2(), edges[band + 1].min(18000.0).log2());
+    let biquad = restoring_filter(filter, 1.0).filter(rate);
+    (0..32)
+        .map(|k| {
+            biquad.response_db(
+                2f64.powf(low + (high - low) * (k as f64 + 0.5) / 32.0),
+                rate,
+            )
+        })
+        .sum::<f64>()
+        / 32.0
+}
+
 #[derive(Default, Clone, Serialize)]
 pub struct Work {
     pub prepared_prefixes: usize,
@@ -461,10 +725,12 @@ impl Work {
 
 struct Prepared {
     key: String,
-    up: crate::scratch::Pcm,
+    /// The 4x prefix. A prefix of a long recording keeps none, and its 4x
+    /// frames come from `shaped` (`render_blocks::upsampled_min_frames`).
+    up: Option<crate::scratch::Pcm>,
     /// The processed prefix at the base rate (`Renderer::prefix`), for the
     /// audibility check of a candidate (`selection::ladder`).
-    shaped: crate::scratch::Pcm,
+    shaped: std::cell::RefCell<crate::scratch::Pcm>,
     finishing: Option<finishing::Stats>,
     dynamic_after_eq: Vec<DynamicReport>,
     compressor: Option<compressor::Stats>,
@@ -477,6 +743,26 @@ struct Prepared {
     tone_temporal: Option<crate::analysis::Temporal>,
     probes: Vec<([u64; 9], Stored)>,
     probe_bytes: usize,
+}
+
+impl Prepared {
+    /// The prefix at the base rate and its 4x frames at `rate`.
+    fn frames(
+        &mut self,
+        rate: u32,
+    ) -> (
+        &std::cell::RefCell<crate::scratch::Pcm>,
+        render_blocks::Up<'_, crate::scratch::Shared<'_>>,
+    ) {
+        let up = match &mut self.up {
+            Some(up) => render_blocks::Up::Stored(up),
+            None => render_blocks::Up::Upsampled(Box::new(render_blocks::Upsampled::new(
+                crate::scratch::Shared(&self.shaped),
+                rate,
+            ))),
+        };
+        (&self.shaped, up)
+    }
 }
 
 /// The key of the prepared prefix of `spec`: each field of the spec that
@@ -505,12 +791,20 @@ struct Shaped {
 #[derive(Clone)]
 struct Stored {
     report: Rendered,
-    pcm: Rc<RefCell<crate::scratch::Pcm>>,
+    pcm: Arc<Mutex<crate::scratch::Pcm>>,
 }
 impl Stored {
-    fn load(self) -> Result<Rendered> {
+    /// The render with its frames in memory, or in its scratch file with
+    /// `stored` (D253).
+    fn load(self, stored: bool) -> Result<Rendered> {
         use crate::scratch::Frames;
-        let mut pcm = self.pcm.borrow_mut();
+        if stored {
+            return Ok(Rendered {
+                audio: RenderAudio::stored(self.pcm),
+                ..self.report
+            });
+        }
+        let mut pcm = lock(&self.pcm);
         let frames = pcm.len();
         let mut audio = Vec::with_capacity(frames);
         let mut block = Vec::new();
@@ -519,30 +813,105 @@ impl Stored {
             audio.extend_from_slice(&block);
         }
         Ok(Rendered {
-            audio: Arc::new(audio),
+            audio: RenderAudio::held(audio),
             ..self.report
         })
     }
 }
 
+/// The PCM of a source at its render rate, for a renderer.
+pub enum RenderSource<'a> {
+    /// Frames that the caller keeps.
+    Borrowed(&'a [Stereo]),
+    /// Frames that the renderer moves to a scratch file and frees (D232).
+    Owned(Vec<Stereo>),
+    /// Frames in a scratch file from the read, which the renderer takes
+    /// (D254).
+    Stored(crate::audio_io::StoredSource),
+    /// Frames in a scratch file that the caller keeps (D257).
+    Lent(&'a mut crate::audio_io::StoredSource),
+}
+
+impl RenderSource<'_> {
+    /// The frames of the source.
+    pub fn len(&self) -> usize {
+        match self {
+            RenderSource::Borrowed(audio) => audio.len(),
+            RenderSource::Owned(audio) => audio.len(),
+            RenderSource::Stored(source) => source.frames(),
+            RenderSource::Lent(source) => source.frames(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// A reader of the frames.
+    pub(crate) fn frames(&mut self) -> crate::scratch::Place<'_, &mut crate::scratch::Pcm> {
+        use crate::scratch::{Place, Slice};
+        match self {
+            RenderSource::Borrowed(audio) => Place::Memory(Slice(audio)),
+            RenderSource::Owned(audio) => Place::Memory(Slice(audio)),
+            RenderSource::Stored(source) => Place::File(&mut source.audio),
+            RenderSource::Lent(source) => Place::File(&mut source.audio),
+        }
+    }
+
+    /// The source for one more reader, which leaves this source to the
+    /// caller: the frames in memory, or the scratch file (D257).
+    pub fn lend(&mut self) -> RenderSource<'_> {
+        match self {
+            RenderSource::Borrowed(audio) => RenderSource::Borrowed(audio),
+            RenderSource::Owned(audio) => RenderSource::Borrowed(audio),
+            RenderSource::Stored(source) => RenderSource::Lent(source),
+            RenderSource::Lent(source) => RenderSource::Lent(source),
+        }
+    }
+}
+
+/// The source of a renderer at its render rate: the frames of the caller,
+/// or a scratch file that holds them.
+enum Input<'a> {
+    Whole(&'a [Stereo]),
+    Stored(crate::scratch::Pcm),
+    Lent(&'a mut crate::scratch::Pcm),
+}
+
 /// One immutable source, one prepared prefix, and bounded shared probe storage.
 /// Completed versions are delivered by the caller; they do not accumulate here.
 pub struct Renderer<'a> {
-    input: &'a [Stereo],
-    /// The render rate of `input`, in Hz.
+    /// The source, which the prepare of each prefix copies.
+    input: std::cell::RefCell<Input<'a>>,
+    /// The frames of the source.
+    frames: usize,
+    /// Each sample of the source is finite.
+    finite: bool,
+    /// The render rate of the source, in Hz.
     rate: u32,
     /// Prefix loudness of the reference whose drive the specs start from.
     /// The first search of a render moves its initial drive by the prefix
     /// loudness difference, so a candidate with a louder tone starts lower.
     pub reference_prefix_lufs: Option<f64>,
-    /// Most recently used last. Two prefixes let glue and plain candidates
-    /// alternate without re-preparing.
+    /// Most recently used last. The renderer keeps one prefix: in ten
+    /// measured runs, one reused prefix was the older of two (D230).
     prepared: Vec<Prepared>,
+    /// Frames from which a prepared prefix keeps no 4x frames
+    /// (`render_blocks::upsampled_min_frames`).
+    upsampled_min_frames: usize,
+    /// Frames from which a render stays in its scratch file
+    /// (`render_blocks::stored_render_min_frames`).
+    stored_render_min_frames: usize,
     scratch: crate::scratch::Factory,
     pub work: Work,
+    /// The time limit of the worker, for its candidate ladders.
+    pub deadline: Option<crate::selection::Deadline>,
+    /// The trials of the ladders of a worker that can continue in another
+    /// invocation, and the trials that it takes from the invocation before.
+    pub trials: Option<crate::selection::TrialRecord>,
 }
 
-const PREFIX_SLOTS: usize = 2;
+const PREFIX_SLOTS: usize = 1;
 
 pub fn scale(audio: &mut [Stereo], db: f64) {
     let gain = dsp::gain(db) as f32;
@@ -572,6 +941,11 @@ fn shape_span(
         alignment.apply(&mut shaped, rate);
     }
     let finishing = if spec.finishing.active {
+        // The section-gain points of the stage are frames of the whole
+        // recording, and its color takes the peak of the whole recording.
+        if shaped.len() != frames {
+            return Err("A span render has no finishing stage".into());
+        }
         Some(finishing::process(&mut shaped, &spec.finishing, rate)?)
     } else {
         None
@@ -586,16 +960,7 @@ fn shape_span(
         .as_ref()
         .map(|p| p.apply_from(&mut shaped, offset, rate));
     if let Some(hz) = spec.side_highpass_hz {
-        dsp::side_eq(
-            &mut shaped,
-            &[dsp::EqBand {
-                kind: dsp::Kind::HighPass,
-                hz,
-                q: std::f64::consts::FRAC_1_SQRT_2,
-                gain_db: 0.0,
-            }],
-            rate,
-        );
+        dsp::side_eq(&mut shaped, &[side_highpass(hz)], rate);
     }
     let mut dynamic_after_eq = Vec::new();
     for probe in &spec.dynamic_after_eq {
@@ -617,9 +982,15 @@ fn shape_span(
     // version without its dynamics stages, so that a tone that raises the
     // sustain of an onset does not count as attack loss (D164).
     let tone_temporal = (shaped.len() == frames).then(|| crate::analysis::analyze(&shaped, rate));
+    // A render of the whole recording gives the hold shift of the
+    // compressor (D280).
+    let whole = offset == 0 && shaped.len() == frames;
     let compressor = spec
         .compressor
-        .map(|s| compressor::process(&mut shaped, s, rate))
+        .map(|s| match whole {
+            true => compressor::process_with_hold_shift(&mut shaped, s, rate),
+            false => compressor::process(&mut shaped, s, rate),
+        })
         .transpose()?;
     Ok(Shaped {
         audio: shaped,
@@ -630,6 +1001,75 @@ fn shape_span(
         windows,
         tone_temporal,
     })
+}
+
+/// The side high-pass of `Spec::side_highpass_hz` at `hz`.
+fn side_highpass(hz: f64) -> dsp::EqBand {
+    dsp::EqBand {
+        kind: dsp::Kind::HighPass,
+        hz,
+        q: std::f64::consts::FRAC_1_SQRT_2,
+        gain_db: 0.0,
+    }
+}
+
+/// `frames` at the end of `pcm`, in blocks.
+fn push_blocks(pcm: &mut crate::scratch::Pcm, frames: &[Stereo]) -> Result<()> {
+    for block in frames.chunks(65_536) {
+        pcm.push(block)?;
+    }
+    Ok(())
+}
+
+/// The prepared prefix of `Renderer::prepare_streamed`.
+struct StreamedPrefix {
+    base: crate::scratch::Pcm,
+    up: Option<crate::scratch::Pcm>,
+    lufs: Option<f64>,
+    deesser: Option<crate::deesser::Stats>,
+    compressor: Option<compressor::Stats>,
+    windows: WindowBands,
+    tone_temporal: crate::analysis::Temporal,
+}
+
+/// The measures of the streamed prefix after its last filter before the
+/// restoration: the window bands, then the restoration, then the onsets.
+struct PrefixMeasure {
+    windows: WindowScan,
+    restoration: dsp::Eq,
+    temporal: crate::analysis::Scan,
+    /// Whether the compressor input must be finite.
+    check: bool,
+    nonfinite: bool,
+}
+
+impl PrefixMeasure {
+    fn push(&mut self, audio: &mut [Stereo]) {
+        self.windows.push(audio);
+        self.restoration.process(audio);
+        self.temporal.push(audio);
+        if self.check {
+            self.nonfinite |= audio.iter().flatten().any(|v| !v.is_finite());
+        }
+    }
+}
+
+/// The outputs of the streamed prefix: its loudness, and its frames at the
+/// base rate and, below `render_blocks::upsampled_min_frames`, at 4x.
+struct PrefixOut {
+    meter: dsp::LoudnessMeter,
+    up: Option<(render_blocks::Upsample, crate::scratch::Pcm)>,
+    base: crate::scratch::Pcm,
+}
+
+impl PrefixOut {
+    fn push(&mut self, audio: &[Stereo]) -> Result<()> {
+        self.meter.push(audio);
+        if let Some((upsample, up)) = &mut self.up {
+            upsample.push(audio, up)?;
+        }
+        push_blocks(&mut self.base, audio)
+    }
 }
 
 /// The keyed side cuts of `width::MONO_SAFE_RULE` on `audio`, a span of the
@@ -644,25 +1084,42 @@ pub fn apply_mono_safe(
     offset: usize,
     rate: u32,
 ) {
-    let edges = &crate::stereo::BAND_EDGES_HZ;
     for cut in cuts {
-        let Some(band) = (0..6).find(|b| cut.band.hz >= edges[*b] && cut.band.hz < edges[b + 1])
-        else {
+        let Some(gain) = mono_safe_gain(cut) else {
             continue;
         };
-        let mut gains = [0.0; 6];
-        gains[band] = cut.band.gain_db;
-        let mut filtered = audio.to_vec();
-        crate::width::SideGain::gains(gains).apply(&mut filtered, rate);
-        for (i, (frame, wet_frame)) in audio.iter_mut().zip(&filtered).enumerate() {
-            let wet = cut.wet_at(offset + i) as f32;
-            if wet > 0.0 {
-                for c in 0..2 {
-                    frame[c] += wet * (wet_frame[c] - frame[c]);
-                }
-            }
+        gain.apply_each(audio, rate, |i, frame, wet_frame| {
+            mono_safe_blend(cut, offset + i, frame, wet_frame)
+        });
+    }
+}
+
+/// The side gain of the mono-safe `cut`: its gain in its stereo analysis
+/// band. None when its frequency is outside the bands.
+pub(crate) fn mono_safe_gain(cut: &treatment::EnvelopedBand) -> Option<crate::width::SideGain> {
+    let edges = &crate::stereo::BAND_EDGES_HZ;
+    let band = (0..6).find(|b| cut.band.hz >= edges[*b] && cut.band.hz < edges[b + 1])?;
+    let mut gains = [0.0; 6];
+    gains[band] = cut.band.gain_db;
+    Some(crate::width::SideGain::gains(gains))
+}
+
+/// `frame`, frame `sample` of the recording, blended toward `wet_frame`,
+/// the frame after the side gain of `cut`, by the wet share of its
+/// envelope.
+pub(crate) fn mono_safe_blend(
+    cut: &treatment::EnvelopedBand,
+    sample: usize,
+    mut frame: Stereo,
+    wet_frame: Stereo,
+) -> Stereo {
+    let wet = cut.wet_at(sample) as f32;
+    if wet > 0.0 {
+        for c in 0..2 {
+            frame[c] += wet * (wet_frame[c] - frame[c]);
         }
     }
+    frame
 }
 
 /// Grid of the start of a span render at `rate`, in frames: one compressor
@@ -702,6 +1159,21 @@ pub fn prefix_span(
     .audio)
 }
 
+/// Audio in a scratch file of a renderer (`Renderer::spill`).
+pub(crate) struct Spilled(crate::scratch::Pcm);
+
+impl Spilled {
+    /// Read the audio back into `audio`.
+    pub(crate) fn restore(mut self, audio: &mut RenderAudio) -> Result<()> {
+        use crate::scratch::Frames;
+        let mut read = Vec::new();
+        let frames = self.0.len();
+        self.0.read(0, frames, &mut read)?;
+        *audio = RenderAudio::held(read);
+        Ok(())
+    }
+}
+
 impl<'a> Renderer<'a> {
     /// A renderer of `input`, at the render rate `rate`.
     pub fn new(input: &'a [Stereo], rate: u32) -> Self {
@@ -709,16 +1181,86 @@ impl<'a> Renderer<'a> {
     }
 
     pub fn with_scratch(input: &'a [Stereo], rate: u32, scratch: crate::scratch::Factory) -> Self {
+        let finite = input.iter().flatten().all(|x| x.is_finite());
+        Self::with_input(Input::Whole(input), input.len(), finite, rate, scratch)
+    }
+
+    /// A renderer of `source`. An owned source moves to a scratch file of
+    /// `scratch`, and its buffer is freed.
+    pub fn of_source(
+        source: RenderSource<'a>,
+        rate: u32,
+        scratch: crate::scratch::Factory,
+    ) -> Result<Self> {
+        match source {
+            RenderSource::Borrowed(audio) => Ok(Self::with_scratch(audio, rate, scratch)),
+            RenderSource::Owned(audio) => Self::with_stored(&audio, rate, scratch),
+            RenderSource::Stored(mut source) => {
+                let frames = source.frames();
+                let finite = crate::scratch::all_finite(&mut source.audio)?;
+                Ok(Self::with_input(
+                    Input::Stored(source.audio),
+                    frames,
+                    finite,
+                    rate,
+                    scratch,
+                ))
+            }
+            RenderSource::Lent(source) => {
+                let frames = source.frames();
+                let finite = crate::scratch::all_finite(&mut source.audio)?;
+                Ok(Self::with_input(
+                    Input::Lent(&mut source.audio),
+                    frames,
+                    finite,
+                    rate,
+                    scratch,
+                ))
+            }
+        }
+    }
+
+    /// A renderer of `input` that holds it in a scratch file of `scratch`.
+    fn with_stored(
+        input: &[Stereo],
+        rate: u32,
+        mut scratch: crate::scratch::Factory,
+    ) -> Result<Self> {
+        let mut stored = crate::scratch::Pcm::new(scratch()?);
+        push_blocks(&mut stored, input)?;
+        let finite = input.iter().flatten().all(|x| x.is_finite());
+        Ok(Self::with_input(
+            Input::Stored(stored),
+            input.len(),
+            finite,
+            rate,
+            scratch,
+        ))
+    }
+
+    fn with_input(
+        input: Input<'a>,
+        frames: usize,
+        finite: bool,
+        rate: u32,
+        scratch: crate::scratch::Factory,
+    ) -> Self {
         Self {
-            input,
+            input: std::cell::RefCell::new(input),
+            frames,
+            finite,
             rate,
             reference_prefix_lufs: None,
             prepared: Vec::new(),
+            upsampled_min_frames: render_blocks::upsampled_min_frames(rate),
+            stored_render_min_frames: render_blocks::stored_render_min_frames(rate),
             scratch,
             work: Work {
                 probe_cache_budget_bytes: 128 * 1024 * 1024,
                 ..Work::default()
             },
+            deadline: None,
+            trials: None,
         }
     }
 
@@ -769,13 +1311,16 @@ impl<'a> Renderer<'a> {
         let mut restoration = match &first.restoration {
             Some(r) => r.clone(),
             None => {
-                let change =
-                    local_change(&reference, &WindowBands::measure(&first.audio, self.rate));
+                let change = local_change(
+                    &reference,
+                    &WindowBands::measure_read(&mut first.audio.frames(), self.rate)?,
+                );
                 Restoration {
                     rule: "set.peak-tone-restoration.v4",
                     window_samples: RESTORATION_WINDOW,
                     material: reference.material(),
                     measured_change_db: change,
+                    measured_gains_db: spec.restoration_db,
                     filters: filters_of(&spec.restoration_db),
                     delivered_change_db: change,
                     renders: 1,
@@ -807,8 +1352,10 @@ impl<'a> Renderer<'a> {
             restoration.filters = filters_of(&total);
             restoration.gains_db = total;
             restoration.renders += 1;
-            restoration.delivered_change_db =
-                local_change(&reference, &WindowBands::measure(&current.audio, self.rate));
+            restoration.delivered_change_db = local_change(
+                &reference,
+                &WindowBands::measure_read(&mut current.audio.frames(), self.rate)?,
+            );
         }
         Ok(Rendered {
             restoration: Some(restoration),
@@ -835,10 +1382,10 @@ impl<'a> Renderer<'a> {
         crate::audio_io::check_render_rate(self.rate)?;
         tone.validate(self.rate)?;
         for envelope in &focus_envelopes {
-            envelope.validate(&tone, self.input.len())?;
+            envelope.validate(&tone, self.frames)?;
         }
-        if self.input.len() < 3 * self.rate as usize
-            || self.input.iter().flatten().any(|x| !x.is_finite())
+        if self.frames < 3 * self.rate as usize
+            || !self.finite
             || spec.limiter.validate().is_err()
             || !(0.0..=6.0).contains(&spec.clipper_db)
             || !(-3.0..=-0.1).contains(&spec.ceiling_dbtp)
@@ -891,30 +1438,142 @@ impl<'a> Renderer<'a> {
         tone: &treatment::Tone,
         focus_envelopes: &[treatment::FocusEnvelope],
     ) -> Result<Shaped> {
+        let audio = match &mut *self.input.borrow_mut() {
+            Input::Whole(input) => input.to_vec(),
+            Input::Stored(stored) => {
+                let mut audio = Vec::new();
+                crate::scratch::Frames::read(stored, 0, self.frames, &mut audio)?;
+                audio
+            }
+            Input::Lent(stored) => {
+                let mut audio = Vec::new();
+                crate::scratch::Frames::read(*stored, 0, self.frames, &mut audio)?;
+                audio
+            }
+        };
         shape_span(
-            self.input.to_vec(),
+            audio,
             spec,
             tone,
             focus_envelopes,
             0,
-            self.input.len(),
+            self.frames,
             self.rate,
         )
     }
 
-    /// `prefix`, read from the prepared prefix of `spec` when the renderer
-    /// holds one.
-    pub fn prepared_prefix(&mut self, spec: &Spec) -> Result<Vec<Stereo>> {
-        use crate::scratch::Frames;
-        let key = prefix_key(spec);
-        match self.prepared.iter_mut().find(|p| p.key == key) {
-            Some(prepared) => {
-                let mut audio = Vec::new();
-                let frames = prepared.shaped.len();
-                prepared.shaped.read(0, frames, &mut audio)?;
-                Ok(audio)
+    /// The frames of `audio` in a scratch file of the renderer, until
+    /// `Spilled::restore` reads them back; `audio` is left empty. None, with
+    /// `audio` unchanged, when another reference shares it or when its
+    /// frames are in a scratch file.
+    pub(crate) fn spill(&mut self, audio: &mut RenderAudio) -> Result<Option<Spilled>> {
+        let held = match std::mem::take(&mut audio.0) {
+            Kept::Held(held) => held,
+            other => {
+                audio.0 = other;
+                return Ok(None);
             }
-            None => self.prefix(spec),
+        };
+        let owned = match Arc::try_unwrap(held) {
+            Ok(owned) => owned,
+            Err(shared) => {
+                *audio = RenderAudio(Kept::Held(shared));
+                return Ok(None);
+            }
+        };
+        let mut pcm = crate::scratch::Pcm::new((self.scratch)()?);
+        push_blocks(&mut pcm, &owned)?;
+        Ok(Some(Spilled(pcm)))
+    }
+
+    /// The drive response of `rendered`, a render of `spec` (D281, D282,
+    /// D283, D284, D287): peak control of its prefix at its drive, at the
+    /// drive `render_blocks::DRIVE_RESPONSE_SHIFT_DB` up and down and at the
+    /// drive `render_blocks::DRIVE_RESPONSE_FAR_DB` up, the prefix without
+    /// it, and the prefix with the restoring filter of 20–120 Hz at
+    /// `render_blocks::DRIVE_RESPONSE_SHELF_DB`, with peak control at its
+    /// drive and without it (`render_blocks::drive_loudness`). The local
+    /// band changes take the window bands of the prefix before its restoring
+    /// filters, as the restoration does. The prefix of a delivered render is
+    /// the prefix of its spec with the restoring gains of its restoration. A
+    /// renderer that does not hold the prefix prepares it.
+    pub fn drive_response(
+        &mut self,
+        spec: &Spec,
+        rendered: &Rendered,
+    ) -> Result<Option<DriveResponse>> {
+        let Some(prefix_lufs) = rendered.prefix_lufs else {
+            return Ok(None);
+        };
+        let rate = self.rate;
+        let index = self.prepared_index(spec)?;
+        let reference = self.prepared[index].windows.clone();
+        let (_, mut up) = self.prepared[index].frames(rate);
+        let loudness = render_blocks::drive_loudness(
+            &mut up,
+            rendered.drive_db,
+            spec.clipper_db,
+            dsp::gain(spec.ceiling_dbtp - 0.1),
+            spec.limiter,
+            rate,
+        )?;
+        Ok(loudness.map(|models| {
+            let [at, up, down, far, shelf, free, shelf_free] = models.lufs;
+            let part = |k: usize| models.sections_db.iter().map(|s| s[k]).collect();
+            let local = models.windows.map(|w| local_change(&reference, &w));
+            let against =
+                |k: usize| -> [f64; 6] { std::array::from_fn(|b| local[k][b] - local[0][b]) };
+            DriveResponse {
+                rule: "set.drive-response.v5",
+                shift_db: render_blocks::DRIVE_RESPONSE_SHIFT_DB,
+                up_lu: up - at,
+                down_lu: down - at,
+                far_db: render_blocks::DRIVE_RESPONSE_FAR_DB,
+                far_lu: far - at,
+                loss_lu: prefix_lufs + rendered.drive_db + rendered.true_peak.trim_db
+                    - rendered.lufs,
+                sections_down_db: part(0),
+                sections_up_db: part(1),
+                sections_free_db: part(2),
+                sections_far_db: part(3),
+                local_down_db: against(2),
+                local_up_db: against(1),
+                local_far_db: against(3),
+                local_free_db: against(4),
+                shelf_db: render_blocks::DRIVE_RESPONSE_SHELF_DB,
+                shelf_lu: shelf - at,
+                shelf_local_db: against(5),
+                sections_shelf_db: part(4),
+                shelf_free_lu: shelf_free - free,
+                shelf_free_local_db: against(6),
+                sections_shelf_free_db: part(5),
+            }
+        }))
+    }
+
+    /// The prepared prefix of `spec` in scratch storage: its frames at the
+    /// base rate and at 4x. A renderer that does not hold it prepares it.
+    pub(crate) fn prepared_frames(
+        &mut self,
+        spec: &Spec,
+    ) -> Result<(
+        &std::cell::RefCell<crate::scratch::Pcm>,
+        render_blocks::Up<'_, crate::scratch::Shared<'_>>,
+    )> {
+        let index = self.prepared_index(spec)?;
+        Ok(self.prepared[index].frames(self.rate))
+    }
+
+    /// The index of the prepared prefix of `spec`. A renderer that does not
+    /// hold it prepares it.
+    fn prepared_index(&mut self, spec: &Spec) -> Result<usize> {
+        let key = prefix_key(spec);
+        match self.prepared.iter().position(|p| p.key == key) {
+            Some(index) => Ok(index),
+            None => {
+                self.prepare(spec)?;
+                Ok(self.prepared.len() - 1)
+            }
         }
     }
 
@@ -929,6 +1588,31 @@ impl<'a> Renderer<'a> {
             if self.prepared.len() >= PREFIX_SLOTS {
                 self.prepared.remove(0);
             }
+            // The whole prefix gives the errors of an invalid compressor in
+            // the order of its stages.
+            if !spec.finishing.active
+                && spec.dynamic_after_eq.is_empty()
+                && spec.compressor.is_none_or(|s| s.validate().is_ok())
+            {
+                let streamed = self.prepare_streamed(spec, &tone, &focus_envelopes)?;
+                self.prepared.push(Prepared {
+                    key,
+                    up: streamed.up,
+                    shaped: std::cell::RefCell::new(streamed.base),
+                    finishing: None,
+                    dynamic_after_eq: Vec::new(),
+                    compressor: streamed.compressor,
+                    deesser: streamed.deesser,
+                    color: None,
+                    windows: streamed.windows,
+                    lufs: streamed.lufs,
+                    tone_temporal: Some(streamed.tone_temporal),
+                    probes: Vec::new(),
+                    probe_bytes: 0,
+                });
+                self.work.prepared_prefixes += 1;
+                return Ok(());
+            }
             let Shaped {
                 audio: shaped,
                 finishing,
@@ -942,9 +1626,7 @@ impl<'a> Renderer<'a> {
             let mut up = crate::scratch::Pcm::new((self.scratch)()?);
             let peak = crate::render_blocks::upsample_into(&shaped, &mut up, self.rate)?;
             let mut base = crate::scratch::Pcm::new((self.scratch)()?);
-            for block in shaped.chunks(65_536) {
-                base.push(block)?;
-            }
+            push_blocks(&mut base, &shaped)?;
             drop(shaped);
             let color = if spec.finishing.active {
                 Some(up.color(spec.finishing.color_amount, peak)?)
@@ -953,8 +1635,8 @@ impl<'a> Renderer<'a> {
             };
             self.prepared.push(Prepared {
                 key,
-                up,
-                shaped: base,
+                up: Some(up),
+                shaped: std::cell::RefCell::new(base),
                 finishing,
                 dynamic_after_eq,
                 compressor,
@@ -971,8 +1653,166 @@ impl<'a> Renderer<'a> {
         Ok(())
     }
 
+    /// Frames `start..start + count` of the source, into `out`.
+    fn read_input(&self, start: usize, count: usize, out: &mut Vec<Stereo>) -> Result<()> {
+        match &mut *self.input.borrow_mut() {
+            Input::Whole(input) => {
+                out.clear();
+                out.extend_from_slice(&input[start..start + count]);
+            }
+            Input::Stored(stored) => crate::scratch::Frames::read(stored, start, count, out)?,
+            Input::Lent(stored) => crate::scratch::Frames::read(*stored, start, count, out)?,
+        }
+        Ok(())
+    }
+
+    /// The outputs of `shape` and of `prepare` for `spec`, from the source
+    /// in pieces. Each stage of `spec` streams: the finishing stage is
+    /// inactive and `spec` has no dynamic bands. The de-esser measures the
+    /// whole signal before it cuts, so the signal before it goes to scratch
+    /// storage. The compressor holds about two section windows of frames
+    /// (`compressor::Stream`). A pass holds one piece of frames, and the
+    /// 4x stream one span (`render_blocks::Upsample`), not the recording.
+    fn prepare_streamed(
+        &mut self,
+        spec: &Spec,
+        tone: &treatment::Tone,
+        focus_envelopes: &[treatment::FocusEnvelope],
+    ) -> Result<StreamedPrefix> {
+        use crate::{prefix_stream::Chain, scratch::Frames};
+        let (frames, rate) = (self.frames, self.rate);
+        // The frames of a read. The buffers of a pass hold a piece, and only
+        // the 4x stream holds a span: buffers of a span at each stage raised
+        // the peak memory footprint of the sets (D243).
+        let piece = 1 << 16;
+        let mut chain = Chain::new(frames);
+        if let Some(alignment) = &spec.phase_alignment {
+            chain.alignment(alignment, rate);
+        }
+        chain.tone(tone.stream(focus_envelopes, 0, frames, rate)?);
+        if let Some(gain) = &spec.side_gain {
+            chain.side_gain(gain, rate);
+        }
+        chain.mono_safe(&spec.mono_safe, rate);
+        // Each buffer has room for the largest output of its pass, and the
+        // passes reuse the buffers from span to span. A buffer that grows,
+        // or a new buffer for each span, raises the memory that the
+        // allocator keeps.
+        let mut block = Vec::with_capacity(chain.capacity(piece));
+        let (mut before_cut, deesser) = match &spec.deesser {
+            None => (None, None),
+            Some(plan) => {
+                let mut stored = crate::scratch::Pcm::new((self.scratch)()?);
+                let mut mids = crate::deesser::MidPowers::new(frames, rate);
+                // Each piece reads into the buffer of the piece before it.
+                let mut store = |audio: Vec<Stereo>| -> Result<Vec<Stereo>> {
+                    mids.push(&audio);
+                    push_blocks(&mut stored, &audio)?;
+                    Ok(audio)
+                };
+                for start in (0..frames).step_by(piece) {
+                    self.read_input(start, piece.min(frames - start), &mut block)?;
+                    block = store(chain.push(std::mem::take(&mut block))?)?;
+                }
+                store(chain.finish()?)?;
+                let (cut, stats) = plan.cuts(&mids.finish(), 0);
+                chain = Chain::new(frames);
+                if stats.cut_frames > 0 {
+                    chain.band_cut(crate::deesser::BandCut::new(cut, 0, rate));
+                }
+                (Some(stored), Some(stats))
+            }
+        };
+        if let Some(hz) = spec.side_highpass_hz {
+            chain.side_eq(&[side_highpass(hz)], rate);
+        }
+        let capacity = chain.capacity(piece);
+        block.reserve(capacity.saturating_sub(block.len()));
+        let compress = spec.compressor.filter(|s| compressor::changes(*s));
+        let lag = compress.map_or(0, |s| compressor::Stream::lag(s, rate));
+        let mut measure = PrefixMeasure {
+            windows: WindowScan::new(frames, rate),
+            restoration: dsp::Eq::new(&filters_of(&spec.restoration_db), rate),
+            temporal: crate::analysis::Scan::new(frames, rate),
+            check: spec.compressor.is_some(),
+            nonfinite: false,
+        };
+        let up = if frames < self.upsampled_min_frames {
+            Some((
+                render_blocks::Upsample::new(frames, rate, capacity + lag),
+                crate::scratch::Pcm::new((self.scratch)()?),
+            ))
+        } else {
+            None
+        };
+        let mut out = PrefixOut {
+            meter: dsp::LoudnessMeter::new(rate),
+            up,
+            base: crate::scratch::Pcm::new((self.scratch)()?),
+        };
+        let mut compressor = compress
+            .map(|s| compressor::Stream::new(s, rate, frames, capacity).with_hold_shift(rate));
+        let mut compressed = Vec::with_capacity(capacity + lag);
+        let mut deliver = |mut audio: Vec<Stereo>| -> Result<Vec<Stereo>> {
+            measure.push(&mut audio);
+            match &mut compressor {
+                Some(compressor) => {
+                    compressed.clear();
+                    compressor.push(&audio, &mut compressed);
+                    out.push(&compressed)?;
+                }
+                None => out.push(&audio)?,
+            }
+            Ok(audio)
+        };
+        for start in (0..frames).step_by(piece) {
+            let count = piece.min(frames - start);
+            match &mut before_cut {
+                Some(stored) => stored.read(start, count, &mut block)?,
+                None => self.read_input(start, count, &mut block)?,
+            }
+            block = deliver(chain.push(std::mem::take(&mut block))?)?;
+        }
+        deliver(chain.finish()?)?;
+        drop(before_cut);
+        let PrefixMeasure {
+            windows,
+            temporal,
+            nonfinite,
+            ..
+        } = measure;
+        if nonfinite {
+            return Err("Compressor input must be finite".into());
+        }
+        let compressor = match compressor {
+            Some(compressor) => {
+                compressed.clear();
+                let stats = compressor.finish(&mut compressed);
+                let rest = compressed;
+                out.push(&rest)?;
+                Some(stats)
+            }
+            None => spec.compressor.map(|_| compressor::Stats::default()),
+        };
+        let PrefixOut { meter, up, base } = out;
+        let up = up.map(|(upsample, up)| {
+            upsample.finish();
+            up
+        });
+        Ok(StreamedPrefix {
+            base,
+            up,
+            lufs: meter.finish(),
+            deesser,
+            compressor,
+            windows: windows.finish(),
+            tone_temporal: temporal.finish(),
+        })
+    }
+
     /// Solve the drive for the most recent prefix, which `prepare` made.
     fn search(&mut self, spec: &Spec) -> Result<Rendered> {
+        let stored = self.frames >= self.stored_render_min_frames;
         let prepared = self.prepared.last_mut().unwrap();
         let rate = self.rate;
         let scratch = &mut self.scratch;
@@ -998,33 +1838,84 @@ impl<'a> Renderer<'a> {
                 return Ok((cached.report.lufs, cached.clone()));
             }
             work.rendered_probes += 1;
-            let (mut audio, limiter, clipping, limiter_trace) =
-                crate::render_blocks::render_peak_control(
-                    &mut prepared.up,
-                    drive,
-                    spec.clipper_db,
-                    dsp::gain(spec.ceiling_dbtp - 0.1),
-                    spec.limiter,
-                    rate,
-                )?;
-            if audio.iter().flatten().any(|x| !x.is_finite()) {
-                return Err("Nonfinite rendered samples".into());
-            }
-            let (peak_estimate_dbtp, true_peak) =
-                render_blocks::fit_true_peak(&mut audio, spec.ceiling_dbtp, spec.true_peak, rate);
-            let lufs = dsp::loudness(&audio, rate).ok_or("Missing output loudness")?;
-            let energy_attack_loss_p90_db = prepared
-                .tone_temporal
-                .as_ref()
-                .and_then(|t| crate::analysis::energy_attack_loss_p90_from(t, &audio, rate));
-            let bytes = audio.len() * std::mem::size_of::<Stereo>();
             let mut pcm = crate::scratch::Pcm::new(scratch()?);
-            for block in audio.chunks(8192) {
-                pcm.push(block)?;
-            }
-            drop(audio);
+            let (limiter, clipping, limiter_trace, peak_estimate_dbtp, true_peak, lufs, loss) =
+                if stored {
+                    // The render goes to its scratch file in pieces, and its
+                    // measures read it there (D253).
+                    let (limiter, clipping, limiter_trace) =
+                        crate::render_blocks::render_peak_control_into(
+                            &mut prepared.frames(rate).1,
+                            drive,
+                            spec.clipper_db,
+                            dsp::gain(spec.ceiling_dbtp - 0.1),
+                            spec.limiter,
+                            rate,
+                            &mut pcm,
+                        )?;
+                    let (peak_estimate_dbtp, true_peak) = render_blocks::fit_true_peak_stored(
+                        &mut pcm,
+                        spec.ceiling_dbtp,
+                        spec.true_peak,
+                        rate,
+                    )?;
+                    let mut meter = dsp::LoudnessMeter::new(rate);
+                    let blocks =
+                        crate::analysis::blocks_read_with(&mut pcm, rate, |span| meter.push(span))?;
+                    let loss = prepared
+                        .tone_temporal
+                        .as_ref()
+                        .and_then(|t| crate::analysis::energy_attack_loss_p90_of(t, &blocks));
+                    let lufs = meter.finish().ok_or("Missing output loudness")?;
+                    (
+                        limiter,
+                        clipping,
+                        limiter_trace,
+                        peak_estimate_dbtp,
+                        true_peak,
+                        lufs,
+                        loss,
+                    )
+                } else {
+                    let (mut audio, limiter, clipping, limiter_trace) =
+                        crate::render_blocks::render_peak_control(
+                            &mut prepared.frames(rate).1,
+                            drive,
+                            spec.clipper_db,
+                            dsp::gain(spec.ceiling_dbtp - 0.1),
+                            spec.limiter,
+                            rate,
+                        )?;
+                    if audio.iter().flatten().any(|x| !x.is_finite()) {
+                        return Err("Nonfinite rendered samples".into());
+                    }
+                    let (peak_estimate_dbtp, true_peak) = render_blocks::fit_true_peak(
+                        &mut audio,
+                        spec.ceiling_dbtp,
+                        spec.true_peak,
+                        rate,
+                    );
+                    let lufs = dsp::loudness(&audio, rate).ok_or("Missing output loudness")?;
+                    let loss = prepared.tone_temporal.as_ref().and_then(|t| {
+                        crate::analysis::energy_attack_loss_p90_from(t, &audio, rate)
+                    });
+                    for block in audio.chunks(8192) {
+                        pcm.push(block)?;
+                    }
+                    (
+                        limiter,
+                        clipping,
+                        limiter_trace,
+                        peak_estimate_dbtp,
+                        true_peak,
+                        lufs,
+                        loss,
+                    )
+                };
+            let bytes = crate::scratch::Frames::len(&pcm) * std::mem::size_of::<Stereo>();
+            let energy_attack_loss_p90_db = loss;
             let report = Rendered {
-                audio: Arc::new(Vec::new()),
+                audio: RenderAudio::default(),
                 lufs,
                 peak_estimate_dbtp,
                 true_peak,
@@ -1041,10 +1932,11 @@ impl<'a> Renderer<'a> {
                 restoration: None,
                 prefix_lufs: prepared.lufs,
                 energy_attack_loss_p90_db,
+                drive_response: None,
             };
             let result = Stored {
                 report,
-                pcm: Rc::new(RefCell::new(pcm)),
+                pcm: Arc::new(Mutex::new(pcm)),
             };
             if prepared.probe_bytes + bytes <= work.probe_cache_budget_bytes {
                 prepared.probes.push((key, result.clone()));
@@ -1053,7 +1945,7 @@ impl<'a> Renderer<'a> {
             Ok((lufs, result))
         };
         if let Some(drive) = spec.fixed_drive_db {
-            return render(drive)?.1.load();
+            return render(drive)?.1.load(stored);
         }
         let (output, search) = search::solve(
             initial,
@@ -1066,7 +1958,7 @@ impl<'a> Renderer<'a> {
             },
             render,
         )?;
-        let mut output = output.load()?;
+        let mut output = output.load(stored)?;
         output.search = Some(search);
         Ok(output)
     }
@@ -1075,6 +1967,393 @@ impl<'a> Renderer<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Kicks, tones, a sibilant burst every second and wide noise, `frames`
+    /// frames at 48 kHz.
+    fn material(frames: usize) -> Vec<Stereo> {
+        let mut state = 0x9e37_79b9u32;
+        let mut noise = || {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            (state as f64 / u32::MAX as f64) * 2.0 - 1.0
+        };
+        (0..frames)
+            .map(|i| {
+                let t = i as f64 / 48000.0;
+                let since_hit = (i % 24_000) as f64 / 48000.0;
+                let kick =
+                    0.6 * (-since_hit / 0.06).exp() * (std::f64::consts::TAU * 55.0 * t).sin();
+                let level = 0.5 + 0.4 * (std::f64::consts::TAU * 0.07 * t).sin();
+                let body = level * 0.1 * (std::f64::consts::TAU * 1500.0 * t).sin();
+                let ess = if i % 48_000 < 6_000 {
+                    0.15 * (std::f64::consts::TAU * 7000.0 * t).sin()
+                } else {
+                    0.0
+                };
+                let (a, b) = (0.05 * noise(), 0.05 * noise());
+                [
+                    (kick + body + ess + a) as f32,
+                    (kick + 0.8 * body + ess + b) as f32,
+                ]
+            })
+            .collect()
+    }
+
+    fn bits(values: impl IntoIterator<Item = f64>) -> Vec<u64> {
+        values.into_iter().map(f64::to_bits).collect()
+    }
+
+    fn frames_of(pcm: &mut crate::scratch::Pcm) -> Vec<Stereo> {
+        use crate::scratch::Frames;
+        let mut frames = Vec::new();
+        let count = pcm.len();
+        pcm.read(0, count, &mut frames).unwrap();
+        frames
+    }
+
+    /// The streamed prepare of `spec` on `input` equals `shape` and the
+    /// whole-signal outputs of `prepare`, bit for bit.
+    fn assert_streamed_prepare_is_exact(
+        spec: &Spec,
+        input: &[Stereo],
+    ) -> (Option<crate::deesser::Stats>, Option<compressor::Stats>) {
+        let mut renderer = Renderer::with_scratch(input, 48000, Box::new(crate::scratch::memory));
+        let (tone, envelopes) = renderer.validated(spec).unwrap();
+        let whole = renderer.shape(spec, &tone, &envelopes).unwrap();
+        let mut streamed = renderer.prepare_streamed(spec, &tone, &envelopes).unwrap();
+        let flat = |frames: &[Stereo]| bits(frames.iter().flatten().map(|&v| v as f64));
+        assert_eq!(flat(&frames_of(&mut streamed.base)), flat(&whole.audio));
+        let mut up = crate::scratch::Pcm::new(crate::scratch::memory().unwrap());
+        render_blocks::upsample_into(&whole.audio, &mut up, 48000).unwrap();
+        assert_eq!(
+            flat(&frames_of(streamed.up.as_mut().unwrap())),
+            flat(&frames_of(&mut up))
+        );
+        assert_eq!(
+            streamed.lufs.map(f64::to_bits),
+            dsp::loudness(&whole.audio, 48000).map(f64::to_bits)
+        );
+        let windows = |w: &WindowBands| {
+            let mut all = bits(w.bands.iter().flatten().copied());
+            all.extend(bits(w.weighted.iter().copied()));
+            all.extend(bits(w.weighted_bands));
+            all
+        };
+        assert_eq!(windows(&streamed.windows), windows(&whole.windows));
+        let temporal = |t: &crate::analysis::Temporal| {
+            (
+                serde_json::to_string(t).unwrap(),
+                bits(t.blocks.iter().flat_map(|b| [b.energy, b.peak])),
+                t.activity_floor.to_bits(),
+            )
+        };
+        assert_eq!(
+            temporal(&streamed.tone_temporal),
+            temporal(whole.tone_temporal.as_ref().unwrap())
+        );
+        assert_eq!(
+            serde_json::to_string(&streamed.compressor).unwrap(),
+            serde_json::to_string(&whole.compressor).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_string(&streamed.deesser).unwrap(),
+            serde_json::to_string(&whole.deesser).unwrap()
+        );
+        (whole.deesser, whole.compressor)
+    }
+
+    fn bypass_spec() -> Spec {
+        Spec {
+            phase_alignment: None,
+            finishing: finishing::Plan {
+                rule: "test",
+                validation_status: "test",
+                active: false,
+                dc_filter_hz: None,
+                bands: Vec::new(),
+                section_gain: Vec::new(),
+                color_amount: 0.0,
+                clipping_budget_db: 0.0,
+            },
+            tone: treatment::Tone::default(),
+            focus_envelopes: Vec::new(),
+            side_highpass_hz: None,
+            side_gain: None,
+            deesser: None,
+            low_mid: None,
+            low_end_hold: None,
+            mono_safe: Vec::new(),
+            dynamic_after_eq: Vec::new(),
+            compressor: None,
+            limiter: dsp::LimiterSettings::default(),
+            clipper_db: 0.0,
+            ceiling_dbtp: -1.0,
+            initial_drive_db: 6.0,
+            target_lufs: -10.0,
+            fixed_drive_db: Some(6.0),
+            restore_peak_tone: false,
+            restoration_db: [0.0; 6],
+            true_peak: dsp::TruePeak::Trim,
+        }
+    }
+
+    fn band(kind: dsp::Kind, hz: f64, q: f64, gain_db: f64) -> dsp::EqBand {
+        dsp::EqBand {
+            kind,
+            hz,
+            q,
+            gain_db,
+        }
+    }
+
+    /// Every stage of the streamed prefix.
+    fn full_spec(frames: usize) -> Spec {
+        let point = |sample: usize, wet: f64| treatment::BlendPoint { sample, wet };
+        let mut spec = bypass_spec();
+        spec.phase_alignment = Some(crate::stereo_phase::Alignment {
+            points: vec![(200.0, 30.0), (2000.0, 150.0), (8000.0, 120.0)],
+        });
+        spec.tone = treatment::Tone {
+            stereo: vec![
+                band(dsp::Kind::LowShelf, 120.0, 0.7, 2.0),
+                band(dsp::Kind::Peak, 3000.0, 1.2, -1.5),
+            ],
+            mid: vec![band(dsp::Kind::Peak, 400.0, 1.0, 1.0)],
+            side: vec![band(dsp::Kind::HighShelf, 6000.0, 0.7, 1.5)],
+        };
+        spec.focus_envelopes = vec![treatment::FocusEnvelope {
+            domain: finishing::Domain::Stereo,
+            filter_index: 1,
+            points: vec![
+                point(0, 0.0),
+                point(frames / 3, 1.0),
+                point(frames - 1, 0.4),
+            ],
+        }];
+        spec.side_gain = Some(crate::width::SideGain {
+            bands_db: [0.0, 1.0, 2.0, 2.0, 1.5, 1.0],
+            decorrelated_db: [None, None, Some(-12.0), Some(-10.0), None, None],
+            mid_db: [0.0, 0.0, 0.0, 0.5, 0.0, 0.0],
+        });
+        spec.mono_safe = vec![treatment::EnvelopedBand {
+            rule: crate::width::MONO_SAFE_RULE.into(),
+            domain: finishing::Domain::Side,
+            band: band(dsp::Kind::Peak, 3464.1, 0.87, -6.0),
+            points: vec![
+                point(0, 0.0),
+                point(frames / 2, 1.0),
+                point(frames - 1, 1.0),
+            ],
+        }];
+        spec.deesser = Some(crate::deesser::Plan {
+            rule: "test".into(),
+            keyed: (0..(frames / crate::masking::HOP) as u32)
+                .step_by(3)
+                .map(|frame| crate::deesser::Keyed {
+                    frame,
+                    vocal_share: 1.0,
+                    other_power: 0.0,
+                })
+                .collect(),
+            other_band_power: 1.0,
+            maximum_cut_db: crate::deesser::MAXIMUM_CUT_DB,
+            threshold_db: 0.0,
+            reference_excess_db: None,
+        });
+        spec.side_highpass_hz = Some(90.0);
+        spec.restoration_db = [0.5, 0.0, -0.4, 0.3, 0.0, 0.6];
+        spec.compressor = Some(compressor::Settings {
+            threshold_dbfs: -6.0,
+            ratio: 2.0,
+            knee_db: 6.0,
+            attack_ms: 10.0,
+            release_ms: 120.0,
+            detector_rms_ms: 5.0,
+            sidechain_highpass_hz: 80.0,
+            maximum_reduction_db: 6.0,
+            section_ms: 3000.0,
+            section_makeup: true,
+        });
+        spec
+    }
+
+    #[test]
+    fn the_streamed_prefix_equals_the_whole_prefix() {
+        // Two and a half spans, and a recording shorter than one span.
+        for frames in [2 * render_blocks::UPSAMPLE_SPAN + 262_147, 160_003] {
+            let input = material(frames);
+            let full = full_spec(frames);
+            let (deesser, compressor) = assert_streamed_prepare_is_exact(&full, &input);
+            assert!(deesser.unwrap().cut_frames > 0);
+            let compressor = compressor.unwrap();
+            assert!(compressor.maximum_reduction_db > 1.0 && compressor.maximum_makeup_db > 0.0);
+            // The tone alone, with no envelope.
+            let mut plain = bypass_spec();
+            plain.tone = full.tone.clone();
+            plain.restoration_db = full.restoration_db;
+            assert_streamed_prepare_is_exact(&plain, &input);
+            // A de-esser whose reference cuts no frame, a compressor with no
+            // make-up, and a side gain with no decorrelated mid.
+            let mut variant = full.clone();
+            variant.phase_alignment = None;
+            variant.focus_envelopes.clear();
+            variant.side_gain = Some(crate::width::SideGain::gains([
+                0.0, 1.0, 2.0, 2.0, 1.0, 0.0,
+            ]));
+            if let Some(plan) = &mut variant.deesser {
+                plan.reference_excess_db = Some(60.0);
+            }
+            if let Some(settings) = &mut variant.compressor {
+                settings.section_makeup = false;
+            }
+            let (deesser, compressor) = assert_streamed_prepare_is_exact(&variant, &input);
+            assert_eq!(deesser.unwrap().cut_frames, 0);
+            assert!(compressor.unwrap().maximum_reduction_db > 1.0);
+            // A compressor that leaves the signal, and no de-esser.
+            variant.deesser = None;
+            if let Some(settings) = &mut variant.compressor {
+                settings.ratio = 1.0;
+            }
+            assert_streamed_prepare_is_exact(&variant, &input);
+        }
+    }
+
+    /// A renderer that keeps no 4x frames of its prefix gives the 4x
+    /// frames and the render of a renderer that keeps them (D251).
+    #[test]
+    fn a_prefix_without_its_4x_frames_gives_the_same_render() {
+        use crate::scratch::Frames;
+        // Longer than one segment, so peak control renders in parallel
+        // segments.
+        let frames = render_blocks::segment(48000) / 4 + 100_003;
+        let input = material(frames);
+        let spec = full_spec(frames);
+        let render = |upsampled_min_frames: usize| {
+            let mut renderer =
+                Renderer::with_scratch(&input, 48000, Box::new(crate::scratch::temporary));
+            renderer.upsampled_min_frames = upsampled_min_frames;
+            let rendered = renderer.render(&spec).unwrap();
+            let (_, mut up) = renderer.prepared_frames(&spec).unwrap();
+            let mut frames = Vec::new();
+            let count = up.len();
+            up.read(0, count, &mut frames).unwrap();
+            let kept = matches!(up, render_blocks::Up::Stored(_));
+            (rendered, frames, kept)
+        };
+        let (stored, stored_up, kept) = render(usize::MAX);
+        let (upsampled, upsampled_up, upsampled_kept) = render(0);
+        assert!(kept && !upsampled_kept);
+        let flat = |frames: &[Stereo]| bits(frames.iter().flatten().map(|&v| v as f64));
+        assert_eq!(flat(&upsampled_up), flat(&stored_up));
+        assert_eq!(
+            flat(&upsampled.audio.load().unwrap()),
+            flat(&stored.audio.load().unwrap())
+        );
+        assert_eq!(
+            serde_json::to_value(&upsampled).unwrap(),
+            serde_json::to_value(&stored).unwrap()
+        );
+    }
+
+    /// The audibility point of the prepared prefix of a lent source, with
+    /// the temporal analysis of the source in blocks, is the point of the
+    /// whole prefix (D257).
+    #[test]
+    fn the_point_of_a_prepared_prefix_is_the_point_of_the_whole_prefix() {
+        let frames = render_blocks::segment(48000) / 4 + 100_003;
+        let input = material(frames);
+        let spec = full_spec(frames);
+        let whole = crate::audibility::point(
+            &Renderer::new(&input, 48000).prefix(&spec).unwrap(),
+            3.0,
+            spec.clipper_db,
+            spec.ceiling_dbtp,
+            spec.limiter,
+            spec.true_peak,
+            Some(&crate::analysis::analyze(&input, 48000)),
+            48000,
+        )
+        .unwrap();
+        let mut stored = crate::audio_io::StoredSource::from_blocks(|each| {
+            for block in input.chunks(65_536) {
+                each(block)?;
+            }
+            Ok(48000)
+        })
+        .unwrap();
+        let mut source = RenderSource::Lent(&mut stored);
+        let mut scan = crate::analysis::Scan::new(frames, 48000);
+        crate::scratch::for_each_block(&mut source.frames(), |block| {
+            scan.push(block);
+            Ok(())
+        })
+        .unwrap();
+        let temporal = scan.finish();
+        let mut renderer =
+            Renderer::of_source(source.lend(), 48000, Box::new(crate::scratch::temporary)).unwrap();
+        let (prefix, mut up) = renderer.prepared_frames(&spec).unwrap();
+        let prepared = crate::audibility::point_on(
+            &mut crate::audibility::Prefix::Shared(crate::scratch::Shared(prefix)),
+            &mut up,
+            3.0,
+            spec.clipper_db,
+            spec.ceiling_dbtp,
+            spec.limiter,
+            spec.true_peak,
+            Some(&temporal),
+            48000,
+        )
+        .unwrap();
+        assert!(whole.is_some());
+        assert_eq!(
+            serde_json::to_value(&prepared).unwrap(),
+            serde_json::to_value(&whole).unwrap()
+        );
+    }
+
+    /// A render of a long recording stays in its scratch file from its peak
+    /// control. Its frames, its report and the measures of the candidate
+    /// are those of the render in memory, with the drive search, the
+    /// restoring passes and the local true-peak correction (D253).
+    #[test]
+    fn a_stored_render_gives_the_render_in_memory() {
+        // Longer than one segment, so peak control renders in parallel
+        // segments.
+        let frames = render_blocks::segment(48000) / 4 + 100_003;
+        let input = material(frames);
+        let mut spec = full_spec(frames);
+        spec.fixed_drive_db = None;
+        spec.restore_peak_tone = true;
+        spec.true_peak = dsp::TruePeak::Local;
+        let source = crate::pipeline::analyze_source(&input, 48000).unwrap();
+        let render = |stored_render_min_frames: usize| {
+            let mut renderer =
+                Renderer::with_scratch(&input, 48000, Box::new(crate::scratch::temporary));
+            renderer.stored_render_min_frames = stored_render_min_frames;
+            let rendered = renderer.render(&spec).unwrap();
+            let stored = rendered.audio.is_stored();
+            let frames = rendered.audio.load().unwrap();
+            let report = serde_json::to_value(&rendered).unwrap();
+            let measured = crate::selection::measure(&source, rendered).unwrap();
+            let measures = serde_json::json!([
+                measured.output,
+                measured.output_stereo,
+                measured.preservation,
+                measured.gain_span_db,
+                measured.low_sections,
+            ]);
+            (frames, report, measures, stored)
+        };
+        let (held, held_report, held_measures, held_stored) = render(usize::MAX);
+        let (stored, stored_report, stored_measures, stored_stored) = render(0);
+        assert!(!held_stored && stored_stored);
+        assert!(held_report["restoration"]["renders"].as_u64().unwrap() > 1);
+        let flat = |frames: &[Stereo]| bits(frames.iter().flatten().map(|&v| v as f64));
+        assert_eq!(flat(&stored), flat(&held));
+        assert_eq!(stored_report, held_report);
+        assert_eq!(stored_measures, held_measures);
+    }
 
     #[test]
     fn a_mono_safe_cut_stays_in_its_band_and_its_passages() {

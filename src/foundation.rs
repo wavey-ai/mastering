@@ -2,12 +2,13 @@
 //! The estimates supply measurements only; every treatment renders the original mix.
 use crate::{
     analysis::percentile,
-    audio_io::{Result, Stereo},
+    audio_io::Result,
     dsp::{EqBand, Kind},
     finishing::Domain,
+    scratch::Frames,
     treatment::{BlendPoint, FocusEnvelope, Tone},
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 pub const BANDS: usize = 29;
 const HOP: usize = 4096;
@@ -35,8 +36,9 @@ impl SpatialBands {
     }
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct Region {
+    #[serde(deserialize_with = "crate::static_text::text")]
     pub role: &'static str,
     pub domain: Domain,
     pub centre_hz: f64,
@@ -48,8 +50,9 @@ pub struct Region {
     pub gain_db: f64,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct Foundation {
+    #[serde(deserialize_with = "crate::static_text::text")]
     pub rule: &'static str,
     pub regions: Vec<Region>,
     pub tone: Tone,
@@ -80,11 +83,22 @@ fn ratio_gain(role: &SpatialBands, others: &[f64; 2], index: usize, domain: Doma
     after - before
 }
 
-fn reliable_windows(source: &[Stereo], reconstructed: &[Stereo], window: usize) -> Vec<bool> {
-    source
-        .chunks(window)
-        .zip(reconstructed.chunks(window))
-        .map(|(a, b)| {
+fn reliable_windows(
+    source: &mut impl Frames,
+    reconstructed: &mut impl Frames,
+    window: usize,
+) -> Result<Vec<bool>> {
+    let windows = source
+        .len()
+        .div_ceil(window)
+        .min(reconstructed.len().div_ceil(window));
+    let (mut a, mut buffer) = (Vec::new(), Vec::new());
+    (0..windows)
+        .map(|w| {
+            let start = w * window;
+            source.read(start, window.min(source.len() - start), &mut a)?;
+            let count = window.min(reconstructed.len() - start);
+            let b = reconstructed.window(start, count, &mut buffer)?;
             let (mut xx, mut yy, mut xy, mut error) = (0.0, 0.0, 0.0, 0.0);
             for (x, y) in a.iter().flatten().zip(b.iter().flatten()) {
                 let (x, y) = (*x as f64, *y as f64);
@@ -93,9 +107,9 @@ fn reliable_windows(source: &[Stereo], reconstructed: &[Stereo], window: usize) 
                 xy += x * y;
                 error += (x - y).powi(2);
             }
-            xx / a.len().max(1) as f64 > 1e-10
+            Ok(xx / a.len().max(1) as f64 > 1e-10
                 && db(error / xx.max(1e-30)) <= -18.0
-                && xy / (xx * yy).sqrt().max(1e-30) >= 0.98
+                && xy / (xx * yy).sqrt().max(1e-30) >= 0.98)
         })
         .collect()
 }
@@ -146,11 +160,11 @@ fn envelope(domain: Domain, index: usize, wet: &[f64], frames: usize, rate: u32)
 /// Return no treatment when source/stem geometry is unusable or no role has a
 /// sustained, locally reliable, bounded spatial opportunity. `spatial` holds
 /// the frames of the stems at `stem_rate`; `source` and `reconstructed` are
-/// at `rate`.
-pub fn propose(
+/// at `rate`. Each is read one window at a time.
+pub(crate) fn propose(
     spatial: &[Vec<SpatialBands>],
-    source: &[Stereo],
-    reconstructed: &[Stereo],
+    source: &mut impl Frames,
+    reconstructed: &mut impl Frames,
     stem_rate: u32,
     rate: u32,
 ) -> Result<Option<Foundation>> {
@@ -170,7 +184,7 @@ pub fn propose(
         return Ok(None);
     }
     let windows = source.len().div_ceil(window);
-    let mut reliable = reliable_windows(source, reconstructed, window);
+    let mut reliable = reliable_windows(source, reconstructed, window)?;
     reliable.resize(windows, false);
     let frame_count = spatial[0].len();
     let frame_bucket: Vec<_> = (0..frame_count)
@@ -376,9 +390,15 @@ mod tests {
                 other.side[band] = 4.0;
             }
         }
-        let foundation = propose(&spatial, &source, &source, 48000, 48000)
-            .unwrap()
-            .unwrap();
+        let foundation = propose(
+            &spatial,
+            &mut crate::scratch::Slice(&source),
+            &mut crate::scratch::Slice(&source),
+            48000,
+            48000,
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(foundation.regions.len(), 1);
         assert_eq!(foundation.regions[0].role, "bass");
         assert!(matches!(foundation.regions[0].domain, Domain::Mid));
@@ -407,9 +427,15 @@ mod tests {
             ];
             4
         ];
-        assert!(propose(&spatial, &source, &source, 48000, 48000)
-            .unwrap()
-            .is_none());
+        assert!(propose(
+            &spatial,
+            &mut crate::scratch::Slice(&source),
+            &mut crate::scratch::Slice(&source),
+            48000,
+            48000,
+        )
+        .unwrap()
+        .is_none());
     }
 
     #[test]
@@ -425,9 +451,15 @@ mod tests {
             ];
             4
         ];
-        assert!(propose(&spatial, &source, &source, 48000, 48000)
-            .unwrap()
-            .is_none());
+        assert!(propose(
+            &spatial,
+            &mut crate::scratch::Slice(&source),
+            &mut crate::scratch::Slice(&source),
+            48000,
+            48000,
+        )
+        .unwrap()
+        .is_none());
     }
 
     #[test]
@@ -463,9 +495,15 @@ mod tests {
                 other.side[band] = 4.0;
             }
         }
-        let foundation = propose(&spatial, &source, &source, 48000, 48000)
-            .unwrap()
-            .unwrap();
+        let foundation = propose(
+            &spatial,
+            &mut crate::scratch::Slice(&source),
+            &mut crate::scratch::Slice(&source),
+            48000,
+            48000,
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(foundation.regions.len(), 2);
         let bass = foundation
             .regions

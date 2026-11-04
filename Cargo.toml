@@ -28,3 +28,10 @@ alloc-stats = []
 
 [profile.release]
 opt-level = 3
+
+# The profile of the Lambda and WASM builds, for the local measurements of
+# speed and instructions (D227).
+[profile.measure]
+inherits = "release"
+lto = "fat"
+codegen-units = 1

@@ -2,7 +2,11 @@
 //! (`set.source-condition.v4`). The set and the cloud manifest report the
 //! condition; phase alignment (`stereo_phase`, D143), the tone stage (D146)
 //! and the capture stages (`capture`, D200, D201) read it.
-use crate::{audio_io::Stereo, pipeline::SourceAnalysis};
+use crate::{
+    audio_io::{Result, Stereo},
+    pipeline::SourceAnalysis,
+    scratch::{Frames, Slice},
+};
 use rustfft::{num_complex::Complex, FftPlanner};
 use serde::Serialize;
 
@@ -73,11 +77,27 @@ pub struct SourceCondition {
 /// The mean of each channel of `input` against full scale, in dBFS, at
 /// least `DC_FLOOR_DBFS`.
 pub fn dc_offset_dbfs(input: &[Stereo]) -> [f64; 2] {
-    let n = input.len().max(1) as f64;
-    std::array::from_fn(|c| {
-        let mean = input.iter().map(|f| f[c] as f64).sum::<f64>() / n;
-        (20.0 * mean.abs().max(1e-300).log10()).max(DC_FLOOR_DBFS)
-    })
+    dc_offset_read(&mut Slice(input)).expect("frames of a slice")
+}
+
+/// Frames of each block of a measure that reads a stored recording.
+const BLOCK: usize = 65_536;
+
+/// `dc_offset_dbfs` of the frames of `input`, read in blocks. Each channel
+/// sums its samples in order.
+fn dc_offset_read(input: &mut impl Frames) -> Result<[f64; 2]> {
+    let frames = input.len();
+    let mut sums = [0.0f64; 2];
+    let mut buffer = Vec::new();
+    for start in (0..frames).step_by(BLOCK) {
+        for f in input.window(start, BLOCK.min(frames - start), &mut buffer)? {
+            for c in 0..2 {
+                sums[c] += f[c] as f64;
+            }
+        }
+    }
+    let n = frames.max(1) as f64;
+    Ok(sums.map(|sum| (20.0 * (sum / n).abs().max(1e-300).log10()).max(DC_FLOOR_DBFS)))
 }
 
 /// One instrument group whose channels cancel (`antiphase_stems`).
@@ -233,6 +253,16 @@ pub fn measure(
     input_limited: bool,
     evidence: Option<&crate::stem_evidence::Evidence>,
 ) -> SourceCondition {
+    measure_read(&mut Slice(input), source, input_limited, evidence).expect("frames of a slice")
+}
+
+/// `measure` of the frames of `input`, read in blocks.
+pub(crate) fn measure_read(
+    input: &mut impl Frames,
+    source: &SourceAnalysis,
+    input_limited: bool,
+    evidence: Option<&crate::stem_evidence::Evidence>,
+) -> Result<SourceCondition> {
     let bands = &source.stereo.whole.bands;
     let antiphase_bands: Vec<usize> = bands
         .iter()
@@ -245,10 +275,10 @@ pub fn measure(
         })
         .map(|(i, _)| i)
         .collect();
-    SourceCondition {
+    Ok(SourceCondition {
         rule: RULE,
         mono: !bands.iter().any(|b| b.side_present),
-        bandwidth_hz: bandwidth_hz(input, source.sample_rate),
+        bandwidth_hz: bandwidth_read(input, source.sample_rate)?,
         input_limited,
         input_quiet: source
             .input
@@ -258,14 +288,19 @@ pub fn measure(
             antiphase_stems(&e.stem_images, &antiphase_bands)
         }),
         antiphase_bands,
-        dc_offset_dbfs: dc_offset_dbfs(input),
-    }
+        dc_offset_dbfs: dc_offset_read(input)?,
+    })
 }
 
 /// The codec low-pass of `input`: the centre of the largest fall of the mono
 /// spectrum within a sixth of an octave from 8 to 20 kHz, when the fall is
 /// `CUTOFF_FALL_DB` or more. `input` is at `rate`.
 pub fn bandwidth_hz(input: &[Stereo], rate: u32) -> Option<f64> {
+    bandwidth_read(&mut Slice(input), rate).expect("frames of a slice")
+}
+
+/// `bandwidth_hz` of the frames of `input`, read one FFT block at a time.
+fn bandwidth_read(input: &mut impl Frames, rate: u32) -> Result<Option<f64>> {
     let rate = rate as f64;
     let fft = FftPlanner::new().plan_fft_forward(FFT);
     let window: Vec<f64> = (0..FFT)
@@ -274,10 +309,12 @@ pub fn bandwidth_hz(input: &[Stereo], rate: u32) -> Option<f64> {
     let mut power = vec![0.0f64; FFT / 2 + 1];
     let mut buffer = vec![Complex::new(0.0, 0.0); FFT];
     let mut scratch = vec![Complex::new(0.0, 0.0); fft.get_inplace_scratch_len()];
+    let mut frames = Vec::new();
     // Every third block: the long-term spectrum at a third of the work.
     for start in (0..input.len().saturating_sub(FFT)).step_by(3 * FFT) {
+        let block = input.window(start, FFT, &mut frames)?;
         for (k, b) in buffer.iter_mut().enumerate() {
-            let f = input[start + k];
+            let f = block[k];
             *b = Complex::new(0.5 * (f[0] as f64 + f[1] as f64) * window[k], 0.0);
         }
         fft.process_with_scratch(&mut buffer, &mut scratch);
@@ -301,12 +338,12 @@ pub fn bandwidth_hz(input: &[Stereo], rate: u32) -> Option<f64> {
     let (low, high) = CUTOFF_SEARCH_HZ;
     let top = high * 2f64.powf(-1.0 / 6.0);
     let steps = 60;
-    (0..steps)
+    Ok((0..steps)
         .map(|i| low * (top / low).powf(i as f64 / (steps - 1) as f64))
         .map(|hz| (level(hz) - level(hz * 2f64.powf(1.0 / 6.0)), hz))
         .filter(|(fall, _)| *fall >= CUTOFF_FALL_DB)
         .max_by(|a, b| a.0.total_cmp(&b.0))
-        .map(|(_, hz)| hz * 2f64.powf(1.0 / 12.0))
+        .map(|(_, hz)| hz * 2f64.powf(1.0 / 12.0)))
 }
 
 #[cfg(test)]

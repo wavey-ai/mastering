@@ -225,6 +225,8 @@ fn restoration_reports_the_local_rule_and_does_not_widen_the_change() {
     assert_eq!(restoration.rule, "set.peak-tone-restoration.v4");
     assert!(restoration.renders >= 1 && restoration.renders <= 3);
     assert_eq!(restoration.window_samples, 16_384);
+    // The first render takes the gains of the spec (D285).
+    assert_eq!(restoration.measured_gains_db, spec.restoration_db);
     for band in 0..6 {
         if restoration.material[band] {
             let (measured, delivered) = (

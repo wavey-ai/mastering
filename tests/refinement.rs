@@ -81,24 +81,24 @@ fn strength_and_passages_follow_measured_stem_distribution() {
         let focus = &result.focus[0];
         assert_eq!(focus.probes.len(), 9);
         assert!((0.0..=6.0).contains(&focus.filter.gain_db));
-        assert!(focus.selected_ratio_improvement_db.unwrap() > 0.1);
-        assert!(focus.envelope.iter().any(|p| p.wet == 0.0));
-        assert!(focus.envelope.iter().any(|p| p.wet > 0.5));
-        assert!(focus
-            .envelope
-            .iter()
-            .filter(|p| (21 * 48000..23 * 48000).contains(&p.sample))
-            .all(|p| p.wet == 0.0));
+        assert!(focus.selected_ratio_improvement_db.unwrap() > 0.0);
+        // The passage from 21 to 23 s has no vocal overlap, so the bell is
+        // a static bell at the gain of its mean passage share (D220).
+        let strength = focus.strength_gain_db.unwrap();
+        let wet = focus.mean_wet.unwrap();
+        assert!(wet > 0.0 && wet < 1.0, "{wet}");
+        let blend = 20.0 * (1.0 + wet * (10f64.powf(strength / 20.0) - 1.0)).log10();
+        assert!((focus.filter.gain_db - blend).abs() < 1e-9);
+        assert!(focus.filter.gain_db < strength);
         strengths.push(focus.filter.gain_db);
         assert_eq!(stem_evidence::fingerprint(&source), before);
-        let (tone, envelopes, scale) = result.apply(&proposals().proposals[0].tone).unwrap();
+        let (tone, scale) = result.apply(&proposals().proposals[0].tone).unwrap();
         assert_eq!(scale, 1.0);
-        assert_eq!(envelopes.len(), 1);
+        assert_eq!(tone.mid[0].gain_db, focus.filter.gain_db);
         let mut rendered = source.clone();
-        tone.apply_with_envelopes(&mut rendered, &envelopes, 48000)
+        tone.apply_with_envelopes(&mut rendered, &[], 48000)
             .unwrap();
         assert!(rendered.iter().flatten().all(|x| x.is_finite()));
-        assert!(rendered[21 * 48000..23 * 48000] == source[21 * 48000..23 * 48000]);
         assert!(rendered != source);
     }
     assert!(
@@ -199,27 +199,30 @@ fn passage_filters_preserve_dry_audio_and_validate_envelopes() {
 }
 
 #[test]
-fn a_locally_unreliable_passage_cannot_keep_focus_active() {
+fn a_locally_unreliable_passage_takes_no_share_of_the_focus_bell() {
     let (source, mut stems) = material(0.3, 0.06);
+    let share = |stems: &[Vec<Stereo>; 4]| {
+        let raw = stems.each_ref().map(Vec::as_slice);
+        let evidence = stem_evidence::analyze(&source, raw, 48000, 48000).unwrap();
+        assert!(
+            evidence.usable,
+            "global sum can pass despite local corruption"
+        );
+        let result =
+            refinement::analyze(&source, raw, 48000, &evidence, Some(&proposals()), 48000).unwrap();
+        (
+            result.passages[0].reliable,
+            result.focus[0].mean_wet.unwrap(),
+        )
+    };
+    let (clean_reliable, clean) = share(&stems);
+    assert!(clean_reliable);
     for frame in &mut stems[2][..4800] {
         for sample in frame {
             *sample *= 2.0;
         }
     }
-    let raw = stems.each_ref().map(Vec::as_slice);
-    let evidence = stem_evidence::analyze(&source, raw, 48000, 48000).unwrap();
-    assert!(
-        evidence.usable,
-        "global sum can pass despite local corruption"
-    );
-    let result =
-        refinement::analyze(&source, raw, 48000, &evidence, Some(&proposals()), 48000).unwrap();
-    assert!(!result.passages[0].reliable);
-    assert!(result.passages[1].reliable);
-    let envelope = &result.focus[0].envelope;
-    assert!(!envelope.is_empty());
-    assert_eq!(
-        envelope.iter().find(|p| p.sample == 48000).unwrap().wet,
-        0.0
-    );
+    let (reliable, corrupted) = share(&stems);
+    assert!(!reliable);
+    assert!(corrupted < clean, "{corrupted} against {clean}");
 }

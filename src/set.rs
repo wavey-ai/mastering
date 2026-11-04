@@ -1,7 +1,7 @@
 //! One source-led job: propose, render, compare, and deliver completed versions.
 use crate::{
     analysis, audibility,
-    audio_io::{Result, Stereo},
+    audio_io::{self, Result, Stereo},
     broad_tone, compressor, deesser,
     dsp::{self, EqBand},
     finishing, foundation,
@@ -85,6 +85,11 @@ pub struct DensityPolicy {
 pub struct Options {
     /// Target of the track in its album (`album::levels`), in LUFS.
     pub album_target_lufs: Option<f64>,
+    /// The mean regions of the album mixes (`album::mean_regions`). With
+    /// them, each version takes the moves of the album mean within the
+    /// bounds of the mix, and keeps the air against presence of the mix
+    /// (`set.version-character.v3`, D215, D273).
+    pub album_regions: Option<crate::character::Regions>,
     /// The de-esser switch (`set.deesser.v4`). With true, the versions cut
     /// the sibilant frames of the vocal. With false, the default, the
     /// de-esser keeps its key and its measure and cuts nothing: album masters
@@ -97,7 +102,11 @@ mod options_tests {
     #[test]
     fn the_de_esser_is_off_by_default() {
         let options = super::Options::default();
-        assert!(!options.deesser && options.album_target_lufs.is_none());
+        assert!(
+            !options.deesser
+                && options.album_target_lufs.is_none()
+                && options.album_regions.is_none()
+        );
     }
 }
 
@@ -128,7 +137,7 @@ pub struct Branch {
 
 /// Fixed version roles of one set, lightest treatment first. Every version is
 /// a complete master; the IDs (`essential`, `master`, `bold`) stay stable.
-/// The labels are the likeliest names until `set.version-names.v1` names the
+/// The labels are the likeliest names until `set.version-names.v2` names the
 /// delivered versions from their measured sound.
 pub const ESSENTIAL_LABEL: &str = "Essential";
 pub const MASTER_LABEL: &str = "Forward";
@@ -164,6 +173,10 @@ pub struct Report {
     pub limiter_basis: String,
     pub output: Metrics,
     pub output_stereo: stereo::StereoAnalysis,
+    /// The measures of the controls on the render (`selection::Measured`).
+    /// A version record holds them beside its report (D330).
+    #[serde(skip)]
+    pub measures: crate::adjust::Delivered,
     pub preservation: analysis::Preservation,
     pub gain_span_db: f64,
     pub source_constraint_diagnostics: Vec<&'static str>,
@@ -205,7 +218,7 @@ pub struct Trial {
     /// The measured name of a version other than Essential.
     pub measured_name: Option<String>,
     /// The measured changes behind the description, in figures, for a
-    /// delivered version (`set.version-names.v1` writes the description).
+    /// delivered version (`set.version-names.v2` writes the description).
     pub detail: Option<String>,
     /// The characters behind the name of a delivered version.
     pub naming: Option<crate::version_names::Named>,
@@ -268,36 +281,120 @@ pub trait Sink {
         Ok(())
     }
     /// The names and descriptions of the delivered versions
-    /// (`set.version-names.v1`), after the last version. A version whose
-    /// naming is not `distinct` is withdrawn: the sink removes it.
+    /// (`set.version-names.v2`), after the last version. A version whose
+    /// naming is not `distinct` leaves the set: the sink removes it.
     fn name(&mut self, _named: &[crate::version_names::Named]) -> Result<()> {
         Ok(())
     }
 }
 
 pub fn matched_residual_db(reference: &[Stereo], candidate: &[Stereo]) -> Result<f64> {
-    if reference.len() != candidate.len() || reference.is_empty() {
-        return Err("Duplicate comparison requires equal nonempty frame counts".into());
-    }
-    let (mut cross, mut a_power, mut b_power) = (0.0, 0.0, 0.0);
-    for (a, b) in reference.iter().flatten().zip(candidate.iter().flatten()) {
-        if !a.is_finite() || !b.is_finite() {
-            return Err("Nonfinite duplicate comparison".into());
-        }
-        let (a, b) = (*a as f64, *b as f64);
-        cross += a * b;
-        a_power += a * a;
-        b_power += b * b;
+    matched_residual_in_blocks(
+        |each| each(reference),
+        &mut crate::scratch::Slice(candidate),
+    )
+}
+
+/// `matched_residual_db` of a delivered WAV at `rate`. Each call of `open`
+/// gives a reader of the WAV and its length in bytes. The comparison reads
+/// the WAV twice in blocks, once for the gain and once for the residual, so
+/// it holds one block of the reference.
+pub fn matched_residual_db_of_wav<R: std::io::Read>(
+    open: impl FnMut() -> Result<(R, u64)>,
+    rate: u32,
+    candidate: &[Stereo],
+) -> Result<f64> {
+    matched_residual_db_of_wav_read(open, rate, &mut crate::scratch::Slice(candidate))
+}
+
+/// `matched_residual_db_of_wav` of the frames of `candidate`, read at the
+/// place of each block of the WAV (D255).
+pub(crate) fn matched_residual_db_of_wav_read<R: std::io::Read>(
+    mut open: impl FnMut() -> Result<(R, u64)>,
+    rate: u32,
+    candidate: &mut impl crate::scratch::Frames,
+) -> Result<f64> {
+    matched_residual_in_blocks(
+        |each| {
+            let (reader, bytes) = open()?;
+            if audio_io::read_blocks(reader, bytes, |_, block| each(block))? != rate {
+                return Err("A delivered version differs in sample rate".into());
+            }
+            Ok(())
+        },
+        candidate,
+    )
+}
+
+/// The comparison of `matched_residual_db`. Each call of `reference` gives
+/// the frames of the reference to `each`, in order, in blocks.
+fn matched_residual_in_blocks(
+    mut reference: impl FnMut(&mut dyn FnMut(&[Stereo]) -> Result<()>) -> Result<()>,
+    candidate: &mut impl crate::scratch::Frames,
+) -> Result<f64> {
+    // The sums carry from block to block in the order of the samples. Each
+    // block folds them as local values, which stay in registers.
+    let (mut cross, mut a_power, mut b_power, mut finite) = (0.0, 0.0, 0.0, true);
+    block_pairs(&mut reference, candidate, |block, other| {
+        (cross, a_power, b_power, finite) = samples(block, other).fold(
+            (cross, a_power, b_power, finite),
+            |(cross, a_power, b_power, finite), (a, b)| {
+                let (x, y) = (a as f64, b as f64);
+                (
+                    cross + x * y,
+                    a_power + x * x,
+                    b_power + y * y,
+                    finite && a.is_finite() && b.is_finite(),
+                )
+            },
+        );
+    })?;
+    if !finite {
+        return Err("Nonfinite duplicate comparison".into());
     }
     // Positive gain only: polarity inversion is not the same interpretation.
     let gain = (cross / b_power.max(1e-30)).max(0.0);
-    let residual: f64 = reference
-        .iter()
-        .flatten()
-        .zip(candidate.iter().flatten())
-        .map(|(a, b)| (*a as f64 - gain * *b as f64).powi(2))
-        .sum();
+    let mut residual = 0.0;
+    block_pairs(&mut reference, candidate, |block, other| {
+        residual = samples(block, other).fold(residual, |sum, (a, b)| {
+            sum + (a as f64 - gain * b as f64).powi(2)
+        });
+    })?;
     Ok(dsp::db((residual / a_power.max(1e-30)).sqrt()))
+}
+
+/// Gives each block of the reference and the frames of `candidate` at its
+/// place to `each`, in order.
+fn block_pairs(
+    reference: &mut impl FnMut(&mut dyn FnMut(&[Stereo]) -> Result<()>) -> Result<()>,
+    candidate: &mut impl crate::scratch::Frames,
+    mut each: impl FnMut(&[Stereo], &[Stereo]),
+) -> Result<()> {
+    const LENGTHS: &str = "Duplicate comparison requires equal nonempty frame counts";
+    let total = candidate.len();
+    let mut frames = 0;
+    let mut buffer = Vec::new();
+    reference(&mut |block| {
+        if block.len() > total - frames {
+            return Err(LENGTHS.into());
+        }
+        let other = candidate.window(frames, block.len(), &mut buffer)?;
+        each(block, other);
+        frames += block.len();
+        Ok(())
+    })?;
+    if frames != total || frames == 0 {
+        return Err(LENGTHS.into());
+    }
+    Ok(())
+}
+
+/// The samples of two blocks of one length in pairs: the left channel and
+/// then the right channel of each frame.
+fn samples<'a>(a: &'a [Stereo], b: &'a [Stereo]) -> impl Iterator<Item = (f32, f32)> + 'a {
+    a.iter()
+        .zip(b)
+        .flat_map(|(a, b)| [(a[0], b[0]), (a[1], b[1])])
 }
 
 pub(crate) fn candidate_status(rule: &str, duplicate: bool) -> &'static str {
@@ -325,10 +422,6 @@ pub const BASE_TARGET_LUFS: (f64, f64) = (-20.0, -8.0);
 /// Twelve-second window contrast (P90−P10 RMS) above which the loud
 /// passages set the base target.
 pub const CONTRAST_FREE_DB: f64 = 6.0;
-/// Playback level streaming services normalise to. The listener hears a
-/// master no louder than this, so the equal-loudness compensation uses the
-/// smaller of the base target and this level.
-pub const STREAMING_NORMALISATION_LUFS: f64 = -14.0;
 /// Every version sits this far under the audibility point of peak control
 /// (`set.audible-loudness.v6`, D206). Hot single reference masters sit at their
 /// audibility points, so the margin is zero. Each version stays at or under
@@ -368,6 +461,20 @@ pub const FOUNDATION_IN_VERSIONS: bool = false;
 /// `LOW_SIDE_BELL_DB` (D128).
 pub const LOW_SIDE_BELL_HZ: f64 = 500.0;
 pub const LOW_SIDE_BELL_DB: f64 = 1.5;
+/// The smallest change of the mix that a focus bell of the refinement must
+/// make in its octave band over the recording, in dB. A bell under it
+/// leaves the versions (D128, D220, `set.focus-change.v2`).
+pub const FOCUS_CHANGE_DB: f64 = 0.5;
+
+/// A focus bell of the refinement that changes the mix by less than
+/// `FOCUS_CHANGE_DB` in its band (`set.focus-change.v2`).
+#[derive(Clone, Copy)]
+struct QuietFocus {
+    domain: finishing::Domain,
+    hz: f64,
+    q: f64,
+    change_db: f64,
+}
 /// First drive of a base version above the loudness difference, in dB. The
 /// offset sits near the final drive of a base render, so the drive search
 /// starts close to its result.
@@ -477,7 +584,7 @@ fn density(source: &SourceAnalysis, audibility: Option<audibility::Point>) -> De
     }
 }
 
-/// The branches of the set (`set.version-character.v1`, D206): Essential,
+/// The branches of the set (`set.version-character.v3`, D206): Essential,
 /// Full and Warm, each with the tone of its `character::Character` on top
 /// of the stem focus, with its own widening. A version whose widening gives
 /// the bands from 500 Hz up no gain carries the measured side cut.
@@ -486,6 +593,7 @@ fn branches(
     focus: Option<&source_treatments::ProposalSet>,
     side_cut: Option<EqBand>,
     widening: &width::Widening,
+    album: Option<&crate::character::Regions>,
 ) -> Vec<Branch> {
     let focus_proposal = focus.and_then(|f| {
         f.proposals
@@ -507,16 +615,20 @@ fn branches(
     .map(|(id, label)| {
         let character = crate::character::of(id).expect("a version of the set");
         let side = widening.of(id);
-        let plan = crate::character::plan(spectrum, character, &base, side.as_ref());
+        let plan = crate::character::plan(spectrum, character, &base, side.as_ref(), album);
         let mut tone = plan.tone.clone();
         if side.is_none_or(|g| g.bands_db[2..].iter().all(|x| *x <= 0.0)) {
             tone.side.extend(side_cut);
         }
         let mut basis = vec![format!(
-            "{}: region moves {} from the mix {}, predicted {} at gain scale {:.3}",
+            "{}: region moves {} from the mix {}{}, predicted {} at gain scale {:.3}",
             plan.rule,
             serde_json::to_string(&plan.wanted).expect("finite"),
             serde_json::to_string(&plan.mix).expect("finite"),
+            plan.album.map_or(String::new(), |a| format!(
+                " in an album with the mean regions {}",
+                serde_json::to_string(&a).expect("finite")
+            )),
             serde_json::to_string(&plan.predicted).expect("finite"),
             plan.scale,
         )];
@@ -557,9 +669,33 @@ fn branches(
 }
 
 /// The foundation and the branch tone in one tone at `rate`.
+/// The index of the bell of `quiet` in its domain of `tone`.
+fn band_index(tone: &Tone, quiet: &QuietFocus) -> Option<usize> {
+    let bands = match quiet.domain {
+        finishing::Domain::Mid => &tone.mid,
+        finishing::Domain::Side => &tone.side,
+        finishing::Domain::Stereo => return None,
+    };
+    bands
+        .iter()
+        .position(|b| b.hz == quiet.hz && b.q == quiet.q)
+}
+
+/// Remove the bell of `quiet` from `tone`.
+fn remove_band(tone: &mut Tone, quiet: &QuietFocus) {
+    let Some(index) = band_index(tone, quiet) else {
+        return;
+    };
+    match quiet.domain {
+        finishing::Domain::Mid => tone.mid.remove(index),
+        _ => tone.side.remove(index),
+    };
+}
+
+/// The foundation filters, then the branch filters. The envelopes are the
+/// envelopes of the foundation.
 fn with_foundation(
     mut branch: Tone,
-    branch_envelopes: Vec<FocusEnvelope>,
     foundation: &foundation::Foundation,
     rate: u32,
 ) -> Result<(Tone, Vec<FocusEnvelope>, f64)> {
@@ -582,16 +718,7 @@ fn with_foundation(
             }
         }
     };
-    let mut envelopes = foundation.envelopes.clone();
-    for mut envelope in branch_envelopes {
-        envelope.filter_index += match envelope.domain {
-            finishing::Domain::Stereo => foundation.tone.stereo.len(),
-            finishing::Domain::Mid => foundation.tone.mid.len(),
-            finishing::Domain::Side => foundation.tone.side.len(),
-        };
-        envelopes.push(envelope);
-    }
-    Ok((tone, envelopes, scale))
+    Ok((tone, foundation.envelopes.clone(), scale))
 }
 
 /// True when two tones differ in a filter.
@@ -636,6 +763,36 @@ mod foundation_plan_tests {
         foundation::{Foundation, Region},
         treatment::BlendPoint,
     };
+
+    #[test]
+    fn a_quiet_focus_bell_leaves_the_tone() {
+        let band = |hz: f64| EqBand {
+            kind: Kind::Peak,
+            hz,
+            q: 2.0,
+            gain_db: 1.5,
+        };
+        let mut tone = Tone {
+            side: vec![band(335.0), band(605.0), band(2016.0)],
+            mid: vec![band(335.0)],
+            ..Tone::default()
+        };
+        let quiet = QuietFocus {
+            domain: Domain::Side,
+            hz: 335.0,
+            q: 2.0,
+            change_db: 0.46,
+        };
+        remove_band(&mut tone, &quiet);
+        assert_eq!(
+            tone.side.iter().map(|b| b.hz).collect::<Vec<_>>(),
+            [605.0, 2016.0]
+        );
+        assert_eq!(tone.mid.len(), 1);
+        // A bell that the tone does not hold changes nothing.
+        remove_band(&mut tone, &quiet);
+        assert_eq!(tone.side.len(), 2);
+    }
 
     #[test]
     fn candidates_render_alike_only_with_the_same_reasons_gates_and_specs() {
@@ -960,7 +1117,7 @@ mod foundation_plan_tests {
     }
 
     #[test]
-    fn shared_foundation_precedes_family_tone_and_shifts_its_envelope() {
+    fn shared_foundation_precedes_family_tone_and_keeps_its_envelope() {
         let filter = |hz| EqBand {
             kind: Kind::Peak,
             hz,
@@ -997,28 +1154,18 @@ mod foundation_plan_tests {
             envelopes: vec![FocusEnvelope {
                 domain: Domain::Mid,
                 filter_index: 0,
-                points: points.clone(),
+                points,
             }],
         };
         let branch = Tone {
             mid: vec![filter(1000.0)],
             ..Tone::default()
         };
-        let (tone, envelopes, scale) = with_foundation(
-            branch,
-            vec![FocusEnvelope {
-                domain: Domain::Mid,
-                filter_index: 0,
-                points,
-            }],
-            &foundation,
-            48000,
-        )
-        .unwrap();
+        let (tone, envelopes, scale) = with_foundation(branch, &foundation, 48000).unwrap();
         assert_eq!(tone.mid.len(), 2);
         assert_eq!(
             envelopes.iter().map(|e| e.filter_index).collect::<Vec<_>>(),
-            vec![0, 1]
+            vec![0]
         );
         assert_eq!(scale, 1.0);
         let centers: Vec<f64> = (0..200)
@@ -1038,7 +1185,7 @@ mod foundation_plan_tests {
         let widening = width::widening(&crate::stereo::analyze(&audio, 48000).unwrap());
         // Every version is planned, each with its own tone and the gates of
         // its stereo image; Essential carries the shared foundation.
-        let branches = branches(&spectrum, None, None, &widening);
+        let branches = branches(&spectrum, None, None, &widening, None);
         assert_eq!(
             branches.iter().map(|b| b.id.as_str()).collect::<Vec<_>>(),
             ["essential", "master", "open"]
@@ -1541,7 +1688,6 @@ pub fn bass_candidates(candidates: &[Candidate], shelves: &[EqBand]) -> Vec<Cand
 #[allow(clippy::too_many_arguments)]
 pub fn base_ladder(
     renderer: &mut Renderer<'_>,
-    input: &[Stereo],
     source: &SourceAnalysis,
     reference: Option<&selection::Reference>,
     reference_spec: Option<&Spec>,
@@ -1557,7 +1703,6 @@ pub fn base_ladder(
     if !bass_shelves.is_empty() {
         let (bass_chosen, tried) = selection::ladder(
             renderer,
-            input,
             source,
             reference,
             reference_spec,
@@ -1571,7 +1716,6 @@ pub fn base_ladder(
         ladder = candidates;
         let (plain_chosen, plain) = selection::ladder(
             renderer,
-            input,
             source,
             reference,
             reference_spec,
@@ -1581,20 +1725,29 @@ pub fn base_ladder(
         trials.extend(plain);
         chosen = plain_chosen;
     }
-    let Some(first) = chosen else {
+    let Some(mut first) = chosen else {
         return Ok((None, trials));
     };
-    let Some(lifted) = lift
-        .then(|| sub_lift(source, &first, &ladder[first.index]))
-        .flatten()
-    else {
+    let lifted = match lift {
+        true => sub_lift(source, &first, &ladder[first.index])?,
+        false => None,
+    };
+    let Some(lifted) = lifted else {
         return Ok((Some(first), trials));
     };
     let index = first.index;
-    let (second, mut tried) =
-        selection::one(renderer, input, source, reference, &lifted, |_, reason| {
-            progress(index, reason)
-        })?;
+    // The first render waits in scratch while the second renders, so the
+    // sub lift holds three buffers of the source length at its peak in
+    // place of four (D226).
+    let spilled = renderer.spill(&mut first.measured.rendered.audio)?;
+    let (second, mut tried) = selection::one(
+        renderer,
+        source,
+        reference,
+        &lifted,
+        &first.measured.rendered,
+        |_, reason| progress(index, reason),
+    )?;
     for trial in &mut tried {
         trial.index = index;
     }
@@ -1605,7 +1758,12 @@ pub fn base_ladder(
                 second.index = index;
                 second
             }
-            None => first,
+            None => {
+                if let Some(spilled) = spilled {
+                    spilled.restore(&mut first.measured.rendered.audio)?;
+                }
+                first
+            }
         }),
         trials,
     ))
@@ -1617,27 +1775,43 @@ pub fn base_ladder(
 /// mid regions of the render (`open::mid_regions_db`) fall short of those
 /// that the tone predicts on the mix; `open::lift` solves the shelves again
 /// with each shortfall. The candidate keeps the gates of `planned`, the
-/// candidate that was chosen, and solves its low-end hold again. None
-/// without bass shelves or a shortfall of `open::LIFT_MINIMUM_DB`.
+/// candidate that was chosen, and solves its low-end hold again. Its render
+/// starts at the drive and the restoring gains of the chosen render
+/// (`selection::one`). None without bass shelves or a shortfall of
+/// `open::LIFT_MINIMUM_DB`.
 pub fn sub_lift(
     source: &SourceAnalysis,
     chosen: &selection::Chosen,
     planned: &Candidate,
+) -> Result<Option<Candidate>> {
+    if !crate::open::carries_bass_shelves(&chosen.spec.tone) {
+        return Ok(None);
+    }
+    // The spectrum reads the render in batches of hops, so a stored render
+    // stays in its scratch file (D253).
+    let spectrum = crate::spectrum_read(
+        &mut chosen.measured.rendered.audio.frames(),
+        source.sample_rate,
+    )?;
+    Ok(lifted(source, chosen, planned, &spectrum))
+}
+
+/// `sub_lift` with the long-term spectrum `delivered_spectrum` of the
+/// chosen render.
+fn lifted(
+    source: &SourceAnalysis,
+    chosen: &selection::Chosen,
+    planned: &Candidate,
+    delivered_spectrum: &crate::Spectrum,
 ) -> Option<Candidate> {
     use crate::finishing::Domain;
-    if !crate::open::carries_bass_shelves(&chosen.spec.tone) {
-        return None;
-    }
     let rate = source.sample_rate;
     let (tone, envelopes) = chosen.spec.effective_tone();
     let predicted = crate::open::mid_regions_db(&source.spectrum, |hz| {
         selection::domain_response_db(&tone.stereo, &envelopes, Domain::Stereo, hz, rate)
             + selection::domain_response_db(&tone.mid, &envelopes, Domain::Mid, hz, rate)
     });
-    let delivered = crate::open::mid_regions_db(
-        &crate::spectrum(&chosen.measured.rendered.audio, rate),
-        |_| 0.0,
-    );
+    let delivered = crate::open::mid_regions_db(delivered_spectrum, |_| 0.0);
     let stereo = crate::open::lift(
         &source.spectrum,
         &chosen.spec.tone.stereo,
@@ -1882,6 +2056,16 @@ pub struct WorkerPlan {
     pub families: Vec<WorkerFamily>,
 }
 
+impl WorkerPlan {
+    /// The JSON of the plan for the workers: each distinct key of its specs
+    /// once (`distributed::share_specs`, D266).
+    pub fn to_json(&self) -> Result<serde_json::Value> {
+        let mut plan = serde_json::to_value(self)?;
+        crate::distributed::share_specs(&mut plan);
+        Ok(plan)
+    }
+}
+
 pub struct PreparedSet {
     source: SourceAnalysis,
     density: DensityPolicy,
@@ -1908,6 +2092,8 @@ pub struct PreparedSet {
     low_mid: Option<crate::treatment::EnvelopedBand>,
     glue: Option<compressor::Settings>,
     compression: Option<compressor::Plan>,
+    /// The focus bells that no version carries (`set.focus-change.v1`).
+    quiet_focus: Vec<QuietFocus>,
 }
 
 /// The audibility point of the base chain of `input` (`set.audible-loudness.v6`):
@@ -1965,10 +2151,289 @@ pub fn prepare_with(
     auditory: Option<AuditoryInput<'_>>,
     options: Options,
 ) -> Result<PreparedSet> {
+    prepare_mix(
+        PrepareMix::Whole(input),
+        None,
+        rate,
+        evidence,
+        auditory,
+        options,
+        crate::render_blocks::upsampled_min_frames(rate),
+    )
+}
+
+/// `prepare_with` of a mix that the caller owns. The mix waits in scratch
+/// storage from the source analysis to the end of the attack stage, and
+/// then returns to `input` (D234, D247).
+pub fn prepare_holding(
+    input: &mut Vec<Stereo>,
+    rate: u32,
+    evidence: Option<stem_evidence::Evidence>,
+    auditory: Option<AuditoryInput<'_>>,
+    options: Options,
+) -> Result<PreparedSet> {
+    prepare_mix(
+        PrepareMix::Held(input),
+        None,
+        rate,
+        evidence,
+        auditory,
+        options,
+        crate::render_blocks::upsampled_min_frames(rate),
+    )
+}
+
+/// `prepare_with` of a mix in scratch storage, at its render rate. The
+/// measures, the prefix and the renders read the mix in blocks and spans,
+/// so no stage holds a buffer of the mix (D250).
+pub fn prepare_stored(
+    mix: &mut audio_io::StoredSource,
+    evidence: Option<stem_evidence::Evidence>,
+    auditory: Option<AuditoryInput<'_>>,
+    options: Options,
+) -> Result<PreparedSet> {
+    let rate = mix.sample_rate;
+    prepare_mix(
+        PrepareMix::Stored,
+        Some(&mut mix.audio),
+        rate,
+        evidence,
+        auditory,
+        options,
+        crate::render_blocks::upsampled_min_frames(rate),
+    )
+}
+
+/// The mix of `prepare_mix`.
+enum PrepareMix<'a> {
+    Whole(&'a [Stereo]),
+    /// A mix of the caller that waits in scratch storage while the prefix
+    /// renders.
+    Held(&'a mut Vec<Stereo>),
+    /// A mix in scratch storage, which `prepare_mix` takes beside it.
+    Stored,
+}
+
+/// The mix of `prepare_mix` in scratch storage: a held mix, or a stored mix
+/// of the caller.
+enum MixStore<'a> {
+    Spilled(crate::scratch::Pcm),
+    Stored(&'a mut crate::scratch::Pcm),
+}
+
+impl MixStore<'_> {
+    fn pcm(&mut self) -> &mut crate::scratch::Pcm {
+        match self {
+            MixStore::Spilled(stored) => stored,
+            MixStore::Stored(stored) => stored,
+        }
+    }
+}
+
+impl<'a> PrepareMix<'a> {
+    /// The frames of a mix in memory. A stored mix has none.
+    fn audio(&self) -> &[Stereo] {
+        match self {
+            PrepareMix::Whole(audio) => audio,
+            PrepareMix::Held(audio) => audio,
+            PrepareMix::Stored => &[],
+        }
+    }
+
+    /// A held mix in scratch storage. Its buffer is freed.
+    fn spill(&mut self) -> Result<Option<MixStore<'a>>> {
+        Ok(match self {
+            PrepareMix::Whole(_) | PrepareMix::Stored => None,
+            PrepareMix::Held(audio) => {
+                let stored = crate::scratch::Pcm::temporary_of(audio)?;
+                **audio = Vec::new();
+                Some(MixStore::Spilled(stored))
+            }
+        })
+    }
+
+    /// Read a held mix back into the buffer of the caller.
+    fn restore(&mut self, spilled: Option<MixStore<'_>>) -> Result<()> {
+        if let (PrepareMix::Held(audio), Some(MixStore::Spilled(mut stored))) = (self, spilled) {
+            let frames = crate::scratch::Frames::len(&stored);
+            crate::scratch::Frames::read(&mut stored, 0, frames, audio)?;
+        }
+        Ok(())
+    }
+}
+
+/// The frames of the mix of `prepare_mix`: the mix of the caller, or the mix
+/// in scratch storage.
+enum MixRead<'a> {
+    Whole(crate::scratch::Slice<'a>),
+    Stored(&'a mut crate::scratch::Pcm),
+}
+
+impl<'a> MixRead<'a> {
+    fn of(spilled: &'a mut Option<MixStore<'_>>, audio: &'a [Stereo]) -> Self {
+        match spilled {
+            Some(stored) => MixRead::Stored(stored.pcm()),
+            None => MixRead::Whole(crate::scratch::Slice(audio)),
+        }
+    }
+}
+
+impl crate::scratch::Frames for MixRead<'_> {
+    fn len(&self) -> usize {
+        match self {
+            MixRead::Whole(audio) => audio.len(),
+            MixRead::Stored(stored) => stored.len(),
+        }
+    }
+
+    fn read(&mut self, start: usize, count: usize, output: &mut Vec<Stereo>) -> Result<()> {
+        match self {
+            MixRead::Whole(audio) => audio.read(start, count, output),
+            MixRead::Stored(stored) => stored.read(start, count, output),
+        }
+    }
+
+    fn window<'b>(
+        &'b mut self,
+        start: usize,
+        count: usize,
+        buffer: &'b mut Vec<Stereo>,
+    ) -> Result<&'b [Stereo]> {
+        match self {
+            MixRead::Whole(audio) => audio.window(start, count, buffer),
+            MixRead::Stored(stored) => stored.window(start, count, buffer),
+        }
+    }
+}
+
+/// The prefix of the audibility point, the base render and the attack.
+enum PrefixOf {
+    /// The prefix of Essential, after its compressor, in scratch storage.
+    Stored(crate::scratch::Pcm),
+    /// The mix itself.
+    Mix,
+    /// The aligned mix itself.
+    Aligned,
+}
+
+/// The prefix of `stream_prefix`.
+struct StreamedPrefix {
+    /// The 4x prefix, below `render_blocks::upsampled_min_frames`.
+    up: Option<crate::scratch::Pcm>,
+    /// The temporal analysis of the prefix, for the onsets of the attack
+    /// choice.
+    onsets: Option<analysis::Temporal>,
+    /// The prefix after its compressor, for a set with a compressor.
+    compressed: Option<crate::scratch::Pcm>,
+}
+
+/// Frames of each piece of `stream_prefix`.
+const PREFIX_PIECE: usize = 65_536;
+
+/// The prefix of `mix` at `rate` with the compressor `settings`, from one
+/// pass over pieces of `PREFIX_PIECE` frames: the 4x prefix, with
+/// `onsets` its temporal analysis, and a prefix after a compressor in
+/// scratch storage. Each frame equals the frame of `compressor::process`,
+/// `render_blocks::upsample_into` and `analysis::analyze` of the whole
+/// prefix (D243, D249).
+fn stream_prefix(
+    mix: &mut impl crate::scratch::Frames,
+    settings: Option<compressor::Settings>,
+    onsets: bool,
+    keep_up: bool,
+    rate: u32,
+) -> Result<StreamedPrefix> {
+    let frames = mix.len();
+    if let Some(settings) = settings {
+        settings.validate()?;
+    }
+    let compress = settings.filter(|s| compressor::changes(*s) && frames > 0);
+    let lag = compress.map_or(0, |s| compressor::Stream::lag(s, rate));
+    let mut up = match keep_up {
+        true => Some((
+            crate::scratch::Pcm::new(crate::scratch::temporary()?),
+            crate::render_blocks::Upsample::new(frames, rate, PREFIX_PIECE + lag),
+        )),
+        false => None,
+    };
+    let mut scan = onsets.then(|| analysis::Scan::new(frames, rate));
+    let mut compressed = match settings {
+        Some(_) => Some(crate::scratch::Pcm::new(crate::scratch::temporary()?)),
+        None => None,
+    };
+    let mut compressor = compress.map(|s| compressor::Stream::new(s, rate, frames, PREFIX_PIECE));
+    let (mut piece, mut out) = (Vec::new(), Vec::with_capacity(PREFIX_PIECE + lag));
+    let mut deliver = |audio: &[Stereo]| -> Result<()> {
+        if let Some((up, upsample)) = &mut up {
+            upsample.push(audio, up)?;
+        }
+        if let Some(scan) = &mut scan {
+            scan.push(audio);
+        }
+        if let Some(stored) = &mut compressed {
+            stored.push(audio)?;
+        }
+        Ok(())
+    };
+    for start in (0..frames).step_by(PREFIX_PIECE) {
+        let audio = mix.window(start, PREFIX_PIECE.min(frames - start), &mut piece)?;
+        // As in `compressor::process`, the input of a compressor is finite.
+        if settings.is_some() && audio.iter().flatten().any(|v| !v.is_finite()) {
+            return Err("Compressor input must be finite".into());
+        }
+        match &mut compressor {
+            Some(compressor) => {
+                out.clear();
+                compressor.push(audio, &mut out);
+                deliver(&out)?;
+            }
+            None => deliver(audio)?,
+        }
+    }
+    if let Some(compressor) = compressor {
+        out.clear();
+        compressor.finish(&mut out);
+        deliver(&out)?;
+    }
+    let up = up.map(|(up, upsample)| {
+        upsample.finish();
+        up
+    });
+    Ok(StreamedPrefix {
+        up,
+        onsets: scan.map(analysis::Scan::finish),
+        compressed,
+    })
+}
+
+/// `prepare_with` of `mix_of`, or of `stored`. A prefix of
+/// `upsampled_min_frames` frames or more keeps no 4x frames
+/// (`render_blocks::upsampled_min_frames`).
+fn prepare_mix<'a>(
+    mut mix_of: PrepareMix<'a>,
+    stored: Option<&'a mut crate::scratch::Pcm>,
+    rate: u32,
+    evidence: Option<stem_evidence::Evidence>,
+    auditory: Option<AuditoryInput<'_>>,
+    options: Options,
+    upsampled_min_frames: usize,
+) -> Result<PreparedSet> {
+    // A held mix waits in scratch storage until the end of the attack
+    // stage. The measures of the mix read it there, and it returns to one
+    // buffer for an aligned mix and for the prefix (D234, D247). In the
+    // browser engine, the mix stays in its buffer until the prefix: the
+    // measures of the mix then allocate beside it, and the renders of the
+    // families find its buffer whole after the plan.
+    let mut spilled = match stored {
+        Some(stored) => Some(MixStore::Stored(stored)),
+        None if cfg!(target_arch = "wasm32") => None,
+        None => mix_of.spill()?,
+    };
     crate::progress::step("mix");
-    let source = pipeline::analyze_source(input, rate)?;
+    let source =
+        pipeline::analyze_source_read(&mut MixRead::of(&mut spilled, mix_of.audio()), rate)?;
     if evidence.as_ref().is_some_and(|e| {
-        e.source_pcm_sha256 != source.source_pcm_sha256 || e.source_frames != input.len()
+        e.source_pcm_sha256 != source.source_pcm_sha256 || e.source_frames != source.source_frames
     }) {
         return Err("Stem evidence belongs to a different source".into());
     }
@@ -1986,7 +2451,12 @@ pub fn prepare_with(
     // A source that arrives limited arrives compressed: no compressor.
     let limited = input_limited(&source);
     crate::progress::step("condition");
-    let source_condition = source_condition::measure(input, &source, limited, evidence.as_ref());
+    let source_condition = source_condition::measure_read(
+        &mut MixRead::of(&mut spilled, mix_of.audio()),
+        &source,
+        limited,
+        evidence.as_ref(),
+    )?;
     // The keyed side cut of the Mono-safe preset where an instrument group
     // cancels (`adjust.mono-safe.v1`), planned once for the facts of the set.
     let mono_safe = if source_condition.antiphase_stems.is_empty() {
@@ -2003,63 +2473,123 @@ pub fn prepare_with(
     };
     // A source with an anti-phase band is aligned before every other stage;
     // the stages that measure the mix measure the aligned mix (D143).
-    let phase_alignment = (!source_condition.antiphase_bands.is_empty())
-        .then(|| stereo_phase::measure(input, rate))
-        .flatten();
-    let aligned = phase_alignment.as_ref().map(|a| {
-        let mut audio = input.to_vec();
-        a.apply(&mut audio, rate);
-        audio
+    let (phase_alignment, aligned) = if source_condition.antiphase_bands.is_empty() {
+        (None, None)
+    } else {
+        let mut audio = Vec::new();
+        if let Some(stored) = &mut spilled {
+            let stored = stored.pcm();
+            let frames = crate::scratch::Frames::len(stored);
+            crate::scratch::Frames::read(stored, 0, frames, &mut audio)?;
+        }
+        let whole = if spilled.is_some() {
+            &audio[..]
+        } else {
+            mix_of.audio()
+        };
+        let alignment = stereo_phase::measure(whole, rate);
+        let aligned = alignment.as_ref().map(|a| {
+            if spilled.is_none() {
+                audio = mix_of.audio().to_vec();
+            }
+            a.apply(&mut audio, rate);
+            audio
+        });
+        (alignment, aligned)
+    };
+    let timing = evidence.as_ref().and_then(|e| {
+        compressor::Timing::from_stems(e.drum_decay_p50_ms, e.drum_interval_p50_ms, e.bass_body_hz)
     });
-    let mix: &[Stereo] = aligned.as_deref().unwrap_or(input);
-    let compression = (!limited)
-        .then(|| {
-            compressor::plan(
-                mix,
-                evidence.as_ref().and_then(|e| {
-                    compressor::Timing::from_stems(
-                        e.drum_decay_p50_ms,
-                        e.drum_interval_p50_ms,
-                        e.bass_body_hz,
-                    )
-                }),
-                rate,
-            )
-        })
-        .flatten();
+    let compression = if limited {
+        None
+    } else if let Some(audio) = &aligned {
+        compressor::plan(audio, timing, rate)
+    } else {
+        // The temporal analysis of the mix is that of the source.
+        compressor::plan_with(
+            &mut MixRead::of(&mut spilled, mix_of.audio()),
+            timing,
+            &source.temporal,
+            rate,
+        )?
+    };
     let limiter = dsp::LimiterSettings {
         release_ms: LIMITER_RELEASE_MS,
         ..dsp::LimiterSettings::default()
     };
-    // Without a compressor the prefix is the mix itself.
-    let prefix = (!limited)
-        .then(|| -> Result<std::borrow::Cow<'_, [Stereo]>> {
-            Ok(match &compression {
-                // The prefix of Essential, which sets the base target.
-                Some(c) => {
-                    let mut prefix = mix.to_vec();
-                    compressor::process(
-                        &mut prefix,
-                        c.style(compression_style("essential")).settings,
-                        rate,
-                    )?;
-                    prefix.into()
-                }
-                None => mix.into(),
-            })
-        })
-        .transpose()?;
-    // One 4x prefix serves the audibility point, the base render and the
-    // attack render.
+    // Without a compressor the prefix is the mix itself. One 4x prefix
+    // serves the audibility point, the base render and the attack render.
+    // The 4x prefix, the onsets of the attack choice and a compressed
+    // prefix in scratch storage come from one pass over the mix, and the
+    // measures of the renders read the prefix in spans (D229, D249).
     let mut prefix_up = None;
-    let audible = if let Some(prefix) = &prefix {
+    let mut onsets = None;
+    let mut prefix_of = None;
+    if !limited {
+        if spilled.is_none() {
+            spilled = mix_of.spill()?;
+        }
+        // The prefix of Essential, which sets the base target, reads the
+        // mix, the aligned mix or the held mix in scratch storage once, in
+        // pieces. A prefix that is the mix reads it in scratch storage
+        // (D234, D249).
+        let settings = compression
+            .as_ref()
+            .map(|c| c.style(compression_style("essential")).settings);
+        let mono = source_condition.mono;
         crate::progress::step("audibility");
+        // The prefix of a long recording keeps no 4x frames: they come
+        // from the prefix as they are read (D252).
+        let keep_up = source.source_frames < upsampled_min_frames;
+        let streamed = match &aligned {
+            Some(audio) => stream_prefix(
+                &mut crate::scratch::Slice(audio),
+                settings,
+                !mono,
+                keep_up,
+                rate,
+            )?,
+            None => stream_prefix(
+                &mut MixRead::of(&mut spilled, mix_of.audio()),
+                settings,
+                !mono,
+                keep_up,
+                rate,
+            )?,
+        };
+        prefix_up = streamed.up;
+        onsets = streamed.onsets;
+        prefix_of = Some(match streamed.compressed {
+            Some(stored) => PrefixOf::Stored(stored),
+            None if aligned.is_some() => PrefixOf::Aligned,
+            None => PrefixOf::Mix,
+        });
+    }
+    // The ratios and the 4x frames of a long recording read the prefix in
+    // turn.
+    let prefix_frames = match &mut prefix_of {
+        Some(PrefixOf::Stored(stored)) => Some(MixRead::Stored(stored)),
+        Some(PrefixOf::Aligned) => aligned
+            .as_deref()
+            .map(|audio| MixRead::Whole(crate::scratch::Slice(audio))),
+        Some(PrefixOf::Mix) => Some(MixRead::of(&mut spilled, mix_of.audio())),
+        None => None,
+    }
+    .map(std::cell::RefCell::new);
+    let mut prefix = prefix_frames
+        .as_ref()
+        .map(|frames| audibility::Prefix::Shared(crate::scratch::Shared(frames)));
+    let mut prefix_up = prefix_frames.as_ref().map(|frames| match &mut prefix_up {
+        Some(up) => crate::render_blocks::Up::Stored(up),
+        None => crate::render_blocks::Up::Upsampled(Box::new(
+            crate::render_blocks::Upsampled::new(crate::scratch::Shared(frames), rate),
+        )),
+    });
+    let audible = if let (Some(prefix), Some(up)) = (&mut prefix, &mut prefix_up) {
         let crest_target = density(&source, None).base_target_lufs;
-        let mut up = crate::scratch::Pcm::new(crate::scratch::temporary()?);
-        crate::render_blocks::upsample_into(prefix, &mut up, rate)?;
-        let point = audibility::point_on(
+        audibility::point_on(
             prefix,
-            &mut up,
+            up,
             base_drive_db(&source, crest_target),
             BASE_CLIPPER_DB,
             SET_CEILING_DBTP,
@@ -2070,9 +2600,7 @@ pub fn prepare_with(
             dsp::TruePeak::Trim,
             Some(&source.temporal),
             rate,
-        )?;
-        prefix_up = Some(up);
-        point
+        )?
     } else {
         None
     };
@@ -2087,7 +2615,7 @@ pub fn prepare_with(
             .map(|t| t - density.base_target_lufs);
     }
     let base_target_lufs = density.base_target_lufs;
-    let base_render = match (prefix_up, &prefix, &mut density.audibility) {
+    let mut base_render = match (prefix_up, &mut prefix, &mut density.audibility) {
         (Some(mut up), Some(prefix), Some(point)) => {
             // The base target can sit under the probes of the point; the
             // render searches its drive and joins the probes, so the attack
@@ -2114,8 +2642,8 @@ pub fn prepare_with(
     // control at the base target: peak control lowers the loud centre more
     // than the sides and widens the image by itself.
     crate::progress::step("width");
-    let widening = match &base_render {
-        Some((_, _, controlled, _)) => width::widening(&stereo::analyze(controlled, rate)?),
+    let widening = match &mut base_render {
+        Some((_, _, controlled, _)) => width::widening(&stereo::analyze_read(controlled, rate)?),
         None => match &aligned {
             Some(audio) => width::widening(&stereo::analyze(audio, rate)?),
             None => width::widening(&source.stereo),
@@ -2124,38 +2652,26 @@ pub fn prepare_with(
     crate::progress::step("attack");
     let attack = peak_attack(
         &source_condition,
-        prefix.as_deref(),
+        prefix.as_mut().zip(onsets),
         density.audibility.as_ref(),
         base_render,
         limiter,
         rate,
     )?;
-    drop(prefix);
+    drop(prefix_of);
     drop(aligned);
-    // Equal-loudness compensation keeps the balance that a person heard at
-    // the mix's level. A captured recording has no such level: no
-    // compensation (D146).
-    let delivered_gain_lu = if source_condition.capture() {
-        0.0
-    } else {
-        density.base_target_lufs.min(STREAMING_NORMALISATION_LUFS)
-            - source.input.integrated_lufs.unwrap_or(-14.0)
-    };
     crate::progress::step("tone");
-    let mut broad = broad_tone::analyze(
-        evidence.as_ref(),
-        delivered_gain_lu,
-        Some(&source.spectrum),
-        widening.master.as_ref(),
-        source_condition.bandwidth_hz.unwrap_or(rate as f64 / 2.0),
-        source_condition.device_capture(),
-    );
-    broad.retain_measurable(selection::material_bands(&source.stereo));
+    let broad = broad_tone::analyze(evidence.as_ref());
     let low_end = width::low_end(&source);
     let side_cut = width::side_cut(&source);
-    let glue = compressor::glue_settings(input, rate);
     let open = crate::open::plan(&source.spectrum);
-    let proposals = branches(&source.spectrum, focus, side_cut.band, &widening);
+    let proposals = branches(
+        &source.spectrum,
+        focus,
+        side_cut.band,
+        &widening,
+        options.album_regions.as_ref(),
+    );
     let refinement = evidence.as_ref().and_then(|e| e.refinement.as_ref());
     if let Some(r) = refinement {
         if r.source_pcm_sha256 != source.source_pcm_sha256
@@ -2164,15 +2680,43 @@ pub fn prepare_with(
             return Err("Source refinement is bound to different PCM".into());
         }
     }
+    // The tone measures read the mix in spans, so a stored mix stays in
+    // scratch storage (D250).
+    let mut read = MixRead::of(&mut spilled, mix_of.audio());
+    let frames = crate::scratch::Frames::len(&read);
+    let glue = compressor::glue_settings_read(&mut read, rate)?;
+    // Each focus bell at the gain that the versions carry, with the bound of
+    // a low side bell; one under `FOCUS_CHANGE_DB` leaves the versions.
+    let mut quiet_focus = Vec::new();
+    for f in refinement.map_or(&[][..], |r| &r.focus) {
+        let mut band = f.filter;
+        if matches!(f.domain, finishing::Domain::Side) && band.hz < LOW_SIDE_BELL_HZ {
+            band.gain_db = band.gain_db.clamp(-LOW_SIDE_BELL_DB, LOW_SIDE_BELL_DB);
+        }
+        let Some(change_db) =
+            crate::refinement::focus_change_db_read(&mut read, f.domain, band, rate)?
+        else {
+            continue;
+        };
+        if change_db.abs() < FOCUS_CHANGE_DB {
+            quiet_focus.push(QuietFocus {
+                domain: f.domain,
+                hz: band.hz,
+                q: band.q,
+                change_db,
+            });
+        }
+    }
+    mix_of.restore(spilled)?;
     let deesser = evidence
         .as_ref()
         .and_then(|e| deesser::Plan::from_key(e.deesser_key.clone(), options.deesser));
     // The cut of the whole-track deficit is the largest cut of the dynamic
     // correction; the key of the stems sets where it applies.
-    let low_mid = broad_tone::master(&broad, rate)
-        .and_then(|m| m.low_mid_cut_db)
+    let low_mid = broad
+        .low_mid_cut_db
         .zip(evidence.as_ref().and_then(|e| e.low_mid.as_ref()))
-        .and_then(|(cut, key)| key.correction(cut, input.len(), rate));
+        .and_then(|(cut, key)| key.correction(cut, frames, rate));
     let limiter_rule = "set.limiter-release.v1";
     let limiter_basis = format!(
         "{LIMITER_RELEASE_MS:.0} ms release: the lowest masked disturbance of peak control that also lowers the disturbance under 510 Hz on the confirmation mixes; set.peak-attack.v1: {}",
@@ -2203,6 +2747,7 @@ pub fn prepare_with(
         low_mid,
         glue,
         compression,
+        quiet_focus,
     })
 }
 
@@ -2221,9 +2766,9 @@ struct PeakAttack {
 /// more onset energy.
 fn peak_attack(
     condition: &source_condition::SourceCondition,
-    prefix: Option<&[Stereo]>,
+    prefix: Option<(&mut audibility::Prefix<'_>, analysis::Temporal)>,
     point: Option<&audibility::Point>,
-    base_render: Option<BaseRender>,
+    base_render: Option<BaseRender<'_>>,
     limiter: dsp::LimiterSettings,
     rate: u32,
 ) -> Result<PeakAttack> {
@@ -2233,7 +2778,7 @@ fn peak_attack(
             basis: "instant attack: a mono recording, the path of live sets".into(),
         });
     }
-    let (Some(prefix), Some(point), Some((mut up, drive_db, base, fit))) =
+    let (Some((prefix, onsets)), Some(point), Some((mut up, drive_db, mut base, fit))) =
         (prefix, point, base_render)
     else {
         return Ok(PeakAttack {
@@ -2241,17 +2786,17 @@ fn peak_attack(
             basis: "instant attack: no base render".into(),
         });
     };
-    // One temporal analysis of the prefix serves both losses. The loss of
-    // the base render comes first, so the base render is freed before the
-    // attack render.
-    let onsets = analysis::analyze(prefix, rate);
-    let base_loss = analysis::energy_attack_loss_p90_from(&onsets, &base, rate);
+    // One temporal analysis of the prefix, `onsets`, serves both losses.
+    // The loss of the base render comes first, so the base render is freed
+    // before the attack render.
+    let base_loss =
+        analysis::energy_attack_loss_p90_of(&onsets, &analysis::blocks_read(&mut base, rate)?);
     drop(base);
     // The attack render needs no trim, so it starts at the drive of the
     // trimmed render less that trim. The probes of the audibility point are
     // trimmed renders of the same prefix: their masked noise-to-mask ratio at
     // the loudness of the attack render is the reference.
-    let (attacked, _) = audibility::peak_control(
+    let (mut attacked, _) = audibility::peak_control(
         &mut up,
         drive_db + fit.trim_db,
         BASE_CLIPPER_DB,
@@ -2263,11 +2808,12 @@ fn peak_attack(
         TRUE_PEAK,
         rate,
     )?;
-    let lufs = dsp::loudness(&attacked, rate).ok_or("Missing attack render loudness")?;
-    let attacked_loss = analysis::energy_attack_loss_p90_from(&onsets, &attacked, rate);
+    let lufs = dsp::loudness_read(&mut attacked, rate)?.ok_or("Missing attack render loudness")?;
+    let attacked_loss =
+        analysis::energy_attack_loss_p90_of(&onsets, &analysis::blocks_read(&mut attacked, rate)?);
     let nmr = [
         point.nmr_at(lufs),
-        audibility::peak_control_nmr_db(prefix, &attacked, rate),
+        prefix.ratios(&mut attacked, rate)?.total_db,
     ];
     let gain = base_loss
         .zip(attacked_loss)
@@ -2285,11 +2831,12 @@ fn peak_attack(
 }
 
 /// The trimmed peak control of the base prefix at the base target: the 4x
-/// prefix, the drive, the render and its true-peak correction.
-type BaseRender = (
-    crate::scratch::Pcm,
+/// prefix, the drive, the render in scratch storage and its true-peak
+/// correction.
+type BaseRender<'a> = (
+    crate::render_blocks::Up<'a, crate::scratch::Shared<'a>>,
     f64,
-    Vec<Stereo>,
+    crate::scratch::Pcm,
     crate::render_blocks::TruePeakFit,
 );
 
@@ -2337,8 +2884,8 @@ impl PreparedSet {
     fn merged(&self, branch: &Branch, tone: &Tone) -> Result<(Tone, Vec<FocusEnvelope>, f64, f64)> {
         let refinement = self.evidence.as_ref().and_then(|e| e.refinement.as_ref());
         let foundation = self.evidence.as_ref().and_then(|e| e.foundation.as_ref());
-        let (mut branch_tone, branch_envelopes, refinement_scale) =
-            refinement.map_or_else(|| Ok((tone.clone(), Vec::new(), 1.0)), |r| r.apply(tone))?;
+        let (mut branch_tone, refinement_scale) =
+            refinement.map_or_else(|| Ok((tone.clone(), 1.0)), |r| r.apply(tone))?;
         // A side bell under 500 Hz widens the bass and the low mids: bound
         // it after the refinement sets its measured strength.
         for band in &mut branch_tone.side {
@@ -2346,11 +2893,14 @@ impl PreparedSet {
                 band.gain_db = band.gain_db.clamp(-LOW_SIDE_BELL_DB, LOW_SIDE_BELL_DB);
             }
         }
+        for quiet in &self.quiet_focus {
+            remove_band(&mut branch_tone, quiet);
+        }
         let (tone, envelopes, character_scale) = match foundation {
             Some(f) if branch.use_foundation => {
-                with_foundation(branch_tone, branch_envelopes, f, self.source.sample_rate)?
+                with_foundation(branch_tone, f, self.source.sample_rate)?
             }
-            _ => (branch_tone, branch_envelopes, 1.0),
+            _ => (branch_tone, Vec::new(), 1.0),
         };
         Ok((tone, envelopes, refinement_scale, character_scale))
     }
@@ -2400,9 +2950,27 @@ impl PreparedSet {
             let mut basis = branch.basis.clone();
             let mut noted = false;
             for (reason, tone, gates) in tones {
+                let quiet: Vec<QuietFocus> = self
+                    .quiet_focus
+                    .iter()
+                    .filter(|q| band_index(&tone, q).is_some())
+                    .copied()
+                    .collect();
                 let (tone, envelopes, refinement_scale, character_scale) =
                     self.merged(branch, &tone)?;
                 if !noted {
+                    for q in &quiet {
+                        basis.push_str(&format!(
+                            "; set.focus-change.v2: no {} bell at {:.0} Hz, Q {:.2}: it changes the mix by {:+.2} dB in its octave band, under {FOCUS_CHANGE_DB} dB",
+                            match q.domain {
+                                finishing::Domain::Side => "side",
+                                _ => "mid",
+                            },
+                            q.hz,
+                            q.q,
+                            q.change_db
+                        ));
+                    }
                     if let Some(f) = foundation.filter(|_| branch.use_foundation) {
                         basis.push_str(&format!(
                             "; shared foundation {}: {}. Character gain scale {character_scale:.6}",
@@ -2411,7 +2979,7 @@ impl PreparedSet {
                         ));
                     }
                     if refinement.is_some() && branch.id != "essential" {
-                        basis.push_str(&format!("; measured strength/passage evidence: set.source-refinement.v1; refinement gain scale {refinement_scale:.6}. Full evidence is in stem_evidence.refinement; applied gains/envelopes are in spec"));
+                        basis.push_str(&format!("; measured strength/passage evidence: set.source-refinement.v1; refinement gain scale {refinement_scale:.6}. Full evidence is in stem_evidence.refinement; applied gains are in spec"));
                     }
                     {
                         if let (Some(c), Some(k)) = (
@@ -2732,7 +3300,6 @@ fn render_ahead(
     let result = if role == Role::Base {
         base_ladder(
             &mut renderer,
-            input,
             source,
             measured,
             spec,
@@ -2742,15 +3309,7 @@ fn render_ahead(
             progress,
         )
     } else {
-        selection::ladder(
-            &mut renderer,
-            input,
-            source,
-            measured,
-            spec,
-            &candidates,
-            progress,
-        )
+        selection::ladder(&mut renderer, source, measured, spec, &candidates, progress)
     }
     .map_err(|e| e.to_string());
     Ahead {
@@ -2797,12 +3356,21 @@ pub fn render(
     auditory: Option<AuditoryInput<'_>>,
     sink: &mut impl Sink,
 ) -> Result<Summary> {
-    render_with(input, rate, evidence, auditory, Options::default(), sink)
+    render_with(
+        treatment_render::RenderSource::Borrowed(input),
+        rate,
+        evidence,
+        auditory,
+        Options::default(),
+        sink,
+    )
 }
 
-/// `render` with `options`.
+/// `render` with `options`. Without parallel versions, an owned source
+/// waits in a scratch file of the renderer while the versions render
+/// (D232).
 pub fn render_with(
-    input: &[Stereo],
+    mut input: treatment_render::RenderSource<'_>,
     rate: u32,
     evidence: Option<stem_evidence::Evidence>,
     auditory: Option<AuditoryInput<'_>>,
@@ -2810,7 +3378,23 @@ pub fn render_with(
     sink: &mut impl Sink,
 ) -> Result<Summary> {
     sink.event("analyzing", "")?;
-    let prepared = prepare_with(input, rate, evidence, auditory, options)?;
+    // An owned source waits in a scratch file while the prefix of the plan
+    // renders (D234).
+    let prepared = match &mut input {
+        treatment_render::RenderSource::Owned(audio) => {
+            prepare_holding(audio, rate, evidence, auditory, options)?
+        }
+        treatment_render::RenderSource::Borrowed(audio) => {
+            prepare_with(audio, rate, evidence, auditory, options)?
+        }
+        // A stored source stays in its scratch file (D254).
+        treatment_render::RenderSource::Stored(source) => {
+            prepare_stored(source, evidence, auditory, options)?
+        }
+        treatment_render::RenderSource::Lent(source) => {
+            prepare_stored(source, evidence, auditory, options)?
+        }
+    };
     let worker_plan = prepared.worker_plan()?;
     // The versions that render in turn; a speculative or a fallback version
     // renders only in place of another.
@@ -2828,7 +3412,7 @@ pub fn render_with(
             .collect(),
         ..Default::default()
     });
-    let adjust = crate::adjust::Base::of_plan(&serde_json::to_value(&worker_plan)?)?;
+    let mut adjust = crate::adjust::Base::of_plan(&serde_json::to_value(&worker_plan)?)?;
     let PreparedSet {
         source,
         density,
@@ -2846,7 +3430,38 @@ pub fn render_with(
     } = prepared;
     let constraints = pipeline::diagnostic_constraints();
     let refinement = evidence.as_ref().and_then(|e| e.refinement.as_ref());
-    let mut renderer = Renderer::with_scratch(input, rate, sink.scratch_factory());
+    let frames = input.len();
+    // On a native build the versions after Essential render beside each
+    // other and deliver in their turn (`Sink::parallel_versions`). They read
+    // a source in memory.
+    let parallel = sink.parallel_versions()
+        && !matches!(
+            input,
+            treatment_render::RenderSource::Stored(_) | treatment_render::RenderSource::Lent(_)
+        )
+        && cfg!(not(target_arch = "wasm32"))
+        && dsp::threads() > 1
+        && frames as f64 <= PARALLEL_VERSIONS_SECONDS * rate as f64;
+    // Parallel versions read the source in place; the empty slice of a
+    // stored source has no reader.
+    let kept: Vec<Stereo>;
+    let (mut renderer, parallel_input): (Renderer<'_>, &[Stereo]) = match input {
+        treatment_render::RenderSource::Owned(audio) if parallel => {
+            kept = audio;
+            (
+                Renderer::with_scratch(&kept, rate, sink.scratch_factory()),
+                &kept,
+            )
+        }
+        treatment_render::RenderSource::Borrowed(audio) => (
+            Renderer::with_scratch(audio, rate, sink.scratch_factory()),
+            audio,
+        ),
+        stored => (
+            Renderer::of_source(stored, rate, sink.scratch_factory())?,
+            &[],
+        ),
+    };
     // The warm-started searches of a set do not revisit a drive, and in WASM
     // the cache holds its probes in memory.
     renderer.work.probe_cache_budget_bytes = 0;
@@ -2864,12 +3479,6 @@ pub fn render_with(
         .into_iter()
         .map(|f| (f.id, f.versions))
         .collect();
-    // On a native build the versions after Essential render beside each
-    // other and deliver in their turn (`Sink::parallel_versions`).
-    let parallel = sink.parallel_versions()
-        && cfg!(not(target_arch = "wasm32"))
-        && dsp::threads() > 1
-        && input.len() as f64 <= PARALLEL_VERSIONS_SECONDS * rate as f64;
     std::thread::scope(|scope| -> Result<()> {
         let mut ahead: Vec<Pending<'_>> = Vec::new();
         // A speculative Bold waits for its base to render a first
@@ -3055,7 +3664,7 @@ pub fn render_with(
                                 } else {
                                     ahead.push(spawn_later(
                                         scope,
-                                        input,
+                                        parallel_input,
                                         rate,
                                         &source,
                                         shared.clone(),
@@ -3080,9 +3689,13 @@ pub fn render_with(
                         essential_reference.as_ref().map(|(s, _)| s),
                     )
                 };
-                let reference_low = reference
-                    .filter(|_| role != Role::Dense)
-                    .map(|r| (r.low_sections.clone(), r.lufs));
+                let reference_low = reference.filter(|_| role != Role::Dense).map(|r| {
+                    (
+                        r.low_sections.clone(),
+                        r.lufs,
+                        r.tone.as_ref().map(|(t, _)| t.clone()),
+                    )
+                });
                 // A version that rendered beside an earlier one keeps that
                 // render when its candidates render alike; its events follow in
                 // their turn.
@@ -3116,7 +3729,12 @@ pub fn render_with(
                                     let (later, shared) = waiting.remove(i);
                                     if starts {
                                         ahead.push(spawn_later(
-                                            scope, input, rate, source, shared, later,
+                                            scope,
+                                            parallel_input,
+                                            rate,
+                                            source,
+                                            shared,
+                                            later,
                                         ));
                                     }
                                 }
@@ -3136,7 +3754,6 @@ pub fn render_with(
                     if role == Role::Base {
                         base_ladder(
                             &mut renderer,
-                            input,
                             source,
                             reference,
                             reference_spec,
@@ -3148,7 +3765,6 @@ pub fn render_with(
                     } else {
                         selection::ladder(
                             &mut renderer,
-                            input,
                             source,
                             reference,
                             reference_spec,
@@ -3161,7 +3777,7 @@ pub fn render_with(
                     let Some(chosen) = chosen else {
                         return Ok(Err(candidate_trials));
                     };
-                    if chosen.measured.rendered.audio.len() != input.len()
+                    if chosen.measured.rendered.audio.len() != frames
                         || chosen.measured.rendered.peak_estimate_dbtp > chosen.spec.ceiling_dbtp + 1e-6
                     {
                         return Err("Rendered delivery length or peak failed".into());
@@ -3178,17 +3794,17 @@ pub fn render_with(
                         // measurements of the base render; the sink keeps
                         // its audio.
                         let mut measured = chosen.measured.clone();
-                        measured.rendered.audio = std::sync::Arc::new(Vec::new());
+                        measured.rendered.audio = Default::default();
                         base_measured = Some(measured);
                     }
-                    let selection::Measured { rendered, output, output_stereo, preservation, gain_span_db, low_sections, .. } = chosen.measured;
+                    let selection::Measured { rendered, output, output_stereo, measures, preservation, gain_span_db, low_sections, .. } = chosen.measured;
                     let bass_level_db = crate::low_end::bass_level_db(&low_sections, rendered.lufs);
-                    let hold_sections = reference_low.as_ref().map(|(sections, lufs)| {
+                    let hold_sections = reference_low.as_ref().map(|(sections, lufs, tone)| {
                         // The chosen trial is the last of its index: the ladder of
                         // the instant attack and the plain ladder of a bass
                         // version repeat the indices.
                         let steps = candidate_trials.iter().rev().find(|t| t.index == chosen.index).map_or(&[][..], |t| &t.low_end);
-                        crate::adjust::HoldSections::of(&chosen.spec, &source.spectrum, steps, &low_sections, rendered.lufs, sections, *lufs)
+                        crate::adjust::HoldSections::of(&chosen.spec, &source.spectrum, steps, &low_sections, rendered.lufs, sections, *lufs, tone.as_ref())
                     });
                     let source_constraint_diagnostics =
                         pipeline::violations(&preservation, Some(&rendered.limiter), &constraints);
@@ -3202,6 +3818,7 @@ pub fn render_with(
                         limiter_basis: limiter_basis.clone(),
                         output,
                         output_stereo,
+                        measures,
                         preservation,
                         gain_span_db,
                         source_constraint_diagnostics,
@@ -3281,7 +3898,10 @@ pub fn render_with(
                     report.render.lufs,
                     report.render.limiter.mean_reduction_db,
                 );
-                let residuals = sink.comparisons(&report.render.audio)?;
+                // The sink takes the render in memory: a stored render is
+                // read from its file (D253).
+                let audio = report.render.audio.load()?;
+                let residuals = sink.comparisons(&audio)?;
                 let comparisons: Vec<Comparison> = residuals
                     .into_iter()
                     .map(|c| {
@@ -3344,7 +3964,7 @@ pub fn render_with(
                             refinement,
                             rendered_beside_seconds: rendered_beside,
                         },
-                        &report.render.audio,
+                        &audio,
                     )?;
                     version_ids.push(id.clone());
                     signatures.push((id.clone(), signature));
@@ -3360,8 +3980,9 @@ pub fn render_with(
                 }
                 // The report keeps measurements only; the sink has persisted PCM.
                 // Renderer probe ownership is separately bounded by its cache budget.
+                drop(audio);
                 let mut report = report;
-                report.render.audio = std::sync::Arc::new(Vec::new());
+                report.render.audio = Default::default();
                 trials.push(Trial {
                     id,
                     label,
@@ -3384,8 +4005,9 @@ pub fn render_with(
         }
         Ok(())
     })?;
-    // The names describe the delivered versions together.
-    let named = crate::version_names::name(
+    // The names describe the delivered versions together, and each step
+    // measures against a version that the set delivers.
+    let named = crate::version_names::settle(
         &sounds,
         version_ids.first().is_some_and(|v| v == "essential"),
     );
@@ -3398,13 +4020,25 @@ pub fn render_with(
             t.label = n.name.into();
             t.detail = t.description.replace(n.description.clone());
             if !n.distinct {
-                // No measured step names the version: it is withdrawn.
+                // No measured step names the version: it leaves the set.
                 t.status = "not-distinct";
                 version_ids.retain(|id| *id != n.id);
             }
             t.naming = Some(n);
         }
     }
+    // A request on the set takes its reference from the render that the
+    // Essential version chose, as the other versions do (D217).
+    adjust.record = essential_reference
+        .as_ref()
+        .map(|(spec, reference)| {
+            crate::distributed::reference_record(
+                &adjust.source_pcm_sha256,
+                &adjust.reference,
+                Some((reference, spec)),
+            )
+        })
+        .transpose()?;
     Ok(Summary {
         schema: "mastering.set.3",
         validation_status: "provisional-source-led-listening-set",
@@ -3425,4 +4059,199 @@ pub fn render_with(
         trials,
         work: renderer.work.clone(),
     })
+}
+
+#[cfg(test)]
+mod held_mix_tests {
+    use super::*;
+
+    fn tone(seconds: f64, f: impl Fn(usize, f64) -> Stereo) -> Vec<Stereo> {
+        (0..(seconds * 48_000.0) as usize)
+            .map(|i| f(i, i as f64 / 48_000.0))
+            .collect()
+    }
+
+    fn sine(hz: f64, t: f64) -> f64 {
+        (std::f64::consts::TAU * hz * t).sin()
+    }
+
+    /// A pulse train of `seconds`, with a low band in anti-phase for
+    /// `antiphase`.
+    fn pulses(seconds: f64, antiphase: bool) -> Vec<Stereo> {
+        tone(seconds, |i, t| {
+            let x = 0.5 * (-((i % 12000) as f64) / 700.0).exp() * sine(1200.0, t)
+                + 0.05 * sine(700.0, t);
+            if antiphase {
+                let low = 0.3 * sine(90.0, t);
+                [(x + low) as f32, (x - low) as f32]
+            } else {
+                [x as f32, (0.9 * x) as f32]
+            }
+        })
+    }
+
+    /// Noise clipped at one peak, at two levels in turn: a limited source.
+    fn clipped() -> Vec<Stereo> {
+        let mut seed = 19u32;
+        (0..16 * 48_000)
+            .map(|i| {
+                seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                let gain = if (i / 48_000) % 2 == 0 { 8.0 } else { 1.6 };
+                let x = (((seed >> 8) as f64 / 16777216.0 - 0.5) * gain).clamp(-0.5, 0.5);
+                [x as f32, x as f32]
+            })
+            .collect()
+    }
+
+    /// A held mix gives the plan of the whole mix, and returns to its caller
+    /// with the same frames, for each prefix: a compressed prefix, the mix,
+    /// the aligned mix and no prefix (D234). The measures of the mix read
+    /// the held mix in scratch storage (D247).
+    /// The prefix from pieces of the mix is the prefix of the whole mix:
+    /// the 4x frames, the onsets and the compressed frames (D249).
+    #[test]
+    fn a_streamed_prefix_is_the_prefix_of_the_whole_mix() {
+        let input = pulses(4.0 + 7_331.0 / 48_000.0, false);
+        let settings = compressor::Settings {
+            threshold_dbfs: -14.0,
+            ratio: 4.0,
+            knee_db: 6.0,
+            attack_ms: 10.0,
+            release_ms: 150.0,
+            detector_rms_ms: 5.0,
+            sidechain_highpass_hz: 80.0,
+            maximum_reduction_db: 8.0,
+            section_ms: 1000.0,
+            section_makeup: true,
+        };
+        let bits = |a: &[Stereo]| a.iter().flatten().map(|v| v.to_bits()).collect::<Vec<_>>();
+        let read = |pcm: &mut crate::scratch::Pcm| {
+            let mut frames = Vec::new();
+            let count = crate::scratch::Frames::len(pcm);
+            crate::scratch::Frames::read(pcm, 0, count, &mut frames).unwrap();
+            frames
+        };
+        for (settings, onsets) in [
+            (Some(settings), true),
+            (
+                Some(compressor::Settings {
+                    ratio: 1.0,
+                    ..settings
+                }),
+                false,
+            ),
+            (None, true),
+        ] {
+            let mut prefix = input.clone();
+            if let Some(settings) = settings {
+                compressor::process(&mut prefix, settings, 48_000).unwrap();
+            }
+            assert_eq!(
+                bits(&prefix) != bits(&input),
+                settings.is_some_and(compressor::changes)
+            );
+            let mut up = crate::scratch::Pcm::new(crate::scratch::memory().unwrap());
+            crate::render_blocks::upsample_into(&prefix, &mut up, 48_000).unwrap();
+            let mut stored = crate::scratch::Pcm::temporary_of(&input).unwrap();
+            let mut streamed = stream_prefix(&mut stored, settings, onsets, true, 48_000).unwrap();
+            assert_eq!(
+                bits(&read(streamed.up.as_mut().unwrap())),
+                bits(&read(&mut up))
+            );
+            assert_eq!(
+                streamed.compressed.as_mut().map(|c| bits(&read(c))),
+                settings.map(|_| bits(&prefix))
+            );
+            // The JSON of the analysis, its blocks and its activity floor.
+            let facts = |t: analysis::Temporal| {
+                let blocks: Vec<_> = t
+                    .blocks
+                    .iter()
+                    .map(|b| (b.energy.to_bits(), b.peak.to_bits()))
+                    .collect();
+                let floor = t.activity_floor.to_bits();
+                (serde_json::to_string(&t).unwrap(), blocks, floor)
+            };
+            let whole = onsets.then(|| analysis::analyze(&prefix, 48_000));
+            assert_eq!(streamed.onsets.map(facts), whole.map(facts));
+        }
+    }
+
+    #[test]
+    fn a_held_or_stored_mix_gives_the_plan_of_the_whole_mix() {
+        let mut prefixes = Vec::new();
+        for input in [
+            pulses(16.0, false),
+            pulses(4.0, false),
+            pulses(4.0, true),
+            clipped(),
+        ] {
+            let whole = prepare_with(&input, 48_000, None, None, Options::default()).unwrap();
+            let mut held = input.clone();
+            let from_scratch =
+                prepare_holding(&mut held, 48_000, None, None, Options::default()).unwrap();
+            let mut stored = audio_io::StoredSource {
+                audio: crate::scratch::Pcm::temporary_of(&input).unwrap(),
+                sample_rate: 48_000,
+                source_rate: 48_000,
+                source_frames: input.len(),
+            };
+            let from_storage = prepare_stored(&mut stored, None, None, Options::default()).unwrap();
+            assert_eq!(
+                serde_json::to_value(from_storage.worker_plan().unwrap()).unwrap(),
+                serde_json::to_value(whole.worker_plan().unwrap()).unwrap()
+            );
+            // With no 4x prefix, the 4x frames come from the prefix as they
+            // are read (D252).
+            let upsampled = [
+                prepare_mix(
+                    PrepareMix::Whole(&input),
+                    None,
+                    48_000,
+                    None,
+                    None,
+                    Options::default(),
+                    0,
+                ),
+                prepare_mix(
+                    PrepareMix::Stored,
+                    Some(&mut stored.audio),
+                    48_000,
+                    None,
+                    None,
+                    Options::default(),
+                    0,
+                ),
+            ];
+            for plan in upsampled {
+                assert_eq!(
+                    serde_json::to_value(plan.unwrap().worker_plan().unwrap()).unwrap(),
+                    serde_json::to_value(whole.worker_plan().unwrap()).unwrap()
+                );
+            }
+            prefixes.push((
+                input_limited(&whole.source),
+                whole.compression.is_some(),
+                whole.phase_alignment.is_some(),
+            ));
+            assert_eq!(
+                serde_json::to_value(from_scratch.worker_plan().unwrap()).unwrap(),
+                serde_json::to_value(whole.worker_plan().unwrap()).unwrap()
+            );
+            assert_eq!(
+                stem_evidence::fingerprint(&held),
+                stem_evidence::fingerprint(&input)
+            );
+            assert_eq!(held.len(), held.capacity());
+        }
+        assert_eq!(
+            prefixes,
+            [
+                (false, true, false),
+                (false, false, false),
+                (false, false, true),
+                (true, false, false)
+            ]
+        );
+    }
 }

@@ -1,5 +1,6 @@
 use mastering_engine::{
-    audio_io::{Result, Stereo},
+    adjust,
+    audio_io::{self, Result, Stereo},
     bench, delivery, distributed,
     dsp::{EqBand, Kind},
     finishing::Domain,
@@ -8,6 +9,7 @@ use mastering_engine::{
     source_treatments::SourceIdentity,
     stem_evidence,
     treatment::{BlendPoint, FocusEnvelope, Tone},
+    treatment_render::RenderSource,
 };
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -99,6 +101,41 @@ fn gain_only_duplicates_and_polarity_have_different_outcomes() {
 }
 
 #[test]
+fn a_comparison_in_blocks_gives_the_residual_of_the_decoded_wav() {
+    let audio = signal(4);
+    let candidate: Vec<Stereo> = audio
+        .iter()
+        .enumerate()
+        .map(|(i, a)| a.map(|x| 0.7 * x + (i % 7) as f32 * 1e-4))
+        .collect();
+    let directory = std::env::temp_dir().join(format!(
+        "master-comparison-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir(&directory).unwrap();
+    let path = directory.join("reference.wav");
+    audio_io::write(&path, &audio, 48000).unwrap();
+    let decoded = audio_io::read_source(&path).unwrap().audio;
+    let in_blocks = |rate, candidate: &[Stereo]| {
+        set::matched_residual_db_of_wav(|| audio_io::open(&path), rate, candidate)
+    };
+    // The WAV spans several blocks of the reader.
+    assert_eq!(
+        in_blocks(48000, &candidate).unwrap(),
+        set::matched_residual_db(&decoded, &candidate).unwrap()
+    );
+    assert!(in_blocks(44100, &candidate).is_err());
+    assert!(in_blocks(48000, &candidate[1..]).is_err());
+    let longer: Vec<Stereo> = candidate.iter().chain(&candidate[..1]).copied().collect();
+    assert!(in_blocks(48000, &longer).is_err());
+    std::fs::remove_dir_all(&directory).unwrap();
+}
+
+#[test]
 fn worker_plan_replays_the_native_family_and_rejects_wrong_source() {
     let input = signal(3);
     let worker_plan = set::prepare(&input, 48000, None, None)
@@ -159,6 +196,7 @@ fn worker_plan_replays_the_native_family_and_rejects_wrong_source() {
         &plan_json,
         "essential",
         &directory,
+        None,
         |version, directory, eligible| {
             assert!(directory.join(&version.wav_file).exists());
             assert_eq!(version.waveform.input_frames, input.len());
@@ -201,8 +239,64 @@ fn worker_plan_replays_the_native_family_and_rejects_wrong_source() {
             distributed::render_family(&input, 48000, &plan_json, &family.id, &directory).unwrap();
         family_results.push(serde_json::to_value(other).unwrap());
     }
-    let completed =
-        distributed::finalize_set(&input, 48000, &plan_json, &family_results, &directory).unwrap();
+    let completed = distributed::finalize_set(
+        RenderSource::Borrowed(&input),
+        48000,
+        &plan_json,
+        &family_results,
+        &directory,
+    )
+    .unwrap();
+    // The Essential version record keeps the reference record of the set,
+    // and the base of the manifest keeps none (D270). The record omits the
+    // spec that Essential chose, the spec of the version record, and the
+    // base of a request takes the whole record again (D271).
+    assert!(completed["adjust"].get("record").is_none());
+    let essential = completed["versions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["id"] == "essential")
+        .unwrap();
+    let record = &family_results[0]["reference_record"];
+    assert!(!record.is_null());
+    assert_eq!(record[distributed::CHOSEN_SPEC_FIELD], essential["spec"]);
+    let mut short = record.clone();
+    short
+        .as_object_mut()
+        .unwrap()
+        .remove(distributed::CHOSEN_SPEC_FIELD);
+    assert_eq!(essential[adjust::VERSION_REFERENCE_FIELD], short);
+    let base = adjust::Base::of_plan(&serde_json::from_slice(&plan_json).unwrap())
+        .unwrap()
+        .with_versions_record(completed["versions"].as_array().unwrap());
+    assert_eq!(base.record.as_ref(), Some(record));
+    // A source in scratch storage gives the manifest of the source in
+    // memory (D255).
+    assert_eq!(
+        distributed::finalize_set(
+            RenderSource::Stored(stored(&input)),
+            48000,
+            &plan_json,
+            &family_results,
+            &directory,
+        )
+        .unwrap(),
+        completed
+    );
+    // The measures of the source before the family files give the same
+    // manifest (D260).
+    let measured =
+        distributed::SetSource::of(RenderSource::Stored(stored(&input)), 48000, &plan_json)
+            .unwrap();
+    assert_eq!(
+        distributed::finalize_measured(measured, 48000, &plan_json, &family_results, &directory)
+            .unwrap(),
+        completed
+    );
+    let mut other = input.clone();
+    other[0][0] += 0.01;
+    assert!(distributed::SetSource::of(RenderSource::Borrowed(&other), 48000, &plan_json).is_err());
     let versions = completed["versions"].as_array().unwrap();
     assert_eq!(versions.len(), summary.version_ids.len());
     for (i, version) in versions.iter().enumerate() {
@@ -365,6 +459,7 @@ fn unchanged_foundation_fallback_is_measured_but_not_delivered_locally_or_by_fin
                 &plan_json,
                 &family.id,
                 &directory,
+                None,
                 |version, _, eligible| {
                     fallback_previews.push((version.id.clone(), eligible));
                     Ok(())
@@ -380,8 +475,14 @@ fn unchanged_foundation_fallback_is_measured_but_not_delivered_locally_or_by_fin
     assert!(fallback_previews
         .iter()
         .all(|(id, eligible)| id != "unchanged-tone" || !eligible));
-    let completed =
-        distributed::finalize_set(&input, 48000, &plan_json, &results, &directory).unwrap();
+    let completed = distributed::finalize_set(
+        RenderSource::Borrowed(&input),
+        48000,
+        &plan_json,
+        &results,
+        &directory,
+    )
+    .unwrap();
     let versions = completed["versions"].as_array().unwrap();
     assert_eq!(versions.len(), summary.version_ids.len());
     assert!(versions
@@ -647,8 +748,14 @@ fn one_job_generates_renders_and_describes_source_focus_and_density() {
             distributed::render_family(&input, 48000, &plan_json, &family.id, &directory).unwrap();
         families.push(serde_json::to_value(result).unwrap());
     }
-    let completed =
-        distributed::finalize_set(&input, 48000, &plan_json, &families, &directory).unwrap();
+    let completed = distributed::finalize_set(
+        RenderSource::Borrowed(&input),
+        48000,
+        &plan_json,
+        &families,
+        &directory,
+    )
+    .unwrap();
     let versions = completed["versions"].as_array().unwrap();
     assert_eq!(
         versions
@@ -755,8 +862,7 @@ fn a_bass_version_whose_bass_candidates_fail_renders_its_candidates_without_the_
     let essential = plan.families[0].versions[0].candidates[0].spec.clone();
     let source = mastering_engine::pipeline::analyze_source(&input, 48000).unwrap();
     let mut renderer = mastering_engine::treatment_render::Renderer::new(&input, 48000);
-    let mut measured =
-        selection::measure(&input, &source, renderer.render(&essential).unwrap()).unwrap();
+    let mut measured = selection::measure(&source, renderer.render(&essential).unwrap()).unwrap();
     measured.tone = Some(essential.effective_tone());
     let reference = selection::Reference::of(&measured);
     // The candidate is Essential with a gate that lets the band under
@@ -794,7 +900,6 @@ fn a_bass_version_whose_bass_candidates_fail_renders_its_candidates_without_the_
     };
     let (chosen, trials) = set::base_ladder(
         &mut renderer,
-        &input,
         &source,
         Some(&reference),
         Some(&essential),
@@ -868,8 +973,14 @@ fn the_finalizer_delivers_the_speculative_bold_when_master_chose_no_candidate() 
     // A master family in which no candidate passes: the family returns no
     // version, and its own Bold does not render.
     results[index("master")]["versions"] = json!([]);
-    let completed =
-        distributed::finalize_set(&input, 48000, &plan_json, &results, &directory).unwrap();
+    let completed = distributed::finalize_set(
+        RenderSource::Borrowed(&input),
+        48000,
+        &plan_json,
+        &results,
+        &directory,
+    )
+    .unwrap();
     let trial = |id: &str| {
         completed["trials"]
             .as_array()
@@ -896,8 +1007,14 @@ fn the_finalizer_delivers_the_speculative_bold_when_master_chose_no_candidate() 
     // for it. The speculative Bold stays out, also when that Bold failed.
     results[index("master")] = master;
     results[index("master")]["versions"][0]["chosen_candidate"] = json!(1);
-    let completed =
-        distributed::finalize_set(&input, 48000, &plan_json, &results, &directory).unwrap();
+    let completed = distributed::finalize_set(
+        RenderSource::Borrowed(&input),
+        48000,
+        &plan_json,
+        &results,
+        &directory,
+    )
+    .unwrap();
     let bold = completed["trials"]
         .as_array()
         .unwrap()
@@ -949,6 +1066,66 @@ fn versions_that_render_beside_each_other_match_a_render_in_turn() {
     }
 }
 
+/// `input` at 48 kHz in a scratch file, as the family Lambda decodes its
+/// source (D254).
+fn stored(input: &[[f32; 2]]) -> mastering_engine::audio_io::StoredSource {
+    mastering_engine::audio_io::StoredSource::from_blocks(|each| {
+        for block in input.chunks(65_536) {
+            each(block)?;
+        }
+        Ok(48_000)
+    })
+    .unwrap()
+}
+
+/// A set of an owned source holds it in a scratch file of the renderer when
+/// the versions render in turn, and keeps it in place when they render
+/// beside each other. Each gives the set of a borrowed source (D232). A
+/// stored source gives the set of a borrowed source whose versions render
+/// in turn (D254).
+#[test]
+fn an_owned_source_gives_the_set_of_a_borrowed_source() {
+    let input = signal(3);
+    let render = |source: RenderSource<'_>, parallel: bool| {
+        let mut sink = MemorySink {
+            parallel,
+            ..MemorySink::default()
+        };
+        let summary = set::render_with(
+            source,
+            48000,
+            None,
+            None,
+            set::Options::default(),
+            &mut sink,
+        )
+        .unwrap();
+        let audio: Vec<(String, Vec<[u32; 2]>)> = sink
+            .audio
+            .iter()
+            .map(|(id, a)| {
+                let bits = a.iter().map(|f| f.map(f32::to_bits)).collect();
+                (id.clone(), bits)
+            })
+            .collect();
+        (sink.events, audio, serde_json::to_value(&summary).unwrap())
+    };
+    for parallel in [false, true] {
+        let borrowed = render(RenderSource::Borrowed(&input), parallel);
+        assert!(borrowed.1.len() >= 3);
+        assert_eq!(
+            render(RenderSource::Owned(input.clone()), parallel),
+            borrowed
+        );
+        if !parallel {
+            assert_eq!(
+                render(RenderSource::Stored(stored(&input)), false),
+                borrowed
+            );
+        }
+    }
+}
+
 /// The files of a family in a directory, with the reference record of the
 /// plan passed by hand.
 struct SharedStore<'a> {
@@ -961,14 +1138,19 @@ impl distributed::Store for SharedStore<'_> {
     fn deliver(
         &mut self,
         name: &str,
-        audio: &[Stereo],
+        audio: &mastering_engine::treatment_render::RenderAudio,
         rate: u32,
         seed: u64,
         ceiling_dbtp: f64,
     ) -> Result<(String, delivery::Verification)> {
         self.files.deliver(name, audio, rate, seed, ceiling_dbtp)
     }
-    fn raw(&mut self, name: &str, audio: &[Stereo], rate: u32) -> Result<String> {
+    fn raw(
+        &mut self,
+        name: &str,
+        audio: &mastering_engine::treatment_render::RenderAudio,
+        rate: u32,
+    ) -> Result<String> {
         self.files.raw(name, audio, rate)
     }
     fn read(&mut self, name: &str, rate: u32) -> Result<Vec<Stereo>> {
@@ -980,6 +1162,428 @@ impl distributed::Store for SharedStore<'_> {
     }
     fn reference(&mut self) -> Result<Option<Vec<u8>>> {
         Ok(self.given.clone())
+    }
+}
+
+#[test]
+fn an_adjust_request_takes_its_reference_from_the_record_of_its_set() {
+    // The Essential family keeps the record of the render that it chose, and
+    // a local set keeps the same record in its base. A request on the set
+    // takes its reference from the record (D217).
+    let input = signal(3);
+    let plan = set::prepare(&input, 48000, None, None)
+        .unwrap()
+        .worker_plan()
+        .unwrap();
+    let plan_json = serde_json::to_vec(&plan).unwrap();
+    let directory = new_directory("adjust-reference");
+    let family =
+        distributed::render_family(&input, 48000, &plan_json, "essential", &directory).unwrap();
+    let record = family
+        .reference_record
+        .clone()
+        .expect("the Essential family keeps its record");
+    let summary = set::render(&input, 48000, None, None, &mut MemorySink::default()).unwrap();
+    assert_eq!(summary.adjust.record.as_ref(), Some(&record));
+    let versions = serde_json::to_value(&family).unwrap();
+    let base = adjust::Base::of_plan(&serde_json::to_value(&plan).unwrap()).unwrap();
+    assert!(base.record.is_none());
+    let request = adjust::Request {
+        parent: "essential".into(),
+        id: "streaming".into(),
+        steps: Default::default(),
+        preset: Some(adjust::Preset::Streaming),
+    };
+    let render_of = |source: RenderSource<'_>,
+                     name: &str,
+                     base: &adjust::Base,
+                     versions: &serde_json::Value| {
+        let output = directory.join(name);
+        std::fs::create_dir(&output).unwrap();
+        let mut result =
+            adjust::render(source, base, versions, &directory, &request, &output).unwrap();
+        let wav =
+            std::fs::read(output.join(result["version"]["wav_file"].as_str().unwrap())).unwrap();
+        let work = result["work"].take();
+        result["seconds"] = json!(0);
+        (result, wav, work)
+    };
+    let render = |name: &str, base: &adjust::Base, versions: &serde_json::Value| {
+        render_of(RenderSource::Borrowed(&input), name, base, versions)
+    };
+    let (shared, shared_wav, shared_work) = render("shared", &base, &versions);
+    // A source in scratch storage gives the result of the source in memory
+    // (D257).
+    assert_eq!(
+        render_of(
+            RenderSource::Stored(stored(&input)),
+            "stored",
+            &base,
+            &versions
+        ),
+        (shared.clone(), shared_wav.clone(), shared_work.clone())
+    );
+    let mut without = versions.clone();
+    without.as_object_mut().unwrap().remove("reference_record");
+    // A cloud manifest keeps the record in its Essential version record,
+    // and a request on it takes the same reference (D270).
+    let mut manifest = without.clone();
+    manifest["versions"][0][adjust::VERSION_REFERENCE_FIELD] = record.clone();
+    assert_eq!(
+        render("manifest", &base, &manifest),
+        (shared.clone(), shared_wav.clone(), shared_work.clone())
+    );
+    // A record without the spec that Essential chose takes the spec of the
+    // Essential version record (D271).
+    assert_eq!(
+        record[distributed::CHOSEN_SPEC_FIELD],
+        manifest["versions"][0]["spec"]
+    );
+    manifest["versions"][0][adjust::VERSION_REFERENCE_FIELD]
+        .as_object_mut()
+        .unwrap()
+        .remove(distributed::CHOSEN_SPEC_FIELD);
+    assert_eq!(
+        render("short", &base, &manifest),
+        (shared.clone(), shared_wav.clone(), shared_work.clone())
+    );
+    let (_, _, own_work) = render("own", &base, &without);
+    // With the first version of `essential` before it in its plan, the
+    // family of the request renders the reference as the Essential version
+    // chooses it (`distributed::render_family_in`).
+    let mut ladder_plan: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(directory.join("shared").join("adjust.plan.json")).unwrap(),
+    )
+    .unwrap();
+    let essential = serde_json::to_value(&plan.families[0].versions[0]).unwrap();
+    ladder_plan["families"] = json!([
+        {"id": "essential", "versions": [essential]},
+        ladder_plan["families"][0].clone(),
+    ]);
+    let ladder_directory = directory.join("ladder");
+    std::fs::create_dir(&ladder_directory).unwrap();
+    let ladder = distributed::render_family(
+        &input,
+        48000,
+        &serde_json::to_vec(&ladder_plan).unwrap(),
+        "streaming",
+        &ladder_directory,
+    )
+    .unwrap();
+    let ladder_wav = std::fs::read(ladder_directory.join(&ladder.versions[0].wav_file)).unwrap();
+    std::fs::remove_dir_all(&directory).unwrap();
+    assert_eq!(shared["delivered"], true);
+    assert_eq!(shared_wav, ladder_wav);
+    assert!(
+        shared_work["prepared_prefixes"].as_u64() < own_work["prepared_prefixes"].as_u64(),
+        "{shared_work} {own_work}"
+    );
+}
+
+/// An ADJUST request that stops at its time limit gives the result
+/// `time-limit` and its resume record. The continuation of the record gives
+/// the result of the request without a time limit (D258).
+#[test]
+fn an_adjust_request_continued_after_its_time_limit_gives_the_result_without_one() {
+    let input = signal(3);
+    let plan = set::prepare(&input, 48000, None, None)
+        .unwrap()
+        .worker_plan()
+        .unwrap();
+    let plan_json = serde_json::to_vec(&plan).unwrap();
+    let directory = new_directory("adjust-continued");
+    let family =
+        distributed::render_family(&input, 48000, &plan_json, "essential", &directory).unwrap();
+    let versions = serde_json::to_value(&family).unwrap();
+    let mut base = adjust::Base::of_plan(&serde_json::to_value(&plan).unwrap()).unwrap();
+    base.record = family.reference_record.clone();
+    let parent = adjust::parent_record(&versions, "essential")
+        .unwrap()
+        .clone();
+    let raw =
+        audio_io::read_source(&directory.join(parent["raw_wav_file"].as_str().unwrap())).unwrap();
+    let parent_facts = adjust::VersionFacts::of(
+        &raw.audio,
+        parent["render"]["lufs"].as_f64().unwrap(),
+        parent["render"]["limiter"]["mean_reduction_db"]
+            .as_f64()
+            .unwrap(),
+        48000,
+    )
+    .unwrap();
+    let request = adjust::Request {
+        parent: "essential".into(),
+        id: "mono".into(),
+        steps: Default::default(),
+        preset: Some(adjust::Preset::Mono),
+    };
+    // The continuations take the source as the family Lambda gives it.
+    let run = |source: RenderSource<'_>,
+               deadline: Option<std::time::Instant>,
+               earlier: Option<&distributed::Resume>,
+               name: &str| {
+        let output = directory.join(name);
+        std::fs::create_dir(&output).unwrap();
+        let (mut result, _, resume) = adjust::render_continued(
+            source,
+            &base,
+            &parent,
+            &parent_facts,
+            &[],
+            &request,
+            &mut distributed::Directory(&output),
+            deadline,
+            earlier,
+        )
+        .unwrap();
+        result["seconds"] = json!(0);
+        result["work"] = json!(null);
+        (result, resume)
+    };
+    let (free, none) = run(RenderSource::Borrowed(&input), None, None, "free");
+    assert!(none.is_none());
+    assert_eq!(free["delivered"], true);
+    // An invocation past its deadline renders no candidate.
+    let (late, resume) = run(
+        RenderSource::Stored(stored(&input)),
+        Some(std::time::Instant::now()),
+        None,
+        "late",
+    );
+    assert_eq!(late["delivered"], false);
+    assert_eq!(late["reason"], "time-limit");
+    let resume = resume.expect("a request at its time limit gives its record");
+    assert_eq!(resume.invocations, 1);
+    assert_eq!(resume.family_id, "mono");
+    let resume: distributed::Resume =
+        serde_json::from_slice(&serde_json::to_vec(&resume).unwrap()).unwrap();
+    let (continued, none) = run(
+        RenderSource::Stored(stored(&input)),
+        None,
+        Some(&resume),
+        "continued",
+    );
+    std::fs::remove_dir_all(&directory).unwrap();
+    assert!(none.is_none());
+    assert_eq!(continued, free);
+}
+
+#[test]
+fn a_family_past_its_deadline_chooses_no_candidate_and_names_the_time_limit() {
+    let input = signal(3);
+    let plan = set::prepare(&input, 48000, None, None)
+        .unwrap()
+        .worker_plan()
+        .unwrap();
+    let plan_json = serde_json::to_vec(&plan).unwrap();
+    let render = |deadline: Option<std::time::Instant>, name: &str| {
+        let directory = new_directory(name);
+        let result = distributed::render_family_with_callback(
+            &input,
+            48000,
+            &plan_json,
+            "essential",
+            &directory,
+            deadline,
+            |_, _, _| Ok(()),
+        )
+        .unwrap();
+        std::fs::remove_dir_all(&directory).unwrap();
+        let mut value = serde_json::to_value(&result).unwrap();
+        value["seconds"] = json!(0);
+        (result, value)
+    };
+    let (late, _) = render(Some(std::time::Instant::now()), "deadline-late");
+    assert!(late.versions.is_empty());
+    assert!(!late.unchosen.is_empty());
+    for version in &late.unchosen {
+        assert!(version.candidates.iter().all(|t| !t.passed));
+        let last = version.candidates.last().unwrap();
+        let ids: Vec<_> = last.checks.iter().map(|c| c.id).collect();
+        assert_eq!(ids, ["selection.time_limit"], "{}", version.id);
+        assert_eq!(
+            version.failed_gates.last().unwrap().gates,
+            ["selection.time_limit"]
+        );
+    }
+    // A deadline that the family keeps to gives the family without one.
+    let far = std::time::Instant::now() + std::time::Duration::from_secs(3_600);
+    let (_, kept) = render(Some(far), "deadline-far");
+    let (_, free) = render(None, "deadline-none");
+    assert_eq!(kept, free);
+}
+
+/// A family that stops at its time limit continues in another invocation
+/// from its resume record (`distributed::Resume`). The last invocation gives
+/// the result of the family without a time limit.
+#[test]
+fn a_family_continued_after_its_time_limit_gives_the_family_without_one() {
+    let input = signal(3);
+    let plan = set::prepare(&input, 48000, None, None)
+        .unwrap()
+        .worker_plan()
+        .unwrap();
+    // Each candidate fails, so each ladder renders each candidate, and the
+    // master family renders the reference ladder of Essential first.
+    let mut plan = serde_json::to_value(&plan).unwrap();
+    for family in plan["families"].as_array_mut().unwrap() {
+        for version in family["versions"].as_array_mut().unwrap() {
+            for candidate in version["candidates"].as_array_mut().unwrap() {
+                candidate["gates"]["limiter_maximum_db"] = json!(-1.0);
+            }
+        }
+    }
+    let plan_json = serde_json::to_vec(&plan).unwrap();
+    // The continuations take the source as the family Lambda gives it: the
+    // family holds it in a scratch file (D232).
+    let run = |source: RenderSource<'_>,
+               deadline: Option<std::time::Instant>,
+               earlier: Option<&distributed::Resume>,
+               name: &str| {
+        let directory = new_directory(name);
+        let (result, resume) = distributed::render_family_continued(
+            source,
+            48000,
+            &plan_json,
+            "master",
+            &mut distributed::Directory(&directory),
+            deadline,
+            earlier,
+            |_, _| Ok(()),
+        )
+        .unwrap();
+        std::fs::remove_dir_all(&directory).unwrap();
+        let mut value = serde_json::to_value(&result).unwrap();
+        value["seconds"] = json!(0);
+        value["work"] = json!(null);
+        (value, resume)
+    };
+    let borrowed = || RenderSource::Borrowed(&input);
+    let (free, none) = run(borrowed(), None, None, "continued-free");
+    assert!(none.is_none());
+    // A stored source gives the family of the source in memory (D254).
+    let (from_stored, none) = run(
+        RenderSource::Stored(stored(&input)),
+        None,
+        None,
+        "continued-stored",
+    );
+    assert!(none.is_none());
+    assert_eq!(from_stored, free);
+    // Each invocation has time for about a third of the family.
+    let started = std::time::Instant::now();
+    let (_, first) = run(borrowed(), None, None, "continued-time");
+    let budget = started.elapsed() / 3;
+    let mut resume = None;
+    let mut invocations = 0;
+    let mut references = 0;
+    let continued = loop {
+        invocations += 1;
+        assert!(invocations <= 64, "the continuation makes no progress");
+        let (value, next) = run(
+            RenderSource::Owned(input.clone()),
+            Some(std::time::Instant::now() + budget),
+            resume.as_ref(),
+            &format!("continued-{invocations}"),
+        );
+        let Some(next) = next else {
+            break value;
+        };
+        // The record of the continuation reads back from JSON.
+        let next: distributed::Resume =
+            serde_json::from_slice(&serde_json::to_vec(&next).unwrap()).unwrap();
+        assert_eq!(next.invocations, invocations);
+        assert!(next.advances(resume.as_ref()));
+        // Once an invocation completes the reference, each continuation
+        // takes it from the record.
+        assert!(resume.as_ref().is_none_or(
+            |r: &distributed::Resume| r.reference.is_none() || next.reference == r.reference
+        ));
+        references += usize::from(next.reference.is_some());
+        resume = Some(next);
+    };
+    assert!(first.is_none());
+    assert!(invocations > 2, "{invocations} invocations");
+    assert!(references > 0);
+    assert_eq!(continued, free);
+}
+
+/// A worker that continues a candidate ladder in another invocation starts
+/// at a candidate, on a new renderer. Each trial from that candidate on is
+/// the trial of the whole ladder, in the first pass and in the pass with the
+/// instant attack.
+#[test]
+fn a_ladder_resumed_at_a_candidate_gives_the_trials_of_the_whole_ladder() {
+    use mastering_engine::{
+        pipeline, selection,
+        treatment_render::{Renderer, Spec},
+    };
+    let input = signal(3);
+    let source = pipeline::analyze_source(&input, 48000).unwrap();
+    let plan = set::prepare(&input, 48000, None, None)
+        .unwrap()
+        .worker_plan()
+        .unwrap();
+    // Each candidate fails, so the ladder renders each candidate and then
+    // each candidate with the instant attack.
+    let mut candidates = plan.families[0].versions[0].candidates.clone();
+    for candidate in &mut candidates {
+        candidate.gates.limiter_maximum_db = Some(-1.0);
+    }
+    let spec = candidates[0].spec.clone();
+    assert!(spec.limiter.attack_ms > 0.0);
+    let mut instant_spec = spec.clone();
+    instant_spec.limiter.attack_ms = 0.0;
+    let instant: Vec<selection::Candidate> = candidates
+        .iter()
+        .map(|c| {
+            let mut c = c.clone();
+            c.spec.limiter.attack_ms = 0.0;
+            c.reason = format!("{} with the instant attack", c.reason);
+            c
+        })
+        .collect();
+    let trials = |candidates: &[selection::Candidate], spec: &Spec| {
+        let mut measured =
+            selection::measure(&source, Renderer::new(&input, 48000).render(spec).unwrap())
+                .unwrap();
+        measured.tone = Some(spec.effective_tone());
+        let reference = selection::Reference::of(&measured);
+        let (chosen, trials) = selection::ladder(
+            &mut Renderer::new(&input, 48000),
+            &source,
+            Some(&reference),
+            Some(spec),
+            candidates,
+            |_, _| Ok(()),
+        )
+        .unwrap();
+        assert!(chosen.is_none());
+        trials
+            .into_iter()
+            .map(|trial| {
+                let mut value = serde_json::to_value(trial).unwrap();
+                value["index"] = json!(null);
+                value
+            })
+            .collect::<Vec<_>>()
+    };
+    let whole = trials(&candidates, &spec);
+    let n = candidates.len();
+    assert_eq!(whole.len(), 2 * n);
+    for from in 1..n {
+        assert_eq!(
+            trials(&candidates[from..], &spec)[..n - from],
+            whole[from..n],
+            "first pass from {from}"
+        );
+    }
+    for from in 0..n {
+        assert_eq!(
+            trials(&instant[from..], &instant_spec),
+            whole[n + from..],
+            "instant pass from {from}"
+        );
     }
 }
 
@@ -998,11 +1602,16 @@ fn a_family_with_the_shared_reference_renders_as_a_family_that_renders_it() {
             published: None,
             given,
         };
-        let result =
-            distributed::render_family_in(&input, 48000, &plan_json, family, &mut store, |_, _| {
-                Ok(())
-            })
-            .unwrap();
+        let result = distributed::render_family_in(
+            &input,
+            48000,
+            &plan_json,
+            family,
+            &mut store,
+            None,
+            |_, _| Ok(()),
+        )
+        .unwrap();
         let mut files: Vec<(String, Vec<u8>)> = std::fs::read_dir(&directory)
             .unwrap()
             .map(|e| {
@@ -1112,8 +1721,14 @@ fn a_version_that_chooses_no_candidate_keeps_its_trials_and_failed_gates() {
             assert_eq!(result["unchosen"], json!([]));
         }
     }
-    let completed =
-        distributed::finalize_set(&input, 48000, &plan_json, &results, &directory).unwrap();
+    let completed = distributed::finalize_set(
+        RenderSource::Borrowed(&input),
+        48000,
+        &plan_json,
+        &results,
+        &directory,
+    )
+    .unwrap();
     let trial = completed["trials"]
         .as_array()
         .unwrap()
@@ -1132,18 +1747,10 @@ fn a_version_that_chooses_no_candidate_keeps_its_trials_and_failed_gates() {
     std::fs::remove_dir_all(directory).unwrap();
 }
 
-#[test]
-fn a_request_keeps_the_sub_lift_of_its_parent() {
-    use mastering_engine::{adjust, dsp, open, selection};
-    // A loud 120 Hz pulse over noise: peak control and the compressor turn
-    // down the pulses, which carry the bass, so a render falls short of the
-    // low end that the shelves give.
-    let input = signal(8);
-    let plan = set::prepare(&input, 48000, None, None)
-        .unwrap()
-        .worker_plan()
-        .unwrap();
-    let base = adjust::Base::of_plan(&serde_json::to_value(&plan).unwrap()).unwrap();
+/// The first planned candidate of `plan` with the two bass shelves, at
+/// −8 LUFS.
+fn shelved_candidate(plan: &set::WorkerPlan) -> mastering_engine::selection::Candidate {
+    use mastering_engine::{dsp, open, selection};
     let mut spec = plan.families[0].versions[0].candidates[0].spec.clone();
     let shelf = |hz, gain_db| dsp::EqBand {
         kind: dsp::Kind::LowShelf,
@@ -1156,17 +1763,132 @@ fn a_request_keeps_the_sub_lift_of_its_parent() {
         shelf(open::BASS_SHELF_HZ, 1.0),
     ]);
     spec.target_lufs = -8.0;
-    let candidate = selection::Candidate {
+    selection::Candidate {
         reason: "planned".into(),
         spec,
         gates: selection::Gates::default(),
+    }
+}
+
+#[test]
+fn the_sub_lift_starts_at_the_drive_and_the_restoring_gains_of_the_first_render() {
+    use mastering_engine::{pipeline, selection, treatment_render::Renderer};
+    // A loud 120 Hz pulse over noise: peak control and the compressor turn
+    // down the pulses, which carry the bass, so a render falls short of the
+    // low end that the shelves give.
+    let input = signal(8);
+    let plan = set::prepare(&input, 48000, None, None)
+        .unwrap()
+        .worker_plan()
+        .unwrap();
+    let candidate = shelved_candidate(&plan);
+    let source = pipeline::analyze_source(&input, 48000).unwrap();
+    let mut renderer = Renderer::new(&input, 48000);
+    let (first, _) = selection::ladder(
+        &mut renderer,
+        &source,
+        None,
+        None,
+        std::slice::from_ref(&candidate),
+        |_, _| Ok(()),
+    )
+    .unwrap();
+    let first = first.unwrap().measured.rendered;
+    let (chosen, trials) = set::base_ladder(
+        &mut renderer,
+        &source,
+        None,
+        None,
+        std::slice::from_ref(&candidate),
+        &[],
+        true,
+        |_, _| Ok(()),
+    )
+    .unwrap();
+    assert!(trials
+        .iter()
+        .any(|t| t.reason == "planned with the sub lift" && t.passed));
+    let lifted = chosen.unwrap().spec;
+    assert_eq!(lifted.initial_drive_db, first.drive_db);
+    assert_eq!(
+        Some(lifted.restoration_db),
+        first.restoration.map(|r| r.gains_db)
+    );
+}
+
+#[test]
+fn a_failed_sub_lift_delivers_the_first_render_from_scratch() {
+    use mastering_engine::{pipeline, selection, treatment_render::Renderer};
+    // The first render waits in scratch while the sub lift renders (D226).
+    // A limiter bound between the reductions of the two renders fails the
+    // lift, and the ladder returns the first render.
+    let input = signal(8);
+    let plan = set::prepare(&input, 48000, None, None)
+        .unwrap()
+        .worker_plan()
+        .unwrap();
+    let mut candidate = shelved_candidate(&plan);
+    let source = pipeline::analyze_source(&input, 48000).unwrap();
+    let ladder = |candidate: &selection::Candidate, lift: bool| {
+        set::base_ladder(
+            &mut Renderer::new(&input, 48000),
+            &source,
+            None,
+            None,
+            std::slice::from_ref(candidate),
+            &[],
+            lift,
+            |_, _| Ok(()),
+        )
+        .unwrap()
     };
+    let (_, trials) = ladder(&candidate, true);
+    let reduction = |reason: &str| {
+        trials
+            .iter()
+            .find(|t| t.reason == reason && t.passed)
+            .unwrap()
+            .limiter_maximum_db
+    };
+    let (planned, lifted) = (reduction("planned"), reduction("planned with the sub lift"));
+    assert!(lifted > planned, "{planned} {lifted}");
+    candidate.gates.limiter_maximum_db = Some((planned + lifted) / 2.0);
+    let (first, _) = ladder(&candidate, false);
+    let (chosen, trials) = ladder(&candidate, true);
+    assert!(trials
+        .iter()
+        .any(|t| t.reason == "planned with the sub lift" && !t.passed));
+    let (first, chosen) = (first.unwrap(), chosen.unwrap());
+    assert_eq!(
+        serde_json::to_value(&chosen.spec).unwrap(),
+        serde_json::to_value(&first.spec).unwrap()
+    );
+    assert!(!chosen.measured.rendered.audio.is_empty());
+    assert!(chosen.measured.rendered.audio == first.measured.rendered.audio);
+    assert_eq!(
+        chosen.measured.rendered.lufs.to_bits(),
+        first.measured.rendered.lufs.to_bits()
+    );
+}
+
+#[test]
+fn a_request_keeps_the_sub_lift_of_its_parent() {
+    use mastering_engine::adjust;
+    // A loud 120 Hz pulse over noise: peak control and the compressor turn
+    // down the pulses, which carry the bass, so a render falls short of the
+    // low end that the shelves give.
+    let input = signal(8);
+    let plan = set::prepare(&input, 48000, None, None)
+        .unwrap()
+        .worker_plan()
+        .unwrap();
+    let base = adjust::Base::of_plan(&serde_json::to_value(&plan).unwrap()).unwrap();
+    let candidate = shelved_candidate(&plan);
     // A version of a set renders the sub lift of this candidate.
     let source = mastering_engine::pipeline::analyze_source(&input, 48000).unwrap();
     let mut renderer = mastering_engine::treatment_render::Renderer::new(&input, 48000);
     let (_, trials) = set::base_ladder(
         &mut renderer,
-        &input,
         &source,
         None,
         None,
@@ -1218,4 +1940,51 @@ fn a_request_keeps_the_sub_lift_of_its_parent() {
     for (a, b) in gains(&delivered).iter().zip(gains(&candidate.spec)) {
         assert!((a - b).abs() < 1e-12, "{a} {b}");
     }
+    std::fs::remove_dir_all(&directory).unwrap();
+}
+
+/// The wanted region moves of version `id` in the basis of `plan`
+/// (`set.version-character.v3`).
+fn region_moves(plan: &set::WorkerPlan, id: &str) -> mastering_engine::character::Regions {
+    let basis = &plan
+        .families
+        .iter()
+        .flat_map(|f| f.versions.iter())
+        .find(|v| v.id == id)
+        .unwrap()
+        .basis;
+    let start = basis.find("region moves ").unwrap() + "region moves ".len();
+    let end = start + basis[start..].find('}').unwrap() + 1;
+    serde_json::from_str(&basis[start..end]).unwrap()
+}
+
+#[test]
+fn an_album_track_takes_the_moves_of_the_album_regions() {
+    let input = signal(3);
+    let plan = |options: set::Options| {
+        set::prepare_with(&input, 48000, None, None, options)
+            .unwrap()
+            .worker_plan()
+            .unwrap()
+    };
+    let single = plan(set::Options::default());
+    // An album at the bounds of the low mid and the sub: the `master` of
+    // each track cuts no low mid and adds no sub (D215), and keeps the air
+    // of its mix against presence (D273). The bass move has no lower bound.
+    let album = mastering_engine::character::Regions::from([1.17, -9.10, -7.38, 5.74, 4.0]);
+    let track = plan(set::Options {
+        album_regions: Some(album),
+        ..Default::default()
+    });
+    let moves = region_moves(&track, "master");
+    assert_eq!(
+        (moves.low_mid_db, moves.air_db, moves.sub_db, moves.bass_db),
+        (0.0, 0.0, 0.0, -1.2)
+    );
+    assert_ne!(region_moves(&single, "master"), moves);
+    let basis = &track.families[0].versions[0].basis;
+    assert!(
+        basis.contains("in an album with the mean regions"),
+        "{basis}"
+    );
 }

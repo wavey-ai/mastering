@@ -372,65 +372,103 @@ impl SideGain {
     /// a zero-phase kernel of the same length; the decorrelated mid comes
     /// from the mid before that gain.
     pub fn apply(&self, audio: &mut [crate::audio_io::Stereo], rate: u32) {
-        let mid_gain = self.has_mid_gain().then(|| {
-            let kernel = crate::fir::kernel(
-                SIDE_GAIN_TAPS,
-                |hz| 10f64.powf(self.mid_response_db(hz) / 20.0),
-                rate,
-            );
-            // A mid of f32 samples: the output is f32, and a whole f64 copy
-            // of a 30-minute recording is 0.6 GB.
-            let mut mid = vec![0.0f32; audio.len()];
-            crate::fir::filter_each(
-                audio.len(),
-                |i| 0.5 * (audio[i][0] as f64 + audio[i][1] as f64),
-                &kernel,
-                |i, value| mid[i] = value as f32,
-            );
-            mid
-        });
-        let kernel = crate::fir::kernel(
-            SIDE_GAIN_TAPS,
-            |hz| 10f64.powf(self.response_db(hz) / 20.0),
-            rate,
+        self.apply_each(audio, rate, |_, _, after| after);
+    }
+
+    /// `apply`, with frame `i` set to `combine(i, before, after)` of the
+    /// frame before the gain and the frame after it. One pass of the
+    /// filters reads each frame and then writes it, so the gain holds no
+    /// copy of the side or the mid: each is 0.7 GB as f64 for a 30-minute
+    /// recording.
+    pub fn apply_each(
+        &self,
+        audio: &mut [crate::audio_io::Stereo],
+        rate: u32,
+        mut combine: impl FnMut(
+            usize,
+            crate::audio_io::Stereo,
+            crate::audio_io::Stereo,
+        ) -> crate::audio_io::Stereo,
+    ) {
+        let kernels = self.kernels(rate);
+        let frames = std::cell::Cell::from_mut(audio).as_slice_of_cells();
+        crate::fir::filter_each_many(
+            frames.len(),
+            &kernels.all(),
+            |i, inputs| kernels.inputs(frames[i].get(), inputs),
+            |i, outputs| {
+                let before = frames[i].get();
+                frames[i].set(combine(i, before, kernels.after(before, outputs)));
+            },
         );
-        // The filters read the side and the mid from `audio` as they go:
-        // whole f64 copies of a 30-minute recording are 0.6 GB each.
-        let mut out = vec![0.0f64; audio.len()];
-        crate::fir::filter_each(
-            audio.len(),
-            |i| 0.5 * (audio[i][0] as f64 - audio[i][1] as f64),
-            &kernel,
-            |i, value| out[i] = value,
-        );
-        if self.decorrelated_db.iter().any(Option::is_some) {
-            let kernel = crate::fir::quadrature_kernel(
+    }
+
+    /// The filters of `apply_each` at `rate`.
+    pub fn kernels(&self, rate: u32) -> SideKernels {
+        SideKernels {
+            side: crate::fir::kernel(
                 SIDE_GAIN_TAPS,
-                |hz| self.decorrelated_amplitude(hz, rate),
-                decorrelation_sign,
+                |hz| 10f64.powf(self.response_db(hz) / 20.0),
                 rate,
-            );
-            crate::fir::filter_each(
-                audio.len(),
-                |i| 0.5 * (audio[i][0] as f64 + audio[i][1] as f64),
-                &kernel,
-                |i, value| out[i] += value,
-            );
+            ),
+            quadrature: self.decorrelated_db.iter().any(Option::is_some).then(|| {
+                crate::fir::quadrature_kernel(
+                    SIDE_GAIN_TAPS,
+                    |hz| self.decorrelated_amplitude(hz, rate),
+                    decorrelation_sign,
+                    rate,
+                )
+            }),
+            mid: self.has_mid_gain().then(|| {
+                crate::fir::kernel(
+                    SIDE_GAIN_TAPS,
+                    |hz| 10f64.powf(self.mid_response_db(hz) / 20.0),
+                    rate,
+                )
+            }),
         }
-        match mid_gain {
-            None => {
-                for (frame, s) in audio.iter_mut().zip(out) {
-                    let mid = 0.5 * (frame[0] as f64 + frame[1] as f64);
-                    *frame = [(mid + s) as f32, (mid - s) as f32];
-                }
-            }
-            Some(mids) => {
-                for ((frame, s), mid) in audio.iter_mut().zip(out).zip(mids) {
-                    let mid = mid as f64;
-                    *frame = [(mid + s) as f32, (mid - s) as f32];
-                }
-            }
+    }
+}
+
+/// The filters of a side gain (`SideGain::kernels`).
+pub struct SideKernels {
+    side: Vec<f64>,
+    quadrature: Option<Vec<f64>>,
+    mid: Option<Vec<f64>>,
+}
+
+impl SideKernels {
+    /// The kernels in order: the side, then the decorrelated mid and the mid
+    /// gain when they apply.
+    pub fn all(&self) -> Vec<&[f64]> {
+        std::iter::once(self.side.as_slice())
+            .chain(self.quadrature.as_deref())
+            .chain(self.mid.as_deref())
+            .collect()
+    }
+    /// The input of each kernel at a frame.
+    pub fn inputs(&self, [l, r]: crate::audio_io::Stereo, inputs: &mut [f64]) {
+        inputs[0] = 0.5 * (l as f64 - r as f64);
+        for mid in &mut inputs[1..] {
+            *mid = 0.5 * (l as f64 + r as f64);
         }
+    }
+    /// The frame after the gain, from the frame before it and the output of
+    /// each kernel at that frame.
+    pub fn after(
+        &self,
+        before: crate::audio_io::Stereo,
+        outputs: &[f64],
+    ) -> crate::audio_io::Stereo {
+        let s = match self.quadrature {
+            Some(_) => outputs[0] + outputs[1],
+            None => outputs[0],
+        };
+        let m = match self.mid {
+            Some(_) => outputs[outputs.len() - 1] as f32 as f64,
+            None => 0.5 * (before[0] as f64 + before[1] as f64),
+        };
+        [(m + s) as f32, (m - s) as f32]
     }
 }
 

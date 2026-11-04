@@ -1,7 +1,7 @@
 use mastering_engine::{
     adjust, analysis,
     audio_io::{self, Result},
-    delivery, distributed,
+    character, delivery, distributed,
     dsp::{db, Oversampler},
     metrics, set, source_treatments, spectrum, stem_evidence, stereo,
 };
@@ -13,7 +13,7 @@ use std::{
     time::Instant,
 };
 
-const USAGE: &str = "master set INPUT.wav NEW_OUTPUT_DIRECTORY [--format pcm24|pcm16|float32] [--stems DIRECTORY] [--auditory-analysis ANALYSIS.json] [--album-lufs N] [--deesser true|false]\nmaster set-plan INPUT.wav NEW_PLAN.json [--stems DIRECTORY] [--auditory-analysis ANALYSIS.json]\nmaster render-family INPUT.wav PLAN.json FAMILY_ID NEW_OUTPUT_DIRECTORY\nmaster adjust INPUT.wav PLAN.json VERSIONS.json PARENT_ID NEW_OUTPUT_DIRECTORY [--id ID] [--preset streaming|club|radio|mono|mono-safe] [--bass N] [--presence N] [--air N] [--sibilance N] [--loudness N] [--width N] [--compression N] [--ceiling -N]\nmaster inspect INPUT.wav";
+const USAGE: &str = "master set INPUT.wav NEW_OUTPUT_DIRECTORY [--format pcm24|pcm16|float32] [--stems DIRECTORY] [--auditory-analysis ANALYSIS.json] [--album-lufs N] [--album-regions JSON] [--deesser true|false]\nmaster set-plan INPUT.wav NEW_PLAN.json [--stems DIRECTORY] [--auditory-analysis ANALYSIS.json]\nmaster render-family INPUT.wav PLAN.json FAMILY_ID NEW_OUTPUT_DIRECTORY\nmaster adjust INPUT.wav PLAN.json VERSIONS.json PARENT_ID NEW_OUTPUT_DIRECTORY [--id ID] [--essential ESSENTIAL_FAMILY.json] [--preset streaming|radio|mono|mono-safe] [--bass N] [--presence N] [--air N] [--sibilance N] [--loudness N] [--width N] [--compression N] [--ceiling -N]\nmaster inspect INPUT.wav";
 
 fn write_json(path: &Path, record: &impl serde::Serialize) -> Result<()> {
     let json = serde_json::to_string_pretty(record)?;
@@ -61,6 +61,13 @@ fn set_options(args: impl Iterator<Item = String>) -> Result<SetOptions> {
             "--stems" => stems = Some(PathBuf::from(value)),
             "--auditory-analysis" => auditory = Some(PathBuf::from(value)),
             "--album-lufs" => options.album_target_lufs = Some(value.parse()?),
+            "--album-regions" => {
+                options.album_regions = Some(
+                    serde_json::from_str::<character::Regions>(&value)?
+                        .checked()
+                        .ok_or("Invalid album regions")?,
+                )
+            }
             "--deesser" => options.deesser = value.parse()?,
             _ => return Err(format!("Unknown set option {flag}").into()),
         }
@@ -97,15 +104,13 @@ fn make_set_plan(
         return Err("Set plan exists; choose a new path".into());
     }
     let input_hash = digest(input)?;
-    let source = audio_io::read_source(input)?;
-    let source_rate = source.sample_rate;
-    let source_frames = source.audio.len();
-    let source = source.at_render_rate()?;
-    let (audio, rate) = (source.audio, source.sample_rate);
+    // The mix stays in scratch storage from the read to the plan (D250).
+    let mut source = audio_io::read_stored(input)?;
+    let (source_rate, source_frames) = (source.source_rate, source.source_frames);
     if digest(input)? != input_hash {
         return Err("Original changed while reading".into());
     }
-    let pcm_hash = stem_evidence::fingerprint(&audio);
+    let pcm_hash = source.fingerprint()?;
     let auditory_json = auditory_path.map(fs::read).transpose()?;
     let auditory = auditory_json.as_ref().map(|json| set::AuditoryInput {
         json,
@@ -131,20 +136,22 @@ fn make_set_plan(
         .transpose()?;
     let evidence = stems
         .map(|directory| {
-            stem_evidence::analyze_set(
-                &audio,
-                rate,
-                |role| audio_io::read_source(&directory.join(format!("{role}.wav"))),
+            stem_evidence::analyze_set_stored(
+                &mut source,
+                |role, each| {
+                    audio_io::read_source_blocks(&directory.join(format!("{role}.wav")), each)
+                },
                 focus.as_ref(),
                 &input_hash,
             )
         })
         .transpose()?;
-    let plan = set::prepare(&audio, rate, evidence, auditory)?.worker_plan()?;
+    let plan = set::prepare_stored(&mut source, evidence, auditory, set::Options::default())?
+        .worker_plan()?;
     if digest(input)? != input_hash {
         return Err("Original changed during planning".into());
     }
-    write_json(output, &plan)
+    write_json(output, &plan.to_json()?)
 }
 
 struct NativeSetSink<'a> {
@@ -193,14 +200,14 @@ impl set::Sink for NativeSetSink<'_> {
         self.delivered
             .iter()
             .map(|version| {
-                let reference =
-                    audio_io::read_source(&self.directory.join(version["wav"].as_str().unwrap()))?;
-                if reference.sample_rate != self.rate {
-                    return Err("A delivered version differs in sample rate".into());
-                }
+                let path = self.directory.join(version["wav"].as_str().unwrap());
                 Ok(set::Residual {
                     id: version["id"].as_str().unwrap().into(),
-                    matched_residual_db: set::matched_residual_db(&reference.audio, audio)?,
+                    matched_residual_db: set::matched_residual_db_of_wav(
+                        || audio_io::open(&path),
+                        self.rate,
+                        audio,
+                    )?,
                 })
             })
             .collect()
@@ -311,7 +318,7 @@ fn render_set(
     let source_rate = source.sample_rate;
     let source_frames = source.audio.len();
     let source = source.at_render_rate()?;
-    let (audio, rate) = (source.audio, source.sample_rate);
+    let (mut audio, rate) = (source.audio, source.sample_rate);
     if digest(input)? != input_hash {
         return Err("Original changed while reading".into());
     }
@@ -342,9 +349,9 @@ fn render_set(
     let evidence = stems
         .map(|p| {
             stem_evidence::analyze_set(
-                &audio,
+                &mut audio,
                 rate,
-                |role| audio_io::read_source(&p.join(format!("{role}.wav"))),
+                |role, each| audio_io::read_source_blocks(&p.join(format!("{role}.wav")), each),
                 focus.as_ref(),
                 &input_hash,
             )
@@ -385,7 +392,15 @@ fn render_set(
         if digest(&directory.join("ORIGINAL.wav"))? != input_hash {
             return Err("Original copy fingerprint failed".into());
         }
-        let summary = set::render_with(&audio, rate, evidence, auditory, options, &mut sink)?;
+        // The renderer holds the source in a scratch file (D232).
+        let summary = set::render_with(
+            mastering_engine::treatment_render::RenderSource::Owned(audio),
+            rate,
+            evidence,
+            auditory,
+            options,
+            &mut sink,
+        )?;
         if digest(input)? != input_hash {
             return Err("Original changed during rendering".into());
         }
@@ -488,12 +503,17 @@ fn run() -> Result<()> {
             steps: adjust::Steps::default(),
             preset: None,
         };
+        let mut essential = None;
         while let Some(flag) = args.next() {
             let value = args.next().ok_or("Missing option value")?;
             let steps = &mut request.steps;
             let slot = match flag.as_str() {
                 "--id" => {
                     request.id = value;
+                    continue;
+                }
+                "--essential" => {
+                    essential = Some(PathBuf::from(value));
                     continue;
                 }
                 "--preset" => {
@@ -512,18 +532,39 @@ fn run() -> Result<()> {
             };
             *slot = value.parse().map_err(|_| "A step is a whole number")?;
         }
-        let source = audio_io::read(&input)?;
+        // The source waits in scratch storage, as in the adjust Lambda
+        // (D257).
+        let source = audio_io::read_stored(&input)?;
         let plan: serde_json::Value = serde_json::from_slice(&fs::read(plan)?)?;
-        let base = adjust::Base::of_plan(&plan)?;
+        let mut base = adjust::Base::of_plan(&plan)?;
         let versions_dir = versions.parent().unwrap_or(Path::new(".")).to_path_buf();
         let versions: serde_json::Value = serde_json::from_slice(&fs::read(versions)?)?;
+        // The family result of `essential` gives the reference record of
+        // the set to a request on the family result of another version
+        // (D217).
+        if let Some(file) = essential {
+            let family: serde_json::Value = serde_json::from_slice(&fs::read(file)?)?;
+            let record = &family["reference_record"];
+            if !record.is_object() {
+                return Err("The family result of essential holds no reference record".into());
+            }
+            base.record = Some(distributed::expand_record(
+                record,
+                distributed::shared_values(&plan),
+            )?);
+        }
+        if base.record.is_none() && !adjust::holds_reference(&versions) {
+            eprintln!(
+                "The versions record holds no reference record: the request renders the essential spec as its reference"
+            );
+        }
         fs::create_dir(&output)?;
         let started = Instant::now();
         if source.sample_rate != base.sample_rate() {
             return Err("The plan belongs to another render rate".into());
         }
         let mut result = adjust::render(
-            &source.audio,
+            mastering_engine::treatment_render::RenderSource::Stored(source),
             &base,
             &versions,
             &versions_dir,

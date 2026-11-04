@@ -4,7 +4,7 @@
 //! threshold size or more to a hook. Release builds do not enable the
 //! feature.
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::Relaxed};
 
 /// The system allocator with counts.
 pub struct Counting;
@@ -20,6 +20,13 @@ static TOP: AtomicUsize = AtomicUsize::new(0);
 static COUNT: AtomicUsize = AtomicUsize::new(0);
 static HOOK: AtomicUsize = AtomicUsize::new(0);
 static THRESHOLD: AtomicUsize = AtomicUsize::new(usize::MAX);
+static PEAK_HOOK: AtomicUsize = AtomicUsize::new(0);
+/// The high-water mark at the last call of the peak hook.
+static REPORTED: AtomicUsize = AtomicUsize::new(usize::MAX);
+static STEP: AtomicUsize = AtomicUsize::new(usize::MAX);
+/// True while a thread runs the peak hook. The hook allocates, and its
+/// allocations raise no further call.
+static IN_PEAK_HOOK: AtomicBool = AtomicBool::new(false);
 
 /// A hook receives `(freed, address, bytes, live)` for each allocation of
 /// at least the threshold: `freed` is false for an allocation and true for
@@ -34,6 +41,19 @@ pub fn set_hook(threshold: usize, hook: Option<Hook>) {
     if hook.is_some() {
         THRESHOLD.store(threshold, Relaxed);
     }
+}
+
+/// A peak hook receives the high-water mark of the live bytes.
+pub type PeakHook = fn(usize);
+
+/// Give the high-water mark to `hook` when it first reaches `floor` bytes,
+/// and after that each time it rises by `step` bytes. `None` stops the
+/// hook.
+pub fn set_peak_hook(floor: usize, step: usize, hook: Option<PeakHook>) {
+    PEAK_HOOK.store(0, Relaxed);
+    STEP.store(step, Relaxed);
+    REPORTED.store(floor.saturating_sub(step), Relaxed);
+    PEAK_HOOK.store(hook.map_or(0, |h| h as usize), Relaxed);
 }
 
 /// Live bytes.
@@ -59,7 +79,24 @@ pub fn take_peak() -> usize {
 
 fn mark(live: usize) {
     PEAK.fetch_max(live, Relaxed);
-    TOP.fetch_max(live, Relaxed);
+    if TOP.fetch_max(live, Relaxed) < live {
+        report_peak(live);
+    }
+}
+
+fn report_peak(top: usize) {
+    let hook = PEAK_HOOK.load(Relaxed);
+    if hook == 0 || top < REPORTED.load(Relaxed).saturating_add(STEP.load(Relaxed)) {
+        return;
+    }
+    if IN_PEAK_HOOK.swap(true, Relaxed) {
+        return;
+    }
+    REPORTED.store(top, Relaxed);
+    // SAFETY: `set_peak_hook` stores only values of type `PeakHook`.
+    let hook: PeakHook = unsafe { std::mem::transmute::<usize, PeakHook>(hook) };
+    hook(top);
+    IN_PEAK_HOOK.store(false, Relaxed);
 }
 
 fn report(freed: bool, address: *mut u8, bytes: usize) {

@@ -151,15 +151,15 @@ fn oversampling_passband_and_intersample_peaks() {
     assert!(oversampler.peak(&audio) > 0.99);
 }
 
-/// True-peak check of the 4x estimate on sines whose true peak is known.
-/// A sine at `4 fs / N` for a whole N has its crests at the same positions
-/// against the 4x points in each period. Over the positions within one 4x
-/// step, the estimate reads at most 0.001 dB above the true peak, and at
-/// most 0.001 dB under the lowest reading of an ideal 4x interpolator:
-/// `cos(pi / N)` for an even N, a crest midway between two points, and
-/// `cos(pi / 2N)` for an odd N, whose positive and negative crests are half
-/// a step apart. At 19.2 kHz and 48 kHz (N = 10) that reading is 0.436 dB
-/// under the true peak.
+/// True-peak check of the 8-point estimate on sines whose true peak is
+/// known. A sine at `4 fs / N` for a whole N has its crests at the same
+/// positions against the 8 points of each sample interval in each period,
+/// and its positive and negative crests are N eighths apart. Over the
+/// positions within one 4x step, the estimate reads at most 0.001 dB above
+/// the true peak, and at most 0.001 dB under the lowest reading of an ideal
+/// 8x interpolator: `cos(pi / 2N)`, a crest midway between two points. At
+/// 19.2 kHz and 48 kHz (N = 10) that reading is 0.108 dB under the true
+/// peak.
 #[test]
 fn peak_estimate_reads_sines_within_the_bound_of_its_points() {
     for rate in [44100u32, 48000] {
@@ -188,14 +188,14 @@ fn peak_estimate_reads_sines_within_the_bound_of_its_points() {
                 low = low.min(error);
                 high = high.max(error);
             }
-            let ideal = db((PI / (n * (1 + n % 2)) as f64).cos());
+            let ideal = db((PI / (2 * n) as f64).cos());
             assert!(
                 high <= 0.001,
                 "{rate} Hz, N {n}: {high} dB over the true peak"
             );
             assert!(
                 low >= ideal - 0.001,
-                "{rate} Hz, N {n}: {low} dB against the ideal 4x reading {ideal} dB"
+                "{rate} Hz, N {n}: {low} dB against the ideal 8x reading {ideal} dB"
             );
         }
     }

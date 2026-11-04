@@ -19,13 +19,18 @@ use serde_json::{json, Value};
 
 /// One step: the duplicate threshold of the set, in dB or LU.
 pub const STEP_DB: f64 = crate::selection::DISTINCT_DB;
+/// The smallest level increment that a listener detects in wideband noise
+/// whose level is high for 1.5 s and low for 4.5 s: ΔI/I = 0.1, or 0.41 dB
+/// (Miller 1947). The duplicate screen of a request counts a change of a
+/// requested control from this increment (D279): a render delivers one step
+/// within a few hundredths of a dB of `DISTINCT_DB`, on each side of it.
+pub const DETECTABLE_DB: f64 = 0.41;
 /// Largest number of steps of a control in each direction.
 pub const MAXIMUM_STEPS: i32 = 4;
 /// Range of the loudness target, in LUFS: the lowest base target of the set
 /// and the cap of a Denser target.
 pub const LOUDNESS_RANGE_LUFS: (f64, f64) = (crate::set::BASE_TARGET_LUFS.0, -6.5);
-/// Corner of the Bass shelf, in Hz: the corner of the equal-loudness bass
-/// shelf (`broad_tone::Move::LevelBass`).
+/// Corner of the Bass shelf, in Hz.
 pub const BASS_SHELF_HZ: f64 = 150.0;
 /// Region of the Bass measure, in Hz: the two held bands of the low-end hold.
 pub const BASS_HZ: (f64, f64) = (crate::low_end::BANDS_HZ[0].0, crate::low_end::BANDS_HZ[1].1);
@@ -38,8 +43,9 @@ pub const RULE: &str = "adjust.steps.v1";
 /// Region of the Width measure, in Hz: the side/mid of the width gate of
 /// the set (`selection::Gates::minimum_width_db`).
 pub const WIDTH_HZ: (f64, f64) = (500.0, 12000.0);
-/// Move of the compressor threshold for each Compression step, in dB. At
-/// 2:1 it moves the gain reduction above the knee by one step.
+/// Move of the compressor threshold for each Compression step on a parent
+/// whose render report has no level distribution of its compressor, in dB.
+/// At 2:1 it moves the gain reduction above the knee by one step.
 pub const COMPRESSION_THRESHOLD_DB: f64 = 2.0 * STEP_DB;
 /// Largest number of Ceiling steps down from the ceiling of the set.
 pub const MAXIMUM_CEILING_STEPS: i32 = 3;
@@ -86,6 +92,23 @@ impl Steps {
         }
         Ok(())
     }
+
+    /// True when `share` of the steps changes a requested control by
+    /// `DETECTABLE_DB` or more. Each share keeps the ceiling.
+    pub fn detectable_at(&self, share: f64) -> bool {
+        let moved = [
+            self.bass,
+            self.presence,
+            self.air,
+            self.sibilance,
+            self.loudness,
+            self.width,
+            self.compression,
+        ]
+        .iter()
+        .any(|s| s.abs() as f64 * STEP_DB * share >= DETECTABLE_DB);
+        moved || self.ceiling.abs() as f64 * STEP_DB >= DETECTABLE_DB
+    }
 }
 
 /// Where the source has the band of a control.
@@ -99,6 +122,124 @@ pub struct Availability {
     pub sibilance: Option<Sibilance>,
     /// The parent has a compressor.
     pub compression: bool,
+    /// The level distribution of the parent's compressor, when its render
+    /// report holds it.
+    pub compressor: Option<Compression>,
+}
+
+/// The level of the compressor of a render over its threshold
+/// (`compressor::Stats`).
+#[derive(Clone, Copy, Debug)]
+pub struct Compression {
+    /// `compressor::Stats::over_quantiles_db`.
+    pub over_db: [f64; crate::compressor::OVER_QUANTILES],
+    /// `compressor::Stats::mean_reduction_db`.
+    pub mean_reduction_db: f64,
+}
+
+impl Compression {
+    /// The compressor level of `stats`, the compressor stats of a render
+    /// report.
+    fn of(stats: &Value) -> Option<Self> {
+        Some(Self {
+            over_db: serde_json::from_value(stats["over_quantiles_db"].clone()).ok()?,
+            mean_reduction_db: stats["mean_reduction_db"].as_f64()?,
+        })
+    }
+}
+
+/// Range of the shift of the compressor level that `compression_shift`
+/// searches, in dB: the span of the bins of `compressor::Stats`.
+const COMPRESSION_SHIFT_DB: f64 = 48.0;
+
+/// The shift of the compressor level of `compression` at which the mean
+/// static reduction with `settings` is `target_db`. None when no shift
+/// within `COMPRESSION_SHIFT_DB` gives it.
+fn level_shift(
+    compression: &Compression,
+    settings: crate::compressor::Settings,
+    target_db: f64,
+) -> Option<f64> {
+    let mean =
+        |shift| crate::compressor::mean_reduction_over(&compression.over_db, settings, shift);
+    let (mut low, mut high) = (-COMPRESSION_SHIFT_DB, COMPRESSION_SHIFT_DB);
+    // The mean reduction rises with the shift.
+    if !(mean(low) < target_db && target_db < mean(high)) {
+        return None;
+    }
+    for _ in 0..60 {
+        let middle = 0.5 * (low + high);
+        if mean(middle) < target_db {
+            low = middle;
+        } else {
+            high = middle;
+        }
+    }
+    Some(0.5 * (low + high))
+}
+
+/// The move of the compressor threshold of `settings`, down for a positive
+/// value, that changes the mean reduction of the parent by `change_db`
+/// (D279). The attack and the release raise the mean reduction over the
+/// mean of the static curve. The mean reduction of the parent is the mean
+/// static reduction of its level distribution shifted by an offset, and a
+/// step moves the threshold from that offset. None when no move gives the
+/// change.
+fn compression_shift(
+    compression: &Compression,
+    settings: crate::compressor::Settings,
+    change_db: f64,
+) -> Option<f64> {
+    if change_db == 0.0 {
+        return Some(0.0);
+    }
+    let offset = level_shift(compression, settings, compression.mean_reduction_db)?;
+    let moved = level_shift(
+        compression,
+        settings,
+        compression.mean_reduction_db + change_db,
+    )?;
+    Some(moved - offset)
+}
+
+/// The change of the held bands of each section of the parent that the
+/// compressor of `spec` makes against the compressor of `delivered`, from
+/// `stats`, the compressor stats of the parent (D280). The change at a move
+/// of the level is the change of the hold shift of the same direction,
+/// times the change of the mean reduction of the move over the change of
+/// the hold shift, both from the model of `compression_shift`. None when
+/// the parent has no hold shift, or when the request changes another
+/// setting of the compressor.
+fn compression_hold_db(delivered: &Spec, spec: &Spec, stats: &Value) -> Option<Vec<[f64; 2]>> {
+    let (before, after) = (delivered.compressor?, spec.compressor?);
+    let shift = before.threshold_dbfs - after.threshold_dbfs;
+    let moved = crate::compressor::Settings {
+        threshold_dbfs: before.threshold_dbfs,
+        ..after
+    };
+    if shift == 0.0 || serde_json::to_value(moved).ok()? != serde_json::to_value(before).ok()? {
+        return None;
+    }
+    let hold: crate::compressor::HoldShift =
+        serde_json::from_value(stats["hold_shift"].clone()).ok()?;
+    let compression = Compression::of(stats)?;
+    let offset = level_shift(&compression, before, compression.mean_reduction_db)?;
+    let change = |x: f64| {
+        crate::compressor::mean_reduction_over(&compression.over_db, before, offset + x)
+            - crate::compressor::mean_reduction_over(&compression.over_db, before, offset)
+    };
+    let side = usize::from(shift > 0.0);
+    let reference = change([-hold.shift_db, hold.shift_db][side]);
+    if reference.abs() < 1e-9 {
+        return None;
+    }
+    let factor = change(shift) / reference;
+    Some(
+        hold.change_db
+            .iter()
+            .map(|c| c[side].map(|v| v * factor))
+            .collect(),
+    )
 }
 
 /// The keyed frames of the de-esser of a render (`deesser::Stats`).
@@ -132,6 +273,7 @@ impl Availability {
                 parent.deesser.is_some() && render["deesser"]["keyed_frames"].as_u64() > Some(0)
             }),
             compression: parent.compressor.is_some(),
+            compressor: Compression::of(&render["compressor"]),
         }
     }
 }
@@ -333,8 +475,27 @@ fn shaped_power(
     side: Option<&crate::width::SideGain>,
     i: usize,
 ) -> f64 {
-    let hz = spectrum.centers_hz[i];
-    let rate = spectrum.sample_rate;
+    let [mid, side] = shaped_parts(spectrum, tone, side, i);
+    mid + side
+}
+
+/// The mid and side parts of `shaped_power`.
+fn shaped_parts(
+    spectrum: &BandSpectrum,
+    tone: &Tone,
+    side: Option<&crate::width::SideGain>,
+    i: usize,
+) -> [f64; 2] {
+    let gains = tone_gains(tone, side, spectrum.centers_hz[i], spectrum.sample_rate);
+    [
+        gains[0] * spectrum.mid_power[i],
+        gains[1] * spectrum.side_power[i],
+    ]
+}
+
+/// The power gain of the mid and of the side at `hz` of `tone` with the
+/// side gain `side`, at `rate`.
+fn tone_gains(tone: &Tone, side: Option<&crate::width::SideGain>, hz: f64, rate: u32) -> [f64; 2] {
     let response = |filters: &[EqBand]| {
         10f64.powf(
             filters
@@ -348,9 +509,10 @@ fn shaped_power(
     let widening = side.map_or(1.0, |g| 10f64.powf(g.response_db(hz) / 10.0));
     // Exactly 1 without the fold of a preset.
     let mid_gain = side.map_or(1.0, |g| g.mid_power(hz));
-    stereo
-        * (spectrum.mid_power[i] * response(&tone.mid) * mid_gain
-            + spectrum.side_power[i] * response(&tone.side) * widening)
+    [
+        stereo * response(&tone.mid) * mid_gain,
+        stereo * response(&tone.side) * widening,
+    ]
 }
 
 /// Mean power of the bins of `spectrum` in `region` after the tone.
@@ -443,7 +605,21 @@ pub struct Delivered {
 
 /// The measures of the controls on `audio` at `rate`.
 pub fn measure(audio: &[Stereo], rate: u32) -> Delivered {
-    let spectrum = BandSpectrum::of(&crate::spectrum(audio, rate));
+    measure_read(&mut crate::scratch::Slice(audio), rate).expect("frames of a slice")
+}
+
+/// `measure` of the frames of `audio`, read one batch of hops at a time
+/// (D255).
+pub(crate) fn measure_read(
+    audio: &mut impl crate::scratch::Frames,
+    rate: u32,
+) -> Result<Delivered> {
+    Ok(measures_of(&crate::spectrum_read(audio, rate)?))
+}
+
+/// `measure` of the audio whose spectrum (`spectrum_read`) is `spectrum`.
+pub(crate) fn measures_of(spectrum: &crate::Spectrum) -> Delivered {
+    let spectrum = BandSpectrum::of(spectrum);
     let m = predicted(&spectrum, &Tone::default(), None);
     Delivered {
         bass_db: m.bass_db,
@@ -467,14 +643,29 @@ impl VersionFacts {
     /// The facts of a render at `rate` whose loudness is `lufs` and whose
     /// mean limiter reduction is `mean_reduction_db`.
     pub fn of(audio: &[Stereo], lufs: f64, mean_reduction_db: f64, rate: u32) -> Result<Self> {
+        Self::of_read(
+            &mut crate::scratch::Slice(audio),
+            lufs,
+            mean_reduction_db,
+            rate,
+        )
+    }
+
+    /// `of` of the frames of `audio`, read in blocks and batches (D257).
+    pub(crate) fn of_read(
+        audio: &mut impl crate::scratch::Frames,
+        lufs: f64,
+        mean_reduction_db: f64,
+        rate: u32,
+    ) -> Result<Self> {
         Ok(Self {
             signature: Signature::new(
-                &crate::metrics(audio, rate),
-                &crate::stereo::analyze(audio, rate)?,
+                &crate::metrics_read(audio, rate)?,
+                &crate::stereo::analyze_read(audio, rate)?,
                 lufs,
                 mean_reduction_db,
             ),
-            measures: measure(audio, rate),
+            measures: measure_read(audio, rate)?,
         })
     }
 
@@ -501,12 +692,29 @@ pub struct HoldSections {
     /// its hold answered (`low_end::Step::changes_db`), or `change_db` when
     /// the version has no hold.
     pub free_change_db: Vec<[Option<f64>; 2]>,
+    /// The side share of the power of each held band in each section of
+    /// the version (D282). Empty in a record of an earlier engine.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub side_share: Vec<[f64; 2]>,
+    /// The power of each held band in each section of the version against
+    /// its integrated loudness (`low_end::Sections::power_db`), in dB: the
+    /// weight of the section in the loudness that a hold bell adds (D282).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub power_db: Vec<[f64; 2]>,
+    /// The power of the mid and of the side in each sub-band of the held
+    /// bands in each section of the version (`low_end::Sections::low_db`,
+    /// D288). Empty in a record of an earlier engine.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub low_db: Vec<Vec<[f64; 2]>>,
 }
 
 impl HoldSections {
     /// The sections of a version with the spec `spec`, the hold steps
     /// `steps` of its chosen candidate, and its sections and those of the
-    /// reference.
+    /// reference, whose tone is `reference_tone`. The intended move is that
+    /// of the hold: the static low shelves of the version against those of
+    /// the reference (D280).
+    #[allow(clippy::too_many_arguments)]
     pub fn of(
         spec: &Spec,
         spectrum: &Spectrum,
@@ -515,8 +723,9 @@ impl HoldSections {
         version_lufs: f64,
         reference: &crate::low_end::Sections,
         reference_lufs: f64,
+        reference_tone: Option<&crate::treatment::Tone>,
     ) -> Self {
-        let intended = crate::low_end::intended_db(spec, spectrum);
+        let intended = crate::low_end::intended_against_db(spec, reference_tone, spectrum);
         let change_db =
             crate::low_end::changes(version, version_lufs, reference, reference_lufs, intended);
         let free_change_db = match (steps.first(), &spec.low_end_hold) {
@@ -528,6 +737,13 @@ impl HoldSections {
             ends: version.ends.clone(),
             change_db,
             free_change_db,
+            side_share: version.side_shares().unwrap_or_default(),
+            power_db: version
+                .power_db
+                .iter()
+                .map(|p| p.map(|p| p - version_lufs))
+                .collect(),
+            low_db: version.low_db.clone(),
         }
     }
 
@@ -709,6 +925,11 @@ pub fn spec_at(
     {
         return Err("The request moves a control that this version does not have".into());
     }
+    // The duplicate screen refuses a share that moves no requested control
+    // by the detectable increment (D279).
+    if !steps.detectable_at(share) {
+        return Err("The share changes each control by less than the detectable increment".into());
+    }
     let change = |s: i32| s as f64 * STEP_DB * share;
     let side_gain = widened(parent.side_gain.as_ref(), change(steps.width));
     let side = side_gain.as_ref();
@@ -739,8 +960,19 @@ pub fn spec_at(
     // parent's is left out, so the next share renders instead.
     spec.effective_tone().0.validate(spectrum.sample_rate)?;
     spec.low_end_hold = None;
+    // A Compression step changes the mean reduction by 0.5 dB: the builder
+    // solves the move of the threshold from the level distribution of the
+    // parent's compressor (D279). A parent without it moves the threshold
+    // by `COMPRESSION_THRESHOLD_DB` for each step.
     if let Some(settings) = &mut spec.compressor {
-        settings.threshold_dbfs -= steps.compression as f64 * COMPRESSION_THRESHOLD_DB * share;
+        let shift = match available.compressor {
+            Some(compression) if steps.compression != 0 => {
+                compression_shift(&compression, *settings, change(steps.compression))
+                    .ok_or("The request is outside the range of the compressor")?
+            }
+            _ => steps.compression as f64 * COMPRESSION_THRESHOLD_DB * share,
+        };
+        settings.threshold_dbfs -= shift;
         settings.validate()?;
     }
     // The ceiling is a delivery condition, so each share keeps it.
@@ -754,8 +986,15 @@ pub fn spec_at(
         plan.maximum_cut_db = shifted_cut_db(plan, shift);
         plan.threshold_db += shift;
     }
-    spec.target_lufs = (parent.target_lufs + change(steps.loudness))
-        .clamp(LOUDNESS_RANGE_LUFS.0, LOUDNESS_RANGE_LUFS.1);
+    // A share whose level leaves the loudness range is left out, as a share
+    // outside the range of the filters is: the result then reports the steps
+    // that it delivers.
+    spec.target_lufs = parent.target_lufs + change(steps.loudness);
+    if steps.loudness != 0
+        && !(LOUDNESS_RANGE_LUFS.0..=LOUDNESS_RANGE_LUFS.1).contains(&spec.target_lufs)
+    {
+        return Err("The request is outside the loudness range".into());
+    }
     Ok(spec)
 }
 
@@ -819,12 +1058,51 @@ pub struct Base {
     pub source_condition: Value,
     pub facts: Facts,
     pub reference: Value,
+    /// The reference record of the set (`distributed::REFERENCE_SCHEMA`):
+    /// the measurements of the render that the `essential` version chose. A
+    /// request takes its reference from the record, as the families of the
+    /// set do (D217). A base of a set made before D217 has none, and its
+    /// requests render the `essential` spec.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub record: Option<Value>,
 }
 
+/// The field of the Essential version record of a cloud manifest that holds
+/// the reference record of the set (D270). The base of a manifest keeps no
+/// record: the browser engine of 1.14.0 refuses a base with `record`, and it
+/// takes each version record as it comes.
+pub const VERSION_REFERENCE_FIELD: &str = "reference_record";
+
 impl Base {
+    /// The base with the reference record of the set from `versions`, the
+    /// version records of a cloud manifest, when it has none (D270). A record
+    /// without its chosen spec takes the spec of the Essential version
+    /// record, the spec that the manifest omits from it (D271).
+    pub fn with_versions_record(mut self, versions: &[Value]) -> Self {
+        if self.record.is_none() {
+            self.record = versions
+                .iter()
+                .find(|v| v["id"] == "essential")
+                .and_then(|v| {
+                    let mut record = v[VERSION_REFERENCE_FIELD].clone();
+                    let fields = record.as_object_mut()?;
+                    if !fields.contains_key(crate::distributed::CHOSEN_SPEC_FIELD) {
+                        fields.insert(
+                            crate::distributed::CHOSEN_SPEC_FIELD.into(),
+                            v["spec"].clone(),
+                        );
+                    }
+                    Some(record)
+                });
+        }
+        self
+    }
+
     /// The base of a worker plan of a set.
     pub fn of_plan(set_plan: &Value) -> Result<Self> {
-        if set_plan["schema"] != crate::distributed::PLAN_SCHEMA {
+        if set_plan["schema"] != crate::distributed::PLAN_SCHEMA
+            && set_plan["schema"] != crate::distributed::FULL_PLAN_SCHEMA
+        {
             return Err("Unsupported worker plan schema".into());
         }
         let families = set_plan["families"]
@@ -833,7 +1111,7 @@ impl Base {
         // Each family after `essential` names the `essential` spec as its
         // reference; the `essential` family renders it as its first
         // candidate.
-        let reference = families
+        let mut reference = families
             .iter()
             .find_map(|f| (!f["reference"].is_null()).then(|| f["reference"].clone()))
             .or_else(|| {
@@ -843,6 +1121,9 @@ impl Base {
                     .map(|f| f["versions"][0]["candidates"][0]["spec"].clone())
             })
             .ok_or("Worker plan without an essential spec")?;
+        if let Some(shared) = set_plan["shared"].as_array() {
+            crate::distributed::expand_spec(&mut reference, shared)?;
+        }
         let base = Self {
             source_pcm_sha256: set_plan["source_pcm_sha256"]
                 .as_str()
@@ -854,6 +1135,7 @@ impl Base {
             source_condition: set_plan["source_condition"].clone(),
             facts: facts_of(set_plan)?,
             reference,
+            record: None,
         };
         Ok(base)
     }
@@ -872,7 +1154,25 @@ pub fn worker_plan(
     candidates: &[Candidate],
     request: &Request,
 ) -> Result<Value> {
-    Ok(json!({
+    // Each spec shares its keys as the plan takes it, in the order of
+    // `distributed::share_specs`, so the plan holds one copy of each key
+    // (D278).
+    let mut shared = Vec::new();
+    let mut reference = base.reference.clone();
+    crate::distributed::share_spec(&mut reference, &mut shared);
+    let candidates = candidates
+        .iter()
+        .map(|c| {
+            let mut spec = serde_json::to_value(&c.spec)?;
+            crate::distributed::share_spec(&mut spec, &mut shared);
+            Ok(json!({
+                "reason": c.reason,
+                "spec": spec,
+                "gates": c.gates,
+            }))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let mut plan = json!({
         "schema": crate::distributed::PLAN_SCHEMA,
         "sample_rate": base.sample_rate(),
         "source_pcm_sha256": base.source_pcm_sha256,
@@ -881,7 +1181,7 @@ pub fn worker_plan(
         "facts": base.facts,
         "families": [{
             "id": id,
-            "reference": base.reference,
+            "reference": reference,
             "versions": [{
                 "id": id,
                 "rule": RULE,
@@ -890,14 +1190,12 @@ pub fn worker_plan(
                 "label": "",
                 // The parent spec holds the sub lift of the parent.
                 "lifted": true,
-                "candidates": candidates.iter().map(|c| json!({
-                    "reason": c.reason,
-                    "spec": c.spec,
-                    "gates": c.gates,
-                })).collect::<Vec<_>>(),
+                "candidates": candidates,
             }],
         }],
-    }))
+    });
+    plan["shared"] = Value::Array(shared);
+    Ok(plan)
 }
 
 /// The planner facts of a worker plan or a set manifest.
@@ -973,9 +1271,6 @@ pub enum Preset {
     /// The normalization level of the streaming services and the true-peak
     /// ceiling of a lossy codec (`adjust.streaming.v1`).
     Streaming,
-    /// The audibility point of peak control, less `CLUB_MARGIN_LU` (D131), at the
-    /// true-peak ceiling of a lossy codec (`adjust.club.v1`).
-    Club,
     /// The programme loudness and the true-peak ceiling of radio (EBU R 128
     /// s3), with the fold of the Mono preset (`adjust.radio.v1`).
     Radio,
@@ -986,10 +1281,9 @@ pub enum Preset {
 }
 
 impl Preset {
-    pub const ALL: [Preset; 5] = [
+    pub const ALL: [Preset; 4] = [
         Preset::MonoSafe,
         Preset::Streaming,
-        Preset::Club,
         Preset::Radio,
         Preset::Mono,
     ];
@@ -998,7 +1292,6 @@ impl Preset {
         match self {
             Preset::MonoSafe => "Mono-safe",
             Preset::Streaming => "Streaming",
-            Preset::Club => "Club",
             Preset::Radio => "Radio",
             Preset::Mono => "Mono",
         }
@@ -1010,7 +1303,6 @@ impl Preset {
         match self {
             Preset::MonoSafe => "mono-safe",
             Preset::Streaming => "streaming",
-            Preset::Club => "club",
             Preset::Radio => "radio",
             Preset::Mono => "mono",
         }
@@ -1021,7 +1313,6 @@ impl Preset {
         match self {
             Preset::MonoSafe => crate::width::MONO_SAFE_RULE,
             Preset::Streaming => "adjust.streaming.v1",
-            Preset::Club => "adjust.club.v1",
             Preset::Radio => "adjust.radio.v1",
             Preset::Mono => "adjust.mono.v1",
         }
@@ -1047,9 +1338,6 @@ pub const RADIO_LUFS: f64 = -23.0;
 /// Largest true peak of a radio programme, in dBTP (EBU R 128, EBU R 128
 /// s3).
 pub const RADIO_CEILING_DBTP: f64 = -1.0;
-/// Margin of the Club level under the audibility point of peak control at
-/// the ceiling of the preset, in LU: the step of D131.
-pub const CLUB_MARGIN_LU: f64 = 0.5;
 
 /// What a medium preset sets on a version.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1059,53 +1347,27 @@ pub struct Medium {
     /// The side that the widening of the version adds goes to the mid
     /// (`folded`).
     pub fold: bool,
-    /// The candidates take shares of the level change. The level of Club is
-    /// an amount of the engine; a published level is a delivery condition.
-    pub level_shares: bool,
-}
-
-/// The Club level on `parent`: the audibility point of the set (D131) at
-/// the ceiling of the preset, less `CLUB_MARGIN_LU`, within the range of a
-/// request and never under the level of the parent. Peak control works
-/// against the ceiling, so a lower ceiling lowers the point by the same
-/// amount. Without a point, the level of the parent.
-pub fn club_lufs(parent: &Spec, facts: &Facts) -> f64 {
-    let ceiling = parent.ceiling_dbtp.min(CODEC_CEILING_DBTP);
-    facts.audibility_lufs.map_or(parent.target_lufs, |point| {
-        (point + ceiling - parent.ceiling_dbtp - CLUB_MARGIN_LU)
-            .min(LOUDNESS_RANGE_LUFS.1)
-            .max(parent.target_lufs)
-    })
 }
 
 /// The settings of a medium preset on `parent`, or None for a preset that
 /// answers a condition of the mix.
-pub fn medium(parent: &Spec, preset: Preset, facts: &Facts) -> Option<Medium> {
+pub fn medium(parent: &Spec, preset: Preset) -> Option<Medium> {
     match preset {
         Preset::MonoSafe => None,
         Preset::Streaming => Some(Medium {
             target_lufs: parent.target_lufs.min(STREAMING_LUFS),
             ceiling_dbtp: parent.ceiling_dbtp.min(CODEC_CEILING_DBTP),
             fold: false,
-            level_shares: false,
-        }),
-        Preset::Club => Some(Medium {
-            target_lufs: club_lufs(parent, facts),
-            ceiling_dbtp: parent.ceiling_dbtp.min(CODEC_CEILING_DBTP),
-            fold: false,
-            level_shares: true,
         }),
         Preset::Radio => Some(Medium {
             target_lufs: RADIO_LUFS,
             ceiling_dbtp: parent.ceiling_dbtp.min(RADIO_CEILING_DBTP),
             fold: true,
-            level_shares: false,
         }),
         Preset::Mono => Some(Medium {
             target_lufs: parent.target_lufs,
             ceiling_dbtp: parent.ceiling_dbtp,
             fold: true,
-            level_shares: false,
         }),
     }
 }
@@ -1203,17 +1465,13 @@ fn preset_share_reason(share: f64) -> String {
     format!("{}% of the preset", (share * 100.0).round())
 }
 
-/// The spec of `medium` on `parent` at `share` of its fold, or of its level
-/// change with `Medium::level_shares`. The ceiling, and a published level,
-/// stay in full: they are delivery conditions of the medium. The low-end
-/// hold of the parent is removed: the render solves it again.
+/// The spec of `medium` on `parent` at `share` of its fold. The ceiling and
+/// a published level stay in full: they are delivery conditions of the
+/// medium. The low-end hold of the parent is removed: the render solves it
+/// again.
 fn medium_spec(parent: &Spec, medium: Medium, spectrum: &BandSpectrum, share: f64) -> Result<Spec> {
     let mut spec = parent.clone();
-    spec.target_lufs = if medium.level_shares {
-        parent.target_lufs + share * (medium.target_lufs - parent.target_lufs)
-    } else {
-        medium.target_lufs
-    };
+    spec.target_lufs = medium.target_lufs;
     spec.ceiling_dbtp = medium.ceiling_dbtp;
     if medium.fold {
         if let Some(fold) = folded(parent, spectrum, share) {
@@ -1245,13 +1503,11 @@ fn distinct(change: f64) -> bool {
 impl MediumChange {
     /// True when the change of the preset reaches `DISTINCT_DB` in a measure
     /// that serves its medium: the level or the ceiling for Streaming, the
-    /// level for Club, the mono sum of a band for Mono, and any of them for
-    /// Radio.
+    /// mono sum of a band for Mono, and any of them for Radio.
     pub fn serves(&self, preset: Preset) -> bool {
         let mono = self.mono_db.iter().any(|m| distinct(*m));
         match preset {
             Preset::Streaming => distinct(self.loudness_lu) || distinct(self.ceiling_db),
-            Preset::Club => distinct(self.loudness_lu),
             Preset::Radio => distinct(self.loudness_lu) || distinct(self.ceiling_db) || mono,
             Preset::Mono => mono,
             Preset::MonoSafe => false,
@@ -1260,7 +1516,7 @@ impl MediumChange {
 }
 
 pub fn medium_change(parent: &Spec, preset: Preset, facts: &Facts) -> Option<MediumChange> {
-    let medium = medium(parent, preset, facts)?;
+    let medium = medium(parent, preset)?;
     let spectrum = &facts.spectrum;
     let mono_db = match medium.fold.then(|| folded(parent, spectrum, 1.0)).flatten() {
         Some(fold) => mono_change_db(
@@ -1345,14 +1601,7 @@ pub fn preset_candidates(parent: &Spec, preset: Preset, facts: &Facts) -> Result
         workload_as_warning: true,
         ..Gates::default()
     };
-    if let Some(medium) = medium(parent, preset, facts) {
-        // The Club level comes from the point of `essential`. A version
-        // with more low end reaches its own point sooner, so each Club
-        // candidate stays under the point of its own prefix.
-        let gates = Gates {
-            under_own_point: preset == Preset::Club,
-            ..gates
-        };
+    if let Some(medium) = medium(parent, preset) {
         if !offers(parent, preset, facts) {
             return Err(format!(
                 "The {} preset changes this version by less than {} dB",
@@ -1361,9 +1610,7 @@ pub fn preset_candidates(parent: &Spec, preset: Preset, facts: &Facts) -> Result
             )
             .into());
         }
-        let shares: &[f64] = if medium.level_shares
-            || (medium.fold && folded(parent, &facts.spectrum, 1.0).is_some())
-        {
+        let shares: &[f64] = if medium.fold && folded(parent, &facts.spectrum, 1.0).is_some() {
             &SHARES
         } else {
             &SHARES[..1]
@@ -1455,7 +1702,9 @@ pub fn plan(base: &Base, parent: &Value, request: &Request) -> Result<Value> {
 
 /// For each control and step of `parent`, a version record, the first share
 /// of the step that the builder offers (`SHARES`), or null when it offers
-/// none: the range that the panel shows before a request. A gate of the
+/// none: the range that the panel shows before a request. A step whose first
+/// share moves its control no further than a smaller step in the same
+/// direction is null too: it gives the same change (D279). A gate of the
 /// render can still reduce a share. `presets` gives, for each preset, whether
 /// the version offers it (`offers`).
 pub fn range(parent: &Value, facts: &Facts) -> Result<Value> {
@@ -1480,6 +1729,7 @@ pub fn range(parent: &Value, facts: &Facts) -> Result<Value> {
                 .filter(|s| *s != 0)
                 .collect()
         };
+        let mut shares = Vec::new();
         for step in span {
             let mut request = serde_json::to_value(Steps::default())?;
             request[control] = step.into();
@@ -1487,6 +1737,23 @@ pub fn range(parent: &Value, facts: &Facts) -> Result<Value> {
             let share = SHARES
                 .into_iter()
                 .find(|share| spec_at(&spec, &request, *share, &facts.spectrum, available).is_ok());
+            shares.push((step, share));
+        }
+        // Each share keeps the ceiling, so each Ceiling step moves further.
+        if control != "ceiling" {
+            shares.sort_by_key(|(step, _)| step.abs());
+            let mut furthest = [0.0f64; 2];
+            for (step, share) in &mut shares {
+                let reach = &mut furthest[usize::from(*step > 0)];
+                match *share {
+                    Some(s) if step.abs() as f64 * s > *reach + 1e-9 => {
+                        *reach = step.abs() as f64 * s;
+                    }
+                    _ => *share = None,
+                }
+            }
+        }
+        for (step, share) in shares {
             steps.insert(step.to_string(), share.map_or(Value::Null, Value::from));
         }
         out.insert(control.into(), Value::Object(steps));
@@ -1539,28 +1806,36 @@ impl Sound {
         })
     }
 
-    /// True when this sound is the same as `other`: the signatures are
-    /// duplicates (`Signature::is_duplicate_of`) at a loudness within
-    /// `DISTINCT_DB`, and no control measure, the compressor reduction, the
-    /// de-esser cut or the ceiling differs by `DISTINCT_DB` or more. A
-    /// request asks for one of these, so each one makes a version distinct,
-    /// unlike in the versions of a set (D135).
-    pub fn is_duplicate_of(&self, other: &Sound) -> bool {
-        let distinct = crate::selection::DISTINCT_DB;
+    /// True when this sound, the result of `steps`, is the same as
+    /// `other`: the signatures are duplicates (`Signature::is_duplicate_of`)
+    /// at a loudness within `DISTINCT_DB`, and no control measure, the
+    /// compressor reduction, the de-esser cut or the ceiling differs by
+    /// `DISTINCT_DB` or more. A request asks for one of these, so each one
+    /// makes a version distinct, unlike in the versions of a set (D135). The
+    /// loudness or the measure of a control that `steps` moves counts from
+    /// `DETECTABLE_DB` (D279).
+    pub fn is_duplicate_of(&self, other: &Sound, steps: &Steps) -> bool {
+        let limit = |step: i32| {
+            if step == 0 {
+                crate::selection::DISTINCT_DB
+            } else {
+                DETECTABLE_DB
+            }
+        };
         let (a, b) = (&self.measures, &other.measures);
-        (self.signature.lufs - other.signature.lufs).abs() < distinct
-            && self.signature.is_duplicate_of(&other.signature)
+        self.signature.is_duplicate_of(&other.signature)
             && [
-                a.bass_db - b.bass_db,
-                a.presence_db - b.presence_db,
-                a.air_db - b.air_db,
-                a.width_db - b.width_db,
-                self.compressor_db - other.compressor_db,
-                self.deesser_cut_db - other.deesser_cut_db,
-                self.ceiling_dbtp - other.ceiling_dbtp,
+                (self.signature.lufs - other.signature.lufs, steps.loudness),
+                (a.bass_db - b.bass_db, steps.bass),
+                (a.presence_db - b.presence_db, steps.presence),
+                (a.air_db - b.air_db, steps.air),
+                (a.width_db - b.width_db, steps.width),
+                (self.compressor_db - other.compressor_db, steps.compression),
+                (self.deesser_cut_db - other.deesser_cut_db, steps.sibilance),
+                (self.ceiling_dbtp - other.ceiling_dbtp, steps.ceiling),
             ]
             .iter()
-            .all(|d| d.abs() < distinct)
+            .all(|(d, step)| d.abs() < limit(*step))
     }
 }
 
@@ -1736,8 +2011,11 @@ fn mono_change_db(
 }
 
 /// The mono fold-down loss of each stereo analysis band of `audio`, in dB.
-fn mono_fold_down_db(audio: &[Stereo], rate: u32) -> Result<[Option<f64>; 6]> {
-    let image = crate::stereo::analyze(audio, rate)?;
+fn mono_fold_down_db(
+    audio: &mut impl crate::scratch::Frames,
+    rate: u32,
+) -> Result<[Option<f64>; 6]> {
+    let image = crate::stereo::analyze_read(audio, rate)?;
     Ok(std::array::from_fn(|b| {
         image.whole.bands[b].mono_fold_down_db
     }))
@@ -1751,8 +2029,8 @@ fn mono_fold_down_db(audio: &[Stereo], rate: u32) -> Result<[Option<f64>; 6]> {
 #[allow(clippy::too_many_arguments)]
 fn medium_report(
     preset: Preset,
-    input: &[Stereo],
-    rendered: &[Stereo],
+    input: &mut impl crate::scratch::Frames,
+    rendered: &mut impl crate::scratch::Frames,
     facts: &Facts,
     parent: &Value,
     parent_facts: &VersionFacts,
@@ -1882,10 +2160,12 @@ fn medium_description(preset: Preset, parent_label: &str, report: &Value) -> Str
 /// mix and the other versions, the name and the description. `store` holds
 /// the files of `family`. `parent` is the record of the parent version and
 /// `parent_facts` its stored or measured facts. `input` is the source at its
-/// render rate, the rate of `facts`.
+/// render rate, the rate of `facts`. The measures read the source and the
+/// render in blocks and batches, and the render waits in scratch storage
+/// while they read it (D257).
 #[allow(clippy::too_many_arguments)]
 pub fn finalize(
-    input: &[Stereo],
+    input: &mut crate::treatment_render::RenderSource<'_>,
     facts: &Facts,
     parent: &Value,
     parent_facts: &VersionFacts,
@@ -1941,15 +2221,28 @@ pub fn finalize(
                 *g = value.as_f64().ok_or("Invalid restoring gain")?;
             }
         }
-        let prefix = crate::treatment_render::Renderer::new(input, rate).prefix(&spec)?;
-        crate::audibility::point(
-            &prefix,
+        let temporal = {
+            let mut scan = crate::analysis::Scan::new(input.len(), rate);
+            crate::scratch::for_each_block(&mut input.frames(), |block| {
+                scan.push(block);
+                Ok(())
+            })?;
+            scan.finish()
+        };
+        // The prefix and its 4x frames wait in scratch storage, and the
+        // probes read them in spans (D257).
+        let mut renderer =
+            crate::treatment_render::Renderer::of_source(input.lend(), rate, store.scratch())?;
+        let (prefix, mut up) = renderer.prepared_frames(&spec)?;
+        crate::audibility::point_on(
+            &mut crate::audibility::Prefix::Shared(crate::scratch::Shared(prefix)),
+            &mut up,
             version.drive_db,
             spec.clipper_db,
             spec.ceiling_dbtp,
             spec.limiter,
             spec.true_peak,
-            Some(&crate::analysis::analyze(input, rate)),
+            Some(&temporal),
             rate,
         )?
         .map(|p| p.lufs)
@@ -1967,8 +2260,8 @@ pub fn finalize(
             .as_f64()
             .unwrap_or(mean),
     );
-    let rendered = store.read(&version.raw_wav_file, rate)?;
-    let adjusted = VersionFacts::of(&rendered, version.lufs, mean, rate)?;
+    let mut rendered = store.read_stored(&version.raw_wav_file, rate)?;
+    let adjusted = VersionFacts::of_read(&mut rendered.audio, version.lufs, mean, rate)?;
     // The Mono-safe preset states the mono fold-down loss of its bands, in
     // the mix and in the result.
     let mono_safe = match (request.preset, facts.mono_safe.as_ref()) {
@@ -1978,14 +2271,18 @@ pub fn finalize(
                 .iter()
                 .filter_map(|b| (0..6).find(|i| b.band.hz >= edges[*i] && b.band.hz < edges[i + 1]))
                 .collect();
-            let loss = |audio: &[Stereo]| -> Result<f64> {
-                let image = crate::stereo::analyze(audio, rate)?;
+            fn loss(
+                audio: &mut impl crate::scratch::Frames,
+                bands: &[usize],
+                rate: u32,
+            ) -> Result<f64> {
+                let image = crate::stereo::analyze_read(audio, rate)?;
                 let values: Vec<f64> = bands
                     .iter()
                     .filter_map(|&b| image.whole.bands[b].mono_fold_down_db)
                     .collect();
                 Ok(values.iter().sum::<f64>() / values.len().max(1) as f64)
-            };
+            }
             let first = &bells[0].points;
             let wet =
                 first.iter().filter(|p| p.wet > 0.5).count() as f64 / first.len().max(1) as f64;
@@ -1994,8 +2291,8 @@ pub fn finalize(
                 "low_hz": bands.iter().map(|&b| edges[b]).fold(f64::INFINITY, f64::min),
                 "high_hz": bands.iter().map(|&b| edges[b + 1]).fold(0.0, f64::max),
                 "song_share": wet,
-                "mono_loss_mix_db": loss(input)?,
-                "mono_loss_db": loss(&rendered)?,
+                "mono_loss_mix_db": loss(&mut input.frames(), &bands, rate)?,
+                "mono_loss_db": loss(&mut rendered.audio, &bands, rate)?,
                 "cut_db": bells.iter().map(|b| b.band.gain_db * share).fold(0.0, f64::min),
             }))
         }
@@ -2006,8 +2303,8 @@ pub fn finalize(
     let medium = match request.preset {
         Some(preset) if preset != Preset::MonoSafe => Some(medium_report(
             preset,
-            input,
-            &rendered,
+            &mut input.frames(),
+            &mut rendered.audio,
             facts,
             parent,
             parent_facts,
@@ -2065,7 +2362,7 @@ pub fn finalize(
         others
             .iter()
             .filter(|o| !(folds_mono && o.id == parent_id))
-            .find(|o| sound.is_duplicate_of(&o.sound))
+            .find(|o| sound.is_duplicate_of(&o.sound, steps))
             .map(|o| (o.id.clone(), o.label.clone()))
     };
     let (label, text) = match (request.preset, &mono_safe, &medium) {
@@ -2131,25 +2428,474 @@ pub fn finalize(
         "version": record,
         "candidates": version.candidates,
         "seconds": family.seconds,
+        "work": family.work,
     }))
 }
 
-/// Power of the held bands (`low_end::BANDS_HZ`) and K-weighted power of
-/// the stored spectrum after the tone of `spec` with its side gain.
-fn held_power(spectrum: &BandSpectrum, spec: &Spec) -> ([f64; 2], f64) {
+/// Mid and side power of the held bands (`low_end::BANDS_HZ`) and
+/// K-weighted power of the stored spectrum after the tone of `spec` with
+/// its side gain.
+fn held_power(spectrum: &BandSpectrum, spec: &Spec) -> ([[f64; 2]; 2], f64) {
     let tone = spec.mean_tone();
     let side = spec.side_gain.as_ref();
-    let (mut held, mut weighted) = ([0.0f64; 2], 0.0);
+    let (mut held, mut weighted) = ([[0.0f64; 2]; 2], 0.0);
     for (i, &hz) in spectrum.centers_hz.iter().enumerate() {
-        let power = shaped_power(spectrum, &tone, side, i);
-        weighted += dsp::k_weighting_power(hz, spectrum.sample_rate) * power;
+        let parts = shaped_parts(spectrum, &tone, side, i);
+        weighted += dsp::k_weighting_power(hz, spectrum.sample_rate) * (parts[0] + parts[1]);
         for (b, (low, high)) in crate::low_end::BANDS_HZ.iter().enumerate() {
             if (*low..*high).contains(&hz) {
-                held[b] += power;
+                held[b][0] += parts[0];
+                held[b][1] += parts[1];
             }
         }
     }
     (held, weighted)
+}
+
+/// The change of each held band in each section that peak control makes
+/// when the input of peak control of the parent `delivered` takes the drive
+/// change of `spec` against its ceiling (`DriveResponse`, D282). Peak
+/// control scales with its ceiling (D281). Empty without the sections of a
+/// drive response.
+fn peak_control_hold_db(delivered: &Spec, spec: &Spec, response: &Value) -> Vec<[f64; 2]> {
+    peak_control_sections_db(response, input_change_db(delivered, spec, response))
+}
+
+/// The change of each held band in each section that peak control makes
+/// when its input moves by `x` against its ceiling (D282). Empty without
+/// the sections of a drive response.
+fn peak_control_sections_db(response: &Value, x: f64) -> Vec<[f64; 2]> {
+    let Some(curve) = Response::of(response) else {
+        return Vec::new();
+    };
+    let sections = |key: &str| -> Vec<[f64; 2]> {
+        serde_json::from_value(response[key].clone()).unwrap_or_default()
+    };
+    let (down, up, free, far) = (
+        sections("sections_down_db"),
+        sections("sections_up_db"),
+        sections("sections_free_db"),
+        sections("sections_far_db"),
+    );
+    if down.len() != up.len() || down.len() != free.len() {
+        return Vec::new();
+    }
+    (0..down.len())
+        .map(|s| {
+            std::array::from_fn(|b| {
+                let far = (far.len() == down.len()).then(|| far[s][b]);
+                curve.section_change_db(down[s][b], up[s][b], free[s][b], far, x)
+            })
+        })
+        .collect()
+}
+
+/// The change of the input of peak control against its ceiling from the
+/// parent `delivered` to `spec`: the drive change that moves the output
+/// loudness by the target change less the ceiling change (D281).
+fn input_change_db(delivered: &Spec, spec: &Spec, response: &Value) -> f64 {
+    let lu =
+        spec.target_lufs - delivered.target_lufs - (spec.ceiling_dbtp - delivered.ceiling_dbtp);
+    drive_change_db(response, lu)
+}
+
+/// The restoring gains of the final render of a request on the parent
+/// record `parent`, whose delivered spec is `delivered`, when the request
+/// moves the input of peak control by `x` against its ceiling (D284). The
+/// final render starts from the restoring gains of the reference render,
+/// Essential (`selection::warm_start`). A version after Essential started
+/// from them too, so the first render of the request takes the gains of the
+/// first render of the parent and leaves the change that it measured, with
+/// the local band change of peak control at `x` (`local_change_db`, D285).
+/// A request on Essential starts from its delivered gains and the change
+/// that they leave. Each restoration pass takes the gains
+/// of `treatment_render::next_gains`, and the change that it leaves moves
+/// by the change of the shelf model for its gain step of 20–120 Hz and by
+/// the response of the restoring filter of each other band. Without the
+/// local band changes of a drive response, the gains of the parent.
+fn predicted_restoration(
+    parent: &Value,
+    delivered: &Spec,
+    x: f64,
+    shelves: f64,
+    rate: u32,
+) -> Restored {
+    let report = render_report(parent);
+    let (restoration, response) = (&report["restoration"], &report["drive_response"]);
+    let six =
+        |key: &str| -> Option<[f64; 6]> { serde_json::from_value(response[key].clone()).ok() };
+    let measured = || -> Option<_> {
+        Some((
+            serde_json::from_value::<[f64; 6]>(restoration["delivered_change_db"].clone()).ok()?,
+            serde_json::from_value::<[bool; 6]>(restoration["material"].clone()).ok()?,
+            [
+                six("local_down_db")?,
+                six("local_up_db")?,
+                six("local_far_db")?,
+                six("local_free_db")?,
+            ],
+            six("shelf_local_db")?,
+            response["shelf_db"].as_f64().filter(|g| *g > 0.0)?,
+            response["far_db"].as_f64()?,
+            Response::of(response)?,
+        ))
+    };
+    let Some((left, material, [down, up, far, free], shelf, shelf_db, far_db, curve)) = measured()
+    else {
+        return Restored {
+            start: delivered.restoration_db,
+            passes: Vec::new(),
+        };
+    };
+    let first = || -> Option<([f64; 6], [f64; 6])> {
+        Some((
+            serde_json::from_value(restoration["measured_gains_db"].clone()).ok()?,
+            serde_json::from_value(restoration["measured_change_db"].clone()).ok()?,
+        ))
+    };
+    let (start, left) = match first() {
+        Some(first) if parent["id"] != "essential" => first,
+        _ => (delivered.restoration_db, left),
+    };
+    // The change of 40–120 Hz from the tone of the request takes the change
+    // of peak control of the shelf model at the same loudness of its input
+    // (D287).
+    let taken = match (
+        six("shelf_free_local_db"),
+        response["shelf_free_lu"].as_f64(),
+    ) {
+        (Some(shelf_free), Some(louder)) => std::array::from_fn(|b| {
+            shelves
+                * (shelf[b] - shelf_free[b] + free[b]
+                    - local_change_db(&curve, down[b], up[b], free[b], far[b], far_db, louder))
+        }),
+        _ => [0.0; 6],
+    };
+    let change: [f64; 6] = std::array::from_fn(|b| {
+        left[b] + local_change_db(&curve, down[b], up[b], free[b], far[b], far_db, x) + taken[b]
+    });
+    let mut r = crate::treatment_render::Restoration {
+        rule: "preview",
+        window_samples: crate::treatment_render::RESTORATION_WINDOW,
+        material,
+        measured_change_db: change,
+        measured_gains_db: start,
+        filters: Vec::new(),
+        delivered_change_db: change,
+        renders: 1,
+        gains_db: start,
+    };
+    let mut passes = Vec::new();
+    for _ in 0..crate::treatment_render::RESTORATION_PASSES {
+        let Some(total) = crate::treatment_render::next_gains(&r, rate) else {
+            break;
+        };
+        let step: [f64; 6] = std::array::from_fn(|f| total[f] - r.gains_db[f]);
+        for (b, change) in r.delivered_change_db.iter_mut().enumerate() {
+            *change += step[0] * shelf[b] / shelf_db
+                + (1..6)
+                    .map(|f| step[f] * crate::treatment_render::restoring_response_db(f, b, rate))
+                    .sum::<f64>();
+        }
+        r.gains_db = total;
+        passes.push(total);
+    }
+    Restored { start, passes }
+}
+
+/// The restoring gains of the first render of a request and of each
+/// restoration pass of its final render (`predicted_restoration`).
+#[derive(Clone, Debug, PartialEq)]
+struct Restored {
+    start: [f64; 6],
+    passes: Vec<[f64; 6]>,
+}
+
+impl Restored {
+    /// The restoring gains of the delivered render.
+    fn gains(&self) -> [f64; 6] {
+        self.passes.last().copied().unwrap_or(self.start)
+    }
+}
+
+/// The restoration of a render with the hold, for its hold steps
+/// (`hold_steps`, D286): the change of each held band in each section from
+/// the delivered gains of the parent to the gains of the first render, and
+/// for each pass, the shift that the final render plans for it
+/// (`low_end::restoration_shift_db`) and the change of each section that it
+/// gives (`restoration_hold_db`).
+#[derive(Default)]
+struct HoldPasses {
+    first: Vec<[f64; 2]>,
+    passes: Vec<([f64; 2], Vec<[f64; 2]>)>,
+}
+
+impl HoldPasses {
+    /// From the delivered gains `delivered`, the gains `start` of the first
+    /// render and the gains of each pass.
+    fn of(
+        delivered: &[f64; 6],
+        start: &[f64; 6],
+        passes: &[[f64; 6]],
+        response: &Value,
+        spectrum: &crate::Spectrum,
+        count: usize,
+    ) -> Self {
+        let mut from = *start;
+        let passes = passes
+            .iter()
+            .map(|to| {
+                let pass = (
+                    crate::low_end::restoration_shift_db(spectrum, &from, to),
+                    restoration_hold_db(&from, to, response, spectrum, count),
+                );
+                from = *to;
+                pass
+            })
+            .collect();
+        Self {
+            first: restoration_hold_db(delivered, start, response, spectrum, count),
+            passes,
+        }
+    }
+}
+
+/// The hold of the final render (`selection::hold_low_end`) of `spec` from
+/// the changes of the held bands of its first render, `changes`, and its
+/// restoration passes (D286). Each step plans against the changes of the
+/// render before it plus the shift that the final render plans for the
+/// pass that the step takes. The render of a step adds the predicted change
+/// of the step and the change of its pass. A step whose bells take the tone
+/// past the response bound of `Tone::validate` is not taken. With `renders`,
+/// the steps stop after that many renders after the first. The rise of
+/// 40–120 Hz of each step takes `take`, the change of peak control per dB of
+/// 40–120 Hz in each section (`shelf_take_db`, D290).
+#[allow(clippy::too_many_arguments)]
+fn hold_steps(
+    spec: &Spec,
+    facts: &Facts,
+    low: &crate::low_end::Sections,
+    changes: &[[Option<f64>; 2]],
+    restoration: &HoldPasses,
+    renders: Option<usize>,
+    take: &[[f64; 2]],
+    frames: usize,
+) -> Option<crate::low_end::Step> {
+    let mut spec = spec.clone();
+    let mut measured = changes.to_vec();
+    let mut previous: Option<(crate::low_end::Step, Vec<[Option<f64>; 2]>)> = None;
+    let mut steps = 0;
+    for k in 0..renders.unwrap_or(usize::MAX) {
+        let pass = restoration.passes.get(k);
+        let shift = pass.map_or([0.0; 2], |p| p.0);
+        let planned: Vec<[Option<f64>; 2]> = measured
+            .iter()
+            .map(|c| std::array::from_fn(|b| c[b].map(|x| x + shift[b])))
+            .collect();
+        // The final render plans each step on the spectrum after the tone of
+        // the version (`low_end::shaped_spectrum`).
+        let hold = if !crate::low_end::passes(&planned) && steps < crate::low_end::ITERATIONS {
+            crate::low_end::next(
+                &spec,
+                &shaped_spectrum(&facts.spectrum, &spec),
+                low,
+                &planned,
+                previous.as_ref().map(|(p, c)| (p, c.as_slice())),
+                frames,
+            )
+            .filter(|(next, _)| {
+                next.effective_tone()
+                    .0
+                    .validate(facts.spectrum.sample_rate)
+                    .is_ok()
+            })
+        } else {
+            None
+        };
+        if hold.is_none() && pass.is_none() {
+            break;
+        }
+        for (s, c) in measured.iter_mut().enumerate() {
+            for (b, x) in c.iter_mut().enumerate() {
+                if let Some(x) = x {
+                    *x += pass.and_then(|p| p.1.get(s)).map_or(0.0, |r| r[b]);
+                    if let Some((_, step)) = &hold {
+                        // The bells of 40–120 Hz take the change of peak
+                        // control of the shelf model (D290).
+                        let rise = step.expected_db[s][0] + step.offset_db;
+                        *x += step.expected_db[s][b] + take.get(s).map_or(0.0, |t| rise * t[b]);
+                    }
+                }
+            }
+        }
+        if let Some((next, step)) = hold {
+            spec = next;
+            previous = Some((step, planned));
+            steps += 1;
+        }
+    }
+    previous.map(|(step, _)| step)
+}
+
+/// The local band change of peak control of a band at the input change `x`
+/// against its ceiling, from its changes `down` and `up` at the drive
+/// `shift` down and up, `free`, its change without peak control, and `far`,
+/// its change at the drive `far_db` up, against the drive of the render
+/// (`treatment_render::DriveResponse`, D284): linear between the models,
+/// and over the drive `far_db` up, along the line from the drive `shift` up.
+/// Under the drive `shift` down, the change left to `free` falls with the
+/// loss of peak control, as `Response::section_change_db`.
+fn local_change_db(
+    curve: &Response,
+    down: f64,
+    up: f64,
+    free: f64,
+    far: f64,
+    far_db: f64,
+    x: f64,
+) -> f64 {
+    let shift = curve.shift;
+    if x > shift && far_db > shift {
+        return up + (far - up) * (x - shift) / (far_db - shift);
+    }
+    if x >= 0.0 {
+        return up * x / shift;
+    }
+    if x >= -shift {
+        return -down * x / shift;
+    }
+    match curve.tail {
+        Some((_, rate)) => free + (down - free) * (rate * (x + shift)).exp(),
+        None => down,
+    }
+}
+
+/// The change of each held band in each section against the loudness that
+/// the restoring gains `to` add against the gains `from` (D284):
+/// for the gain change of 20–120 Hz, the change of the section in the shelf
+/// model of the drive response, after peak control, and for the other
+/// bands, the change from the source spectrum, as the final render plans a
+/// restoration pass (`low_end::restoration_shift_db`). Without the sections
+/// of the shelf model, the change from the source spectrum in each of the
+/// `count` sections.
+fn restoration_hold_db(
+    from: &[f64; 6],
+    to: &[f64; 6],
+    response: &Value,
+    spectrum: &crate::Spectrum,
+    count: usize,
+) -> Vec<[f64; 2]> {
+    let (from, to) = (*from, *to);
+    if from == to {
+        return Vec::new();
+    }
+    let shelf: Vec<[f64; 2]> =
+        serde_json::from_value(response["sections_shelf_db"].clone()).unwrap_or_default();
+    let shelf_db = response["shelf_db"].as_f64().filter(|g| *g > 0.0);
+    match shelf_db.filter(|_| shelf.len() == count) {
+        Some(shelf_db) => {
+            // The other bands from the source spectrum, with the gain of
+            // 20–120 Hz of the parent.
+            let mut rest = to;
+            rest[0] = from[0];
+            let other = crate::low_end::restoration_shift_db(spectrum, &from, &rest);
+            shelf
+                .iter()
+                .map(|s| std::array::from_fn(|b| (to[0] - from[0]) * s[b] / shelf_db + other[b]))
+                .collect()
+        }
+        None => vec![crate::low_end::restoration_shift_db(spectrum, &from, &to); count],
+    }
+}
+
+/// The gains of the mid and of the side of each sub-band of the held bands
+/// (`low_end::low_band`) from the tone of `parent` to that of `candidate`,
+/// at `rate` (D288).
+fn low_gains(parent: &Spec, candidate: &Spec, rate: u32) -> Vec<[f64; 2]> {
+    let (tone_a, tone_b) = (parent.mean_tone(), candidate.mean_tone());
+    (0..crate::low_end::BANDS_HZ.len() * crate::low_end::LOW_SPLITS)
+        .map(|k| {
+            let hz = crate::low_end::low_band_hz(k);
+            let a = tone_gains(&tone_a, parent.side_gain.as_ref(), hz, rate);
+            let b = tone_gains(&tone_b, candidate.side_gain.as_ref(), hz, rate);
+            [b[0] / a[0].max(1e-30), b[1] / a[1].max(1e-30)]
+        })
+        .collect()
+}
+
+/// The change of each held band of a section whose sub-bands hold the
+/// power `low` of the mid and of the side, in dB, under the gains `gains`
+/// of each sub-band (`low_gains`, D288).
+fn section_tone_db(low: &[[f64; 2]], gains: &[[f64; 2]]) -> [f64; 2] {
+    let splits = crate::low_end::LOW_SPLITS;
+    std::array::from_fn(|b| {
+        let (mut before, mut after) = (0.0, 0.0);
+        for (power, gain) in low.iter().zip(gains).skip(b * splits).take(splits) {
+            let power = power.map(|p| 10f64.powf(p / 10.0));
+            before += power[0] + power[1];
+            after += power[0] * gain[0] + power[1] * gain[1];
+        }
+        10.0 * (after.max(1e-30) / before.max(1e-30)).log10()
+    })
+}
+
+/// The change of 40–120 Hz of the restoring filter of 20–120 Hz of the
+/// shelf model of the drive response, from `spectrum`, in dB.
+fn shelf_raise_db(response: &Value, spectrum: &Spectrum) -> Option<f64> {
+    let shelf_db = response["shelf_db"].as_f64().filter(|g| *g > 0.0)?;
+    let filter = crate::treatment_render::restoring_filter(0, shelf_db);
+    let (held, _) = crate::low_end::effect(spectrum, &filter, crate::finishing::Domain::Stereo);
+    (held[0] > 0.0).then_some(held[0])
+}
+
+/// The change of each held band in each section that peak control makes
+/// per dB of 40–120 Hz at its input, at the same loudness of its input
+/// (D287): the change of the section in the shelf model, less its change in
+/// the shelf model without peak control and plus its change without peak
+/// control, less the change of peak control in the section when its input
+/// takes the loudness that the shelf adds to the prefix, over the change of
+/// 40–120 Hz of the shelf. Empty without these models.
+fn shelf_take_db(response: &Value, spectrum: &Spectrum, count: usize) -> Vec<[f64; 2]> {
+    let sections = |key: &str| -> Vec<[f64; 2]> {
+        serde_json::from_value(response[key].clone()).unwrap_or_default()
+    };
+    let (shelf, shelf_free, free) = (
+        sections("sections_shelf_db"),
+        sections("sections_shelf_free_db"),
+        sections("sections_free_db"),
+    );
+    let louder = response["shelf_free_lu"]
+        .as_f64()
+        .map(|x| peak_control_sections_db(response, x))
+        .unwrap_or_default();
+    match shelf_raise_db(response, spectrum) {
+        Some(raise) if [shelf.len(), shelf_free.len(), free.len(), louder.len()] == [count; 4] => {
+            (0..count)
+                .map(|s| {
+                    std::array::from_fn(|b| {
+                        (shelf[s][b] - shelf_free[s][b] + free[s][b] - louder[s][b]) / raise
+                    })
+                })
+                .collect()
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// The change of 40–120 Hz from the tone of `spec` against that of the
+/// parent `delivered`, without their holds, over the change of 40–120 Hz of
+/// the shelf model (D287); 0 without the shelf model.
+fn tone_shelves(delivered: &Spec, spec: &Spec, response: &Value, facts: &Facts) -> f64 {
+    let Some(raise) = shelf_raise_db(response, &shaped_spectrum(&facts.spectrum, delivered)) else {
+        return 0.0;
+    };
+    let power = |s: &Spec| {
+        let mut s = s.clone();
+        s.low_end_hold = None;
+        let held = held_power(&facts.spectrum, &s).0[0];
+        held[0] + held[1]
+    };
+    10.0 * (power(spec).max(1e-30) / power(delivered).max(1e-30)).log10() / raise
 }
 
 /// The stored spectrum after the tone of `spec` with its side gain, at the
@@ -2164,11 +2910,35 @@ fn shaped_spectrum(spectrum: &BandSpectrum, spec: &Spec) -> Spectrum {
 /// final render (`low_end::next`) from the parent's changes without a hold
 /// (`HoldSections::free_change_db`), and from them plus the predicted change
 /// of the held bands from the request, less its intended move, and adds the
-/// difference of the two holds to the parent's hold.
+/// difference of the two holds to the parent's hold. The predicted change
+/// of a section is:
+///
+/// - the change of the tone and the width of its mid and its side, by the
+///   side share of the section (D282);
+/// - `compression`, the change of the compressor in each section
+///   (`compression_hold_db`);
+/// - `peak_control`, the change of peak control in each section
+///   (`peak_control_hold_db`, D282);
+/// - the change of the restoring gains of the first render in each section
+///   (`HoldPasses::first`, D284, D286).
+///
+/// The hold steps take the restoration passes of the final render of the
+/// request, `request`, and of the render of the parent, `restored`
+/// (`hold_steps`, D286). The steps of the parent stop after the renders of
+/// its hold (`Restoration::renders`): on track-d, the changes of its
+/// sections pass the hold by 0.003 dB, and a second step of the model of
+/// its hold would take back the wets of the request in four sections.
+#[allow(clippy::too_many_arguments)]
 fn predicted_hold(
     delivered: &Spec,
     spec: &Spec,
     sections: &HoldSections,
+    compression: &[[f64; 2]],
+    peak_control: &[[f64; 2]],
+    request: &HoldPasses,
+    restored: &HoldPasses,
+    renders: Option<usize>,
+    take: &[[f64; 2]],
     facts: &Facts,
     frames: usize,
 ) -> Option<crate::low_end::Hold> {
@@ -2185,57 +2955,73 @@ fn predicted_hold(
     );
     let intended = |s: &Spec| crate::low_end::intended_db(s, &full);
     let (intended_a, intended_b) = (intended(&parent), intended(&candidate));
-    let request: [f64; 2] = std::array::from_fn(|b| {
-        10.0 * (held_b[b].max(1e-30) / held_a[b].max(1e-30)).log10()
-            - 10.0 * (weighted_b.max(1e-30) / weighted_a.max(1e-30)).log10()
+    let shared: [f64; 2] = std::array::from_fn(|b| {
+        -10.0 * (weighted_b.max(1e-30) / weighted_a.max(1e-30)).log10()
             - (intended_b[b] - intended_a[b])
     });
+    // The gains of the mid and the side of each held band, and the side
+    // share of the stored spectrum for a record without the shares of its
+    // sections.
+    let gain = |b: usize, part: usize| held_b[b][part].max(1e-30) / held_a[b][part].max(1e-30);
+    let mix_share: [f64; 2] =
+        std::array::from_fn(|b| held_a[b][1] / (held_a[b][0] + held_a[b][1]).max(1e-30));
+    let low_gains = low_gains(&parent, &candidate, facts.spectrum.sample_rate);
     let changes: Vec<[Option<f64>; 2]> = sections
         .free_change_db
         .iter()
-        .map(|c| std::array::from_fn(|b| c[b].map(|c| c + request[b])))
+        .enumerate()
+        .map(|(s, c)| {
+            let compressor = compression.get(s).copied().unwrap_or([0.0; 2]);
+            let share = sections.side_share.get(s).copied().unwrap_or(mix_share);
+            let level = peak_control.get(s).copied().unwrap_or([0.0; 2]);
+            // The tone of each section from its own spectrum of the held
+            // bands (D288), or from the stored spectrum with the side share
+            // of the section.
+            let tone: [f64; 2] = match sections
+                .low_db
+                .get(s)
+                .filter(|l| l.len() == low_gains.len())
+            {
+                Some(low) => section_tone_db(low, &low_gains),
+                None => std::array::from_fn(|b| {
+                    10.0 * ((1.0 - share[b]) * gain(b, 0) + share[b] * gain(b, 1))
+                        .max(1e-30)
+                        .log10()
+                }),
+            };
+            // Peak control takes a share of the change of 40–120 Hz (D287).
+            let taken = take.get(s).copied().unwrap_or([0.0; 2]);
+            std::array::from_fn(|b| {
+                let first = request.first.get(s).map_or(0.0, |r| r[b]);
+                c[b].map(|c| {
+                    c + tone[b] + shared[b] + compressor[b] + level[b] + first + tone[0] * taken[b]
+                })
+            })
+        })
         .collect();
     let low = crate::low_end::Sections {
         starts: sections.starts.clone(),
         ends: sections.ends.clone(),
-        power_db: Vec::new(),
+        ..Default::default()
     };
     // The steps from the parent's changes give the parent's hold, as its
     // render did. The preview keeps the parent's wets and adds the
     // difference that the request makes to the steps.
-    let step = |spec: &Spec, changes: &[[Option<f64>; 2]]| {
-        // The final render plans each step on the spectrum after the tone of
-        // the version (`low_end::shaped_spectrum`).
-        let shaped = shaped_spectrum(&facts.spectrum, spec);
-        let (_, first) = crate::low_end::next(spec, &shaped, &low, changes, None, frames)?;
-        if crate::low_end::ITERATIONS < 2 {
-            return Some(first);
-        }
-        // The final render measures the change of the first step and takes a
-        // second step from it.
-        let measured: Vec<[Option<f64>; 2]> = changes
-            .iter()
-            .enumerate()
-            .map(|(s, c)| std::array::from_fn(|b| c[b].map(|x| x + first.expected_db[s][b])))
-            .collect();
-        if crate::low_end::passes(&measured) {
-            return Some(first);
-        }
-        match crate::low_end::next(
-            spec,
-            &shaped,
-            &low,
-            &measured,
-            Some((&first, changes)),
-            frames,
-        ) {
-            Some((_, second)) => Some(second),
-            None => Some(first),
-        }
-    };
+    let first: Vec<[Option<f64>; 2]> = sections
+        .free_change_db
+        .iter()
+        .enumerate()
+        .map(|(s, c)| {
+            std::array::from_fn(|b| c[b].map(|x| x + restored.first.get(s).map_or(0.0, |r| r[b])))
+        })
+        .collect();
     let (before, after) = (
-        step(&parent, &sections.free_change_db),
-        step(&candidate, &changes),
+        hold_steps(
+            &parent, facts, &low, &first, restored, renders, take, frames,
+        ),
+        hold_steps(
+            &candidate, facts, &low, &changes, request, None, take, frames,
+        ),
     );
     let wet_of = |step: &Option<crate::low_end::Step>, s: usize| {
         step.as_ref().map_or([0.0; 2], |step| step.hold_wet[s])
@@ -2264,8 +3050,313 @@ fn predicted_hold(
     ))
 }
 
+/// The drive response of a render (D281): the quadratic through the
+/// loudness changes at the drive `shift` up and down, and its tail under
+/// the drive `shift` down. Under that drive, the loss of peak control left
+/// at it, `left`, falls away exponentially at `rate`, from the slope of the
+/// quadratic there, and the output approaches the drive change plus the
+/// loss at the drive of the render (`loss`). Over the drive `shift` up, the
+/// quadratic through the changes at the drive `shift` up and at the drive
+/// of the far model (D283).
+struct Response {
+    shift: f64,
+    up: f64,
+    down: f64,
+    loss: f64,
+    slope: f64,
+    curve: f64,
+    /// `left` and `rate`, when the loss left at the drive `shift` down
+    /// falls from a slope under 1.
+    tail: Option<(f64, f64)>,
+    /// The drive of the far model, and the slope and the curve of the
+    /// quadratic over the drive `shift` up, when the quadratic rises at the
+    /// drive `shift` up.
+    far: Option<(f64, f64, f64)>,
+}
+
+impl Response {
+    /// The response of a render report, or None without one.
+    fn of(response: &Value) -> Option<Self> {
+        let (Some(shift), Some(up), Some(down), Some(loss)) = (
+            response["shift_db"].as_f64(),
+            response["up_lu"].as_f64(),
+            response["down_lu"].as_f64(),
+            response["loss_lu"].as_f64(),
+        ) else {
+            return None;
+        };
+        let slope = (up - down) / (2.0 * shift);
+        let curve = (up + down) / (2.0 * shift * shift);
+        if !(slope > 0.1 && curve.is_finite() && loss.is_finite()) {
+            return None;
+        }
+        let left = loss - shift - down;
+        let start = slope - 2.0 * curve * shift;
+        let tail = (left > 0.0 && start < 1.0).then(|| (left, (1.0 - start) / left));
+        let far = match (response["far_db"].as_f64(), response["far_lu"].as_f64()) {
+            (Some(far), Some(lu)) if far > shift => {
+                let (slope, curve) = through(shift, up, far, lu);
+                (slope > 0.0 && slope + 2.0 * curve * shift > 0.0).then_some((far, slope, curve))
+            }
+            _ => None,
+        };
+        Some(Self {
+            shift,
+            up,
+            down,
+            loss,
+            slope,
+            curve,
+            tail,
+            far,
+        })
+    }
+
+    /// The change of a held band of a section against the output loudness
+    /// at the input change `x` of peak control against its ceiling, from
+    /// its changes `down` and `up` at the drive `shift` down and up, `free`,
+    /// its change without peak control (D282), and `far`, its change at the
+    /// drive of the far model (D283). From the drive `shift` down upward,
+    /// the quadratic through the two changes, and over the drive `shift` up,
+    /// the quadratic through the changes up and far. Under the drive
+    /// `shift` down, the change left to `free` falls with the loss of peak
+    /// control.
+    fn section_change_db(&self, down: f64, up: f64, free: f64, far: Option<f64>, x: f64) -> f64 {
+        if let (Some((at, _, _)), Some(far), true) = (self.far, far, x > self.shift) {
+            let (slope, curve) = through(self.shift, up, at, far);
+            return slope * x + curve * x * x;
+        }
+        if x >= -self.shift {
+            let slope = (up - down) / (2.0 * self.shift);
+            let curve = (up + down) / (2.0 * self.shift * self.shift);
+            return slope * x + curve * x * x;
+        }
+        match self.tail {
+            Some((_, rate)) => free + (down - free) * (rate * (x + self.shift)).exp(),
+            None => down,
+        }
+    }
+}
+
+/// The slope and the curve of the quadratic through 0 at 0, `a` at `x` and
+/// `b` at `y`.
+fn through(x: f64, a: f64, y: f64, b: f64) -> (f64, f64) {
+    let curve = (b / y - a / x) / (y - x);
+    (a / x - curve * x, curve)
+}
+
+/// The drive change of peak control that moves its output loudness by `lu`
+/// at a fixed ceiling, from `response`, the drive response of the render
+/// (D281, D283, `Response`). Without a response, the output follows the
+/// drive dB for dB.
+fn drive_change_db(response: &Value, lu: f64) -> f64 {
+    let Some(Response {
+        shift,
+        up,
+        down,
+        loss,
+        slope,
+        curve,
+        tail,
+        far,
+    }) = Response::of(response)
+    else {
+        return lu;
+    };
+    let (slope, curve) = match far {
+        Some((_, far_slope, far_curve)) if lu > up => (far_slope, far_curve),
+        _ => (slope, curve),
+    };
+    if lu < down {
+        let Some((left, rate)) = tail else {
+            return lu - down - shift;
+        };
+        let change = |x: f64| x + loss - left * (rate * (x + shift)).exp();
+        let (mut low, mut high) = (lu - loss - 1.0, -shift);
+        for _ in 0..100 {
+            let middle = 0.5 * (low + high);
+            if change(middle) < lu {
+                low = middle;
+            } else {
+                high = middle;
+            }
+        }
+        return 0.5 * (low + high);
+    }
+    // The root of curve x^2 + slope x = lu next to lu / slope. Past the top
+    // of the curve, the drive of the top.
+    let discriminant = slope * slope + 4.0 * curve * lu;
+    if discriminant < 0.0 {
+        return -slope / (2.0 * curve);
+    }
+    2.0 * lu / (slope + discriminant.sqrt())
+}
+
+/// The drive of the render of `spec` on the prefix of a parent render of
+/// `delivered` at `drive_db`, with `prefix_db`, the loudness change of the
+/// prefix, and `missed_lu`, the output loudness of the parent render less
+/// its target. Peak control scales with its ceiling: a ceiling change moves
+/// the output by the same change at the drive that moves by it, so the
+/// drive solves the target change less the ceiling change at the parent's
+/// ratio of drive to ceiling (D281). The drive response is the response at
+/// the output of the parent, so the target change starts from that output
+/// (D289).
+fn solved_drive_db(
+    delivered: &Spec,
+    spec: &Spec,
+    drive_db: f64,
+    prefix_db: f64,
+    missed_lu: f64,
+    response: &Value,
+) -> f64 {
+    let ceiling_db = spec.ceiling_dbtp - delivered.ceiling_dbtp;
+    let target_db = spec.target_lufs - delivered.target_lufs - missed_lu;
+    drive_db + ceiling_db - prefix_db + drive_change_db(response, target_db - ceiling_db)
+}
+
+/// The output loudness of the render of `parent` less the target of its
+/// drive search, or 0 without them (D289).
+fn missed_lu(parent: &Value) -> f64 {
+    let report = render_report(parent);
+    match (
+        report["lufs"].as_f64(),
+        report["search"]["target_lufs"].as_f64(),
+    ) {
+        (Some(lufs), Some(target)) => lufs - target,
+        _ => 0.0,
+    }
+}
+
+/// The hold of the preview of `spec` on `parent`, whose delivered spec is
+/// `delivered`: the hold steps of the final render (`predicted_hold`) from
+/// the sections that the parent stores, or the hold of the parent.
+fn request_hold(
+    parent: &Value,
+    delivered: &Spec,
+    spec: &Spec,
+    restored: &Restored,
+    facts: &Facts,
+) -> Result<Option<crate::low_end::Hold>> {
+    let Some(sections) = HoldSections::of_record(parent) else {
+        return Ok(delivered.low_end_hold.clone());
+    };
+    let frames = parent["delivery"]["frames"]
+        .as_u64()
+        .or_else(|| parent["verification"]["frames"].as_u64())
+        .ok_or("Missing frame count")? as usize;
+    let report = render_report(parent);
+    let compression =
+        compression_hold_db(delivered, spec, &report["compressor"]).unwrap_or_default();
+    let response = &report["drive_response"];
+    let peak_control = peak_control_hold_db(delivered, spec, response);
+    let (spectrum, count) = (facts.spectrum.spectrum(), sections.free_change_db.len());
+    let request = HoldPasses::of(
+        &delivered.restoration_db,
+        &restored.start,
+        &restored.passes,
+        response,
+        &spectrum,
+        count,
+    );
+    // The render of the parent: its first render, and one pass to its
+    // delivered gains.
+    let parent_first: Option<[f64; 6]> =
+        serde_json::from_value(report["restoration"]["measured_gains_db"].clone()).ok();
+    let parent_passes = match parent_first.filter(|g| *g != delivered.restoration_db) {
+        Some(first) => HoldPasses::of(
+            &delivered.restoration_db,
+            &first,
+            &[delivered.restoration_db],
+            response,
+            &spectrum,
+            count,
+        ),
+        None => HoldPasses::default(),
+    };
+    let take = shelf_take_db(
+        response,
+        &shaped_spectrum(&facts.spectrum, delivered),
+        count,
+    );
+    Ok(predicted_hold(
+        delivered,
+        spec,
+        &sections,
+        &compression,
+        &peak_control,
+        &request,
+        &parent_passes,
+        // The renders of the parent after its first render.
+        report["restoration"]["renders"]
+            .as_u64()
+            .map(|r| (r as usize).saturating_sub(1)),
+        &take,
+        facts,
+        frames,
+    ))
+}
+
+/// The tone of `spec` for the loudness of its prefix: the mean tone, with
+/// each hold bell at its mean wet in each section of `sections`, weighted by
+/// the power of its held band in the section. A bell in a quiet section
+/// adds less loudness than its share of the time: on track-g, Radio holds
+/// the outro, whose bass is 15 dB under that of the other sections (D282).
+/// Without the powers, the mean tone.
+fn loudness_tone(spec: &Spec, sections: Option<&HoldSections>) -> Tone {
+    let Some(sections) = sections.filter(|s| s.power_db.len() == s.starts.len()) else {
+        return spec.mean_tone();
+    };
+    let mut spec = spec.clone();
+    for band in spec.low_end_hold.iter_mut().flat_map(|h| &mut h.bands) {
+        let Some(f) = (0..crate::low_end::BANDS_HZ.len())
+            .find(|f| crate::low_end::hold_band(*f).hz == band.band.hz)
+        else {
+            continue;
+        };
+        let (mut wet, mut weight) = (0.0, 0.0);
+        for (s, power) in sections.power_db.iter().enumerate() {
+            let energy = 10f64.powf(power[f] / 10.0);
+            wet += energy * band.mean_wet(sections.starts[s], sections.ends[s]);
+            weight += energy;
+        }
+        if weight > 0.0 {
+            band.points = vec![crate::treatment::BlendPoint {
+                sample: 0,
+                wet: wet / weight,
+            }];
+        }
+    }
+    spec.mean_tone()
+}
+
+/// The loudness that the restoring gains of `spec` add to its prefix
+/// against the restoring gains of `delivered`, from the stored spectrum
+/// after the tone of `spec` for its loudness (`loudness_tone`, D284). The
+/// loudness of the tone takes the spectrum without the restoring filters:
+/// with the filters of the parent, the preview drive of Bass −2 rises by
+/// 0.019 to 0.022 dB against the final drive on track-c and track-g.
+fn restoration_loudness_db(
+    spectrum: &BandSpectrum,
+    spec: &Spec,
+    delivered: &Spec,
+    sections: Option<&HoldSections>,
+) -> f64 {
+    if spec.restoration_db == delivered.restoration_db {
+        return 0.0;
+    }
+    let tone = loudness_tone(spec, sections);
+    let loudness = |gains: &[f64; 6]| {
+        let mut tone = tone.clone();
+        tone.stereo
+            .extend(crate::treatment_render::filters_of(gains));
+        predicted_loudness_db(spectrum, &tone, spec.side_gain.as_ref())
+    };
+    loudness(&spec.restoration_db) - loudness(&delivered.restoration_db)
+}
+
 /// The preview of a preset on `parent`: the first candidate of the preset,
-/// with the hold and the restoring gains of the parent, as `preview`.
+/// with the restoring gains of `predicted_restoration` and the hold of
+/// `request_hold`, as `preview`.
 pub fn preview_preset(
     parent: &Value,
     preset: Preset,
@@ -2278,34 +3369,57 @@ pub fn preview_preset(
         .next()
         .ok_or("No share of the preset")?
         .spec;
-    spec.restoration_db = delivered.restoration_db;
-    spec.low_end_hold = delivered.low_end_hold.clone();
-    // The drive follows the level of the preset, less the predicted change
-    // of the loudness of the prefix, as in `preview`.
-    let loudness =
-        |s: &Spec| predicted_loudness_db(&facts.spectrum, &s.mean_tone(), s.side_gain.as_ref());
-    let drive_db = fixed.drive_db + (spec.target_lufs - delivered.target_lufs)
-        - (loudness(&spec) - loudness(&delivered));
-    Ok((
-        spec,
-        crate::excerpt::Fixed {
-            drive_db,
-            trim_db: fixed.trim_db,
-        },
-    ))
+    let response = &render_report(parent)["drive_response"];
+    let restored = predicted_restoration(
+        parent,
+        &delivered,
+        input_change_db(&delivered, &spec, response),
+        tone_shelves(&delivered, &spec, response, facts),
+        facts.spectrum.sample_rate,
+    );
+    spec.restoration_db = restored.gains();
+    spec.low_end_hold = request_hold(parent, &delivered, &spec, &restored, facts)?;
+    // The drive follows the level and the ceiling of the preset, less the
+    // predicted change of the loudness of the prefix, as in `preview`.
+    let sections = HoldSections::of_record(parent);
+    let loudness = |s: &Spec| {
+        predicted_loudness_db(
+            &facts.spectrum,
+            &loudness_tone(s, sections.as_ref()),
+            s.side_gain.as_ref(),
+        )
+    };
+    let drive_db = solved_drive_db(
+        &delivered,
+        &spec,
+        fixed.drive_db,
+        loudness(&spec) - loudness(&delivered)
+            + restoration_loudness_db(&facts.spectrum, &spec, &delivered, sections.as_ref()),
+        missed_lu(parent),
+        &render_report(parent)["drive_response"],
+    );
+    Ok((spec, crate::excerpt::Fixed { drive_db, ..fixed }))
 }
 
 /// The spec and the fixed state of the preview of `steps` on `parent`, a
 /// delivered version record.
-/// The preview keeps the restoring gains and the true-peak trim of the
-/// parent. It predicts the two things that the final render solves again
-/// from the stored spectrum:
+/// The preview keeps the true-peak trim of the parent. It predicts the
+/// three things that the final render solves again from the stored
+/// spectrum and the drive response of the parent:
 ///
+/// - The restoring gains: the restoration passes of the final render from
+///   the local band change of peak control at the drive change
+///   (`predicted_restoration`, D284).
 /// - The low-end hold: the hold steps of the final render (`predicted_hold`) from
-///   the sections that the parent stores, or the hold of the parent.
-/// - The drive: the drive of the parent with the change of the target, less
-///   the predicted change of the loudness of the prefix: the tone with the
-///   hold, the width, and the change of the compressor reduction.
+///   the sections that the parent stores, with the change of the compressor
+///   in each section (D280), the side share of each section and the change
+///   of peak control in each section (D282), and the change of the
+///   restoring gains (D284), or the hold of the parent.
+/// - The drive: the drive of the parent with the change of the target and of
+///   the ceiling, less the predicted change of the loudness of the prefix:
+///   the tone with the hold and the restoring filters, the width, and the
+///   change of the compressor reduction. The drive response of the parent gives the drive change of
+///   a loudness change (`solved_drive_db`, D281).
 pub fn preview(
     parent: &Value,
     steps: &Steps,
@@ -2338,18 +3452,24 @@ pub fn preview(
         (None, Some(e)) => return Err(e),
         (None, None) => return Err("No share of the request".into()),
     };
-    spec.restoration_db = delivered.restoration_db;
-    spec.low_end_hold = match HoldSections::of_record(parent) {
-        Some(sections) => {
-            let frames = parent["delivery"]["frames"]
-                .as_u64()
-                .or_else(|| parent["verification"]["frames"].as_u64())
-                .ok_or("Missing frame count")? as usize;
-            predicted_hold(&delivered, &spec, &sections, facts, frames)
-        }
-        None => delivered.low_end_hold.clone(),
+    let response = &render_report(parent)["drive_response"];
+    let restored = predicted_restoration(
+        parent,
+        &delivered,
+        input_change_db(&delivered, &spec, response),
+        tone_shelves(&delivered, &spec, response, facts),
+        spectrum.sample_rate,
+    );
+    spec.restoration_db = restored.gains();
+    spec.low_end_hold = request_hold(parent, &delivered, &spec, &restored, facts)?;
+    let sections = HoldSections::of_record(parent);
+    let loudness = |s: &Spec| {
+        predicted_loudness_db(
+            spectrum,
+            &loudness_tone(s, sections.as_ref()),
+            s.side_gain.as_ref(),
+        )
     };
-    let loudness = |s: &Spec| predicted_loudness_db(spectrum, &s.mean_tone(), s.side_gain.as_ref());
     // The compressor reduction: 1 - 1/ratio of each dB that the threshold
     // moves down, and a release that cannot remove more than the mean
     // reduction of the parent. The section make-up gives the reduction back
@@ -2370,17 +3490,19 @@ pub fn preview(
         }
         _ => 0.0,
     };
-    // Peak control takes the overs with the clipper, so the output loudness
-    // follows the prefix loudness and the drive dB for dB.
-    let prefix_db = loudness(&spec) - loudness(&delivered) - compression_db;
-    let drive_db = fixed.drive_db + (spec.target_lufs - delivered.target_lufs) - prefix_db;
-    Ok((
-        spec,
-        crate::excerpt::Fixed {
-            drive_db,
-            trim_db: fixed.trim_db,
-        },
-    ))
+    // A change of the prefix loudness acts as a change of the drive.
+    let prefix_db = loudness(&spec) - loudness(&delivered)
+        + restoration_loudness_db(spectrum, &spec, &delivered, sections.as_ref())
+        - compression_db;
+    let drive_db = solved_drive_db(
+        &delivered,
+        &spec,
+        fixed.drive_db,
+        prefix_db,
+        missed_lu(parent),
+        &render_report(parent)["drive_response"],
+    );
+    Ok((spec, crate::excerpt::Fixed { drive_db, ..fixed }))
 }
 
 pub const RESULT_SCHEMA: &str = "mastering.adjust-result.2";
@@ -2397,20 +3519,49 @@ pub fn others(versions: &Value, except: &str) -> Vec<Other> {
         .collect()
 }
 
+/// The reference record of an earlier manifest (`adjust.record`) or of the
+/// family result of `essential` (`reference_record`).
+fn earlier_record(versions: &Value) -> Option<&Value> {
+    [&versions["adjust"]["record"], &versions["reference_record"]]
+        .into_iter()
+        .find(|r| !r.is_null())
+}
+
+/// Whether `versions` holds a reference record for the requests on it: in
+/// its Essential version record (D270), in `adjust.record` or in
+/// `reference_record`. A request on a versions record without one renders
+/// the `essential` spec as its reference.
+pub fn holds_reference(versions: &Value) -> bool {
+    earlier_record(versions).is_some()
+        || versions["versions"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|v| v["id"] == "essential" && !v[VERSION_REFERENCE_FIELD].is_null())
+}
+
 /// Render a request as version `id` into `output_dir`, from the base of the
 /// set and the record of its delivered versions: a set manifest, or a
 /// family result whose versions carry no stored facts. The facts of a
-/// version without them come from its WAV beside the versions record.
-/// `input` is the source at the render rate of the set.
+/// version without them come from its WAV beside the versions record. A
+/// base without a reference record takes the record of the versions record:
+/// the Essential version record of a cloud manifest (D270), `adjust.record`
+/// of an earlier manifest, or `reference_record` of the family result of
+/// `essential`. `input` is the source at the render rate of the set.
 pub fn render(
-    input: &[Stereo],
+    input: crate::treatment_render::RenderSource<'_>,
     base: &Base,
     versions: &Value,
     versions_dir: &std::path::Path,
     request: &Request,
     output_dir: &std::path::Path,
 ) -> Result<Value> {
-    let parent = parent_record(versions, &request.parent)?;
+    // The specs of a cloud manifest share their keys (D276). The request
+    // puts the values back in the records that it reads: the parent, the
+    // Essential version and the reference record (D278).
+    let shared = crate::distributed::shared_values(versions);
+    let expand = |record: &Value| crate::distributed::expand_record(record, shared);
+    let parent = &expand(parent_record(versions, &request.parent)?)?;
     let stored = |record: &Value| -> Result<VersionFacts> {
         if let Some(f) = VersionFacts::from_record(record) {
             return Ok(f);
@@ -2450,15 +3601,26 @@ pub fn render(
         }
         others.extend(Other::of(&record));
     }
-    let mut store = crate::distributed::Directory(output_dir);
+    let essential = versions["versions"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|v| v["id"] == "essential")
+        .map(expand)
+        .collect::<Result<Vec<_>>>()?;
+    let mut base = base.clone().with_versions_record(&essential);
+    drop(essential);
+    if base.record.is_none() {
+        base.record = earlier_record(versions).map(expand).transpose()?;
+    }
     let (result, plan) = render_in(
         input,
-        base,
+        &base,
         parent,
         &parent_facts,
         &others,
         request,
-        &mut store,
+        &mut crate::distributed::Directory(output_dir),
     )?;
     std::fs::write(
         output_dir.join("adjust.plan.json"),
@@ -2469,8 +3631,10 @@ pub fn render(
 
 /// Render `request` on `parent` as one version into `store`, and finish it
 /// (`finalize`). Returns the result and the worker plan of the request.
+/// The family takes its reference from the reference record of the base
+/// when the record is of its source and its reference spec (D217).
 pub fn render_in(
-    input: &[Stereo],
+    input: crate::treatment_render::RenderSource<'_>,
     base: &Base,
     parent: &Value,
     parent_facts: &VersionFacts,
@@ -2478,6 +3642,36 @@ pub fn render_in(
     request: &Request,
     store: &mut impl crate::distributed::Store,
 ) -> Result<(Value, Value)> {
+    render_continued(
+        input,
+        base,
+        parent,
+        parent_facts,
+        others,
+        request,
+        store,
+        None,
+        None,
+    )
+    .map(|(result, plan, _)| (result, plan))
+}
+
+/// `render_in` whose candidate ladders keep to `deadline`, and that
+/// continues the request of `earlier` (D258). A version that stops at the
+/// deadline gives the result `time-limit` and the record of its
+/// continuation (`distributed::Resume`).
+#[allow(clippy::too_many_arguments)]
+pub fn render_continued(
+    mut input: crate::treatment_render::RenderSource<'_>,
+    base: &Base,
+    parent: &Value,
+    parent_facts: &VersionFacts,
+    others: &[Other],
+    request: &Request,
+    store: &mut impl crate::distributed::Store,
+    deadline: Option<std::time::Instant>,
+    earlier: Option<&crate::distributed::Resume>,
+) -> Result<(Value, Value, Option<crate::distributed::Resume>)> {
     request.validate()?;
     // A request outside the range of the builder is a result, so the app
     // can say so in its own words.
@@ -2497,20 +3691,47 @@ pub fn render_in(
                     "detail": error.to_string(),
                 }),
                 Value::Null,
+                None,
             ))
         }
     };
     let plan_json = serde_json::to_vec(&plan)?;
-    let family = crate::distributed::render_family_in(
-        input,
+    // The family and the measures of the result read the source in turn
+    // (D257).
+    let (family, resume) = crate::distributed::render_family_continued(
+        input.lend(),
         base.sample_rate(),
         &plan_json,
         &request.id,
-        store,
+        &mut WithReference {
+            store,
+            record: base.record.as_ref().map(serde_json::to_vec).transpose()?,
+        },
+        deadline,
+        earlier,
         |_, _| Ok(()),
     )?;
+    // A version that stopped at the deadline chose no candidate; another
+    // invocation continues it from the record.
+    if let (true, Some(resume)) = (family.versions.is_empty(), resume) {
+        return Ok((
+            json!({
+                "schema": RESULT_SCHEMA,
+                "rule": RULE,
+                "parent": request.parent,
+                "id": request.id,
+                "steps": request.steps,
+                "preset": request.preset,
+                "delivered": false,
+                "reason": "time-limit",
+                "family": family,
+            }),
+            plan,
+            Some(resume),
+        ));
+    }
     let result = finalize(
-        input,
+        &mut input,
         &base.facts,
         parent,
         parent_facts,
@@ -2519,7 +3740,55 @@ pub fn render_in(
         &family,
         store,
     )?;
-    Ok((result, plan))
+    Ok((result, plan, None))
+}
+
+/// The files of a request in `store`, with the reference record of its set.
+struct WithReference<'a, S> {
+    store: &'a mut S,
+    record: Option<Vec<u8>>,
+}
+
+impl<S: crate::distributed::Store> crate::distributed::Store for WithReference<'_, S> {
+    fn deliver(
+        &mut self,
+        name: &str,
+        audio: &crate::treatment_render::RenderAudio,
+        rate: u32,
+        seed: u64,
+        ceiling_dbtp: f64,
+    ) -> Result<(String, crate::delivery::Verification)> {
+        self.store.deliver(name, audio, rate, seed, ceiling_dbtp)
+    }
+
+    fn raw(
+        &mut self,
+        name: &str,
+        audio: &crate::treatment_render::RenderAudio,
+        rate: u32,
+    ) -> Result<String> {
+        self.store.raw(name, audio, rate)
+    }
+
+    fn read(&mut self, name: &str, rate: u32) -> Result<Vec<Stereo>> {
+        self.store.read(name, rate)
+    }
+
+    fn read_stored(&mut self, name: &str, rate: u32) -> Result<crate::audio_io::StoredSource> {
+        self.store.read_stored(name, rate)
+    }
+
+    fn scratch(&self) -> crate::scratch::Factory {
+        self.store.scratch()
+    }
+
+    fn directory(&self) -> Option<&std::path::Path> {
+        self.store.directory()
+    }
+
+    fn reference(&mut self) -> Result<Option<Vec<u8>>> {
+        Ok(self.record.clone())
+    }
 }
 
 #[cfg(test)]
@@ -2601,6 +3870,7 @@ mod tests {
         air: true,
         sibilance: Some(SIBILANCE),
         compression: true,
+        compressor: None,
     };
 
     #[test]
@@ -2890,15 +4160,10 @@ mod tests {
         let r = range(&parent, &facts(24_000.0)).unwrap();
         assert_eq!(r["presets"]["mono-safe"], false);
         // The parent plays at −10.9 LUFS with a ceiling of −0.5 dBTP:
-        // Streaming and Radio move its level and its ceiling. Without an
-        // audibility point, Club keeps the level. The widening of 1.5 dB on
-        // a side 10 dB under the mid moves the mono sum by less than 0.5 dB.
-        for (preset, offered) in [
-            ("streaming", true),
-            ("club", false),
-            ("radio", true),
-            ("mono", false),
-        ] {
+        // Streaming and Radio move its level and its ceiling. The widening
+        // of 1.5 dB on a side 10 dB under the mid moves the mono sum by less
+        // than 0.5 dB.
+        for (preset, offered) in [("streaming", true), ("radio", true), ("mono", false)] {
             assert_eq!(r["presets"][preset], offered, "{preset}");
         }
         for control in ["bass", "presence", "air", "sibilance", "loudness", "width"] {
@@ -2978,6 +4243,297 @@ mod tests {
     }
 
     #[test]
+    fn the_range_leaves_out_a_step_that_moves_no_further() {
+        let plan: Value = serde_json::from_str(include_str!("../tests/data/adjust-parent.json"))
+            .expect("parent spec");
+        let settings: crate::compressor::Settings =
+            serde_json::from_value(plan["compressor"].clone()).unwrap();
+        // A parent that reduces by 1.4 dB: three steps down are outside the
+        // range of the compressor at the full share, and four steps down at
+        // the full share and at three quarters.
+        let over_db: [f64; crate::compressor::OVER_QUANTILES] =
+            std::array::from_fn(|i| -8.0 + 0.6 * i as f64);
+        let stats = json!({"over_quantiles_db": over_db, "mean_reduction_db": 1.4});
+        let parent = json!({"spec": plan,
+            "render": {"compressor": stats, "deesser": deesser_stats()}});
+        let facts = Facts {
+            rule: FACTS_RULE.into(),
+            spectrum: spectrum(),
+            audibility_lufs: None,
+            bandwidth_hz: 24_000.0,
+            mix: signature(-14.0, 1.0),
+            mono_safe: None,
+        };
+        let compression = Compression::of(&parent["render"]["compressor"]).unwrap();
+        assert!(compression_shift(&compression, settings, -1.5).is_none());
+        assert!(compression_shift(&compression, settings, -1.5 * 0.75).is_some());
+        let r = range(&parent, &facts).unwrap();
+        assert_eq!(r["compression"]["-2"], 1.0);
+        assert_eq!(r["compression"]["-3"], 0.75);
+        // Half of four steps down is two steps, which the step of two
+        // steps down gives.
+        assert!(r["compression"]["-4"].is_null());
+        for step in 1..=MAXIMUM_STEPS {
+            assert_eq!(r["compression"][step.to_string()], 1.0, "{step}");
+        }
+        assert_eq!(r["ceiling"]["-3"], 1.0);
+    }
+
+    /// The stored sections count the low shelves of a version against those
+    /// of the reference, as the low-end hold does (D280).
+    #[test]
+    fn the_hold_sections_count_the_shelves_against_the_reference() {
+        let mut spec = parent();
+        spec.low_end_hold = None;
+        spec.tone.stereo.push(bass_shelf(3.0));
+        let full = spectrum().spectrum();
+        let sections = |power: f64| crate::low_end::Sections {
+            starts: vec![0],
+            ends: vec![720_000],
+            power_db: vec![[power, power]],
+            side_db: Vec::new(),
+            low_db: Vec::new(),
+        };
+        let of = |tone: Option<&crate::treatment::Tone>| {
+            HoldSections::of(
+                &spec,
+                &full,
+                &[],
+                &sections(1.0),
+                -10.0,
+                &sections(0.0),
+                -10.0,
+                tone,
+            )
+        };
+        // With the shelves of the reference, the rise of the bands is the
+        // change.
+        let held = of(Some(&spec.tone));
+        assert!((held.free_change_db[0][0].unwrap() - 1.0).abs() < 1e-9);
+        assert_eq!(held.change_db, held.free_change_db);
+        // Without them, the shelves of the version are intended.
+        let intended = crate::low_end::intended_db(&spec, &full);
+        assert!(intended[0] > 1.0, "{intended:?}");
+        let alone = of(None);
+        assert!((alone.free_change_db[0][0].unwrap() - (1.0 - intended[0])).abs() < 1e-9);
+    }
+
+    /// A Compression step down that lowers the held bands of a section past
+    /// the limit of the hold gives the preview a hold in that section, and
+    /// a step up gives none (D280).
+    #[test]
+    fn the_preview_of_a_compression_step_takes_the_hold_of_each_section() {
+        let mut plan: Value =
+            serde_json::from_str(include_str!("../tests/data/adjust-parent.json"))
+                .expect("parent spec");
+        plan["low_end_hold"] = Value::Null;
+        let over_db: [f64; crate::compressor::OVER_QUANTILES] =
+            std::array::from_fn(|i| -8.0 + 0.6 * i as f64);
+        let span = crate::low_end::section_frames(48_000);
+        let sections = HoldSections {
+            starts: (0..4).map(|s| s * span).collect(),
+            ends: (1..=4).map(|s| s * span).collect(),
+            change_db: vec![[Some(-0.3), Some(0.0)]; 4],
+            free_change_db: vec![[Some(-0.3), Some(0.0)]; 4],
+            side_share: Vec::new(),
+            power_db: Vec::new(),
+            low_db: Vec::new(),
+        };
+        // Less reduction lowers the first band of the first section, and
+        // more reduction raises it.
+        let mut change_db = vec![[[0.0; 2]; 2]; 4];
+        change_db[0] = [[-0.4, 0.0], [0.4, 0.0]];
+        let shift = crate::compressor::HoldShift {
+            shift_db: crate::compressor::HOLD_SHIFT_DB,
+            reduction_db: [-0.8, 0.8],
+            change_db,
+        };
+        let record = |shift: Option<&crate::compressor::HoldShift>| {
+            json!({"spec": plan, "hold_sections": sections, "delivery": {"frames": 4 * span},
+                "render": {"drive_db": 3.0, "true_peak": {"trim_db": -0.1},
+                    "deesser": deesser_stats(),
+                    "compressor": {"over_quantiles_db": over_db, "mean_reduction_db": 1.4,
+                        "hold_shift": shift}}})
+        };
+        let facts = preset_facts(None);
+        let steps = |compression| Steps {
+            compression,
+            ..Steps::default()
+        };
+        let delivered = crate::excerpt::delivered_spec(&record(Some(&shift))).unwrap();
+        let (down, _) = preview(&record(Some(&shift)), &steps(-2), &facts).unwrap();
+        let moved = compression_hold_db(
+            &delivered,
+            &down,
+            &record(Some(&shift))["render"]["compressor"],
+        )
+        .unwrap();
+        assert!(moved[0][0] < -0.2, "{moved:?}");
+        assert_eq!(moved[3], [0.0, 0.0]);
+        let hold = down.low_end_hold.expect("a hold");
+        let bell = &hold.bands[0];
+        assert!(bell.mean_wet(0, span) > 0.0);
+        assert_eq!(bell.mean_wet(3 * span, 4 * span), 0.0);
+        let (up, _) = preview(&record(Some(&shift)), &steps(2), &facts).unwrap();
+        assert!(up.low_end_hold.is_none());
+        // Without the hold shift, the preview keeps the hold of the parent.
+        let (down, _) = preview(&record(None), &steps(-2), &facts).unwrap();
+        assert!(down.low_end_hold.is_none());
+    }
+
+    /// The record of the parent fixture with four sections of free changes
+    /// of 0.2 dB, whose hold sections and drive response `with` sets.
+    fn sectioned_parent(plan: &Value, with: impl Fn(&mut HoldSections, &mut Value)) -> Value {
+        let span = crate::low_end::section_frames(48_000);
+        let mut sections = HoldSections {
+            starts: (0..4).map(|s| s * span).collect(),
+            ends: (1..=4).map(|s| s * span).collect(),
+            change_db: vec![[Some(0.2), Some(0.2)]; 4],
+            free_change_db: vec![[Some(0.2), Some(0.2)]; 4],
+            side_share: Vec::new(),
+            power_db: Vec::new(),
+            low_db: Vec::new(),
+        };
+        let mut response =
+            json!({"shift_db": 1.0, "up_lu": 0.86, "down_lu": -0.91, "loss_lu": 0.3});
+        with(&mut sections, &mut response);
+        json!({"spec": plan, "hold_sections": sections, "delivery": {"frames": 4 * span},
+            "render": {"drive_db": 3.0, "true_peak": {"trim_db": -0.1},
+                "deesser": deesser_stats(), "drive_response": response}})
+    }
+
+    #[test]
+    fn the_section_change_follows_the_drive_response() {
+        let response = Response::of(&json!({"shift_db": 1.0, "up_lu": 0.86,
+            "down_lu": -0.91, "loss_lu": 0.3}))
+        .unwrap();
+        let change = |x| response.section_change_db(0.2, -0.25, 0.5, None, x);
+        // The quadratic through the changes at the drive 1 dB down and up.
+        assert!((change(1.0) + 0.25).abs() < 1e-12);
+        assert!((change(-1.0) - 0.2).abs() < 1e-12);
+        assert_eq!(change(0.0), 0.0);
+        assert!((change(2.0) - (2.0 * -0.225 + 4.0 * -0.025)).abs() < 1e-12);
+        // Under 1 dB down, the change moves from the change at 1 dB down to
+        // the change without peak control, as the loss of peak control falls.
+        assert!((change(-1.0 - 1e-9) - 0.2).abs() < 1e-6);
+        let (a, b) = (change(-3.0), change(-6.0));
+        assert!(a > 0.2 && b > a && b < 0.5, "{a} {b}");
+        assert!((change(-200.0) - 0.5).abs() < 1e-6);
+        // With the far model, over 1 dB up, the quadratic through the changes
+        // at 1 dB and at 3 dB up. Under 1 dB up, the far change counts for
+        // nothing.
+        let far = Response::of(&json!({"shift_db": 1.0, "up_lu": 0.86,
+            "down_lu": -0.91, "loss_lu": 0.3, "far_db": 3.0, "far_lu": 2.3}))
+        .unwrap();
+        let change = |x| far.section_change_db(0.2, -0.25, 0.5, Some(-0.6), x);
+        assert!((change(3.0) + 0.6).abs() < 1e-12);
+        assert!((change(1.0) + 0.25).abs() < 1e-12);
+        let (slope, curve) = through(1.0, -0.25, 3.0, -0.6);
+        assert!((change(2.0) - (2.0 * slope + 4.0 * curve)).abs() < 1e-12);
+        assert!(
+            change(2.0) > -0.25 * 2.0 - 0.025 * 4.0 + 0.05,
+            "{}",
+            change(2.0)
+        );
+        assert_eq!(
+            change(0.5),
+            response.section_change_db(0.2, -0.25, 0.5, None, 0.5)
+        );
+        assert_eq!(
+            change(-3.0),
+            response.section_change_db(0.2, -0.25, 0.5, None, -3.0)
+        );
+    }
+
+    #[test]
+    fn the_preview_of_a_preset_takes_the_peak_control_of_each_section() {
+        let mut plan: Value =
+            serde_json::from_str(include_str!("../tests/data/adjust-parent.json"))
+                .expect("parent spec");
+        plan["low_end_hold"] = Value::Null;
+        let span = crate::low_end::section_frames(48_000);
+        let facts = preset_facts(Some(-7.0));
+        // Peak control leaves the last section, a quiet outro, as it is:
+        // without peak control, it is 1.5 dB quieter against the loudness.
+        // Streaming takes most of the loss of peak control away, and the
+        // outro falls under the limit of the hold.
+        let record = sectioned_parent(&plan, |s, response| {
+            response["sections_down_db"] =
+                json!([[0.1, 0.1], [0.1, 0.1], [0.1, 0.1], [-0.6, -0.6]]);
+            response["sections_up_db"] =
+                json!([[-0.1, -0.1], [-0.1, -0.1], [-0.1, -0.1], [0.6, 0.6]]);
+            response["sections_free_db"] =
+                json!([[0.2, 0.2], [0.2, 0.2], [0.2, 0.2], [-1.5, -1.5]]);
+            s.power_db = vec![[0.0, 0.0], [0.0, 0.0], [0.0, 0.0], [-20.0, -20.0]];
+        });
+        let delivered = crate::excerpt::delivered_spec(&record).unwrap();
+        let (spec, _) = preview_preset(&record, Preset::Streaming, &facts).unwrap();
+        let moved = peak_control_hold_db(&delivered, &spec, &record["render"]["drive_response"]);
+        assert!(moved[3][0] < -0.7 && moved[3][0] > -1.5, "{moved:?}");
+        assert!(moved[0][0] > 0.1 && moved[0][0] < 0.2, "{moved:?}");
+        let hold = spec.low_end_hold.as_ref().expect("a hold");
+        let bell = &hold.bands[0];
+        assert_eq!(bell.mean_wet(0, span), 0.0);
+        assert!(bell.mean_wet(3 * span, 4 * span) > 0.2);
+        // The bell of the outro adds the loudness of the bass of the outro,
+        // 20 dB under that of the other sections, and not its share of the
+        // time.
+        let gain = |tone: &Tone| {
+            tone.stereo
+                .iter()
+                .find(|b| b.hz == crate::low_end::hold_band(0).hz)
+                .map_or(0.0, |b| b.gain_db)
+        };
+        let sections = HoldSections::of_record(&record).unwrap();
+        let wet = (0..4)
+            .map(|s| {
+                10f64.powf(sections.power_db[s][0] / 10.0)
+                    * bell.mean_wet(sections.starts[s], sections.ends[s])
+            })
+            .sum::<f64>()
+            / (3.0 + 0.01);
+        let (weighted, timed) = (
+            gain(&loudness_tone(&spec, Some(&sections))),
+            gain(&spec.mean_tone()),
+        );
+        assert!((weighted - bell.band.gain_db * wet).abs() < 1e-9);
+        assert!(timed > 0.1 && weighted < 0.2 * timed, "{weighted} {timed}");
+        // Without the sections of the drive response, no section falls.
+        let record = sectioned_parent(&plan, |_, _| {});
+        let (spec, _) = preview_preset(&record, Preset::Streaming, &facts).unwrap();
+        assert!(spec.low_end_hold.is_none());
+    }
+
+    #[test]
+    fn the_preview_of_a_fold_takes_the_side_share_of_each_section() {
+        let mut plan: Value =
+            serde_json::from_str(include_str!("../tests/data/adjust-parent.json"))
+                .expect("parent spec");
+        plan["low_end_hold"] = Value::Null;
+        let span = crate::low_end::section_frames(48_000);
+        let facts = preset_facts(Some(-7.0));
+        // The parent widens 120 Hz and up. The fold takes the side gain back,
+        // and the last section holds 90% of its low mids in the side.
+        plan["side_gain"]["bands_db"] = json!([0.0, 4.0, 4.0, 4.0, 4.0, 4.0]);
+        let record = sectioned_parent(&plan, |s, _| {
+            s.side_share = vec![[0.0, 0.0], [0.0, 0.0], [0.0, 0.0], [0.0, 0.9]];
+        });
+        let (spec, _) = preview_preset(&record, Preset::Mono, &facts).unwrap();
+        let hold = spec.low_end_hold.as_ref().expect("a hold");
+        let bell = hold
+            .bands
+            .iter()
+            .find(|b| b.band.hz == crate::low_end::hold_band(1).hz)
+            .expect("a bell of the low mids");
+        assert_eq!(bell.mean_wet(0, span), 0.0);
+        assert!(bell.mean_wet(3 * span, 4 * span) > 0.2);
+        // With the side share of the mix, each section takes one change.
+        let record = sectioned_parent(&plan, |_, _| {});
+        let (spec, _) = preview_preset(&record, Preset::Mono, &facts).unwrap();
+        assert!(spec.low_end_hold.is_none());
+    }
+
+    #[test]
     fn a_reason_gives_its_share() {
         for share in SHARES {
             assert_eq!(share_of(&share_reason(share)), Some(share));
@@ -3004,6 +4560,20 @@ mod tests {
             0.0, gain_db, 0.0, 0.0, 0.0, 0.0,
         ]));
         p
+    }
+
+    #[test]
+    fn a_versions_record_holds_the_reference_of_each_form() {
+        let record = json!({"schema": crate::distributed::REFERENCE_SCHEMA});
+        assert!(!holds_reference(&json!({"versions": [{"id": "master"}]})));
+        assert!(!holds_reference(&json!({
+            "versions": [{"id": "master", "reference_record": record}]
+        })));
+        assert!(holds_reference(&json!({
+            "versions": [{"id": "essential", "reference_record": record}]
+        })));
+        assert!(holds_reference(&json!({"adjust": {"record": record}})));
+        assert!(holds_reference(&json!({"reference_record": record})));
     }
 
     #[test]
@@ -3045,39 +4615,6 @@ mod tests {
         quiet.ceiling_dbtp = CODEC_CEILING_DBTP;
         assert!(!offers(&quiet, Preset::Streaming, &facts));
         assert!(preset_candidates(&quiet, Preset::Streaming, &facts).is_err());
-    }
-
-    #[test]
-    fn club_takes_the_audibility_point_at_its_ceiling() {
-        let p = parent();
-        // The point of −7.0 LUFS at −0.5 dBTP is −7.5 LUFS at −1 dBTP, and
-        // the level is `CLUB_MARGIN_LU`, the step of D131, under it.
-        let c = preset_candidates(&p, Preset::Club, &preset_facts(Some(-7.0))).unwrap();
-        assert!((c[0].spec.target_lufs + 8.0).abs() < 1e-9);
-        // The later candidates take three quarters and half of the rise, at
-        // the ceiling of the preset.
-        assert_eq!(c.len(), SHARES.len());
-        for (candidate, share) in c.iter().zip(SHARES) {
-            let rise = -8.0 - p.target_lufs;
-            assert!((candidate.spec.target_lufs - (p.target_lufs + share * rise)).abs() < 1e-9);
-            assert_eq!(candidate.spec.ceiling_dbtp, CODEC_CEILING_DBTP);
-        }
-        // Within the range of a request, and never under the parent.
-        assert_eq!(
-            club_lufs(&p, &preset_facts(Some(-5.0))),
-            LOUDNESS_RANGE_LUFS.1
-        );
-        assert_eq!(club_lufs(&p, &preset_facts(Some(-11.0))), p.target_lufs);
-        assert_eq!(club_lufs(&p, &preset_facts(None)), p.target_lufs);
-        // Without a point, the ceiling alone does not serve a club.
-        assert!(!offers(&p, Preset::Club, &preset_facts(None)));
-        assert!(offers(&p, Preset::Club, &preset_facts(Some(-7.0))));
-        // Each Club candidate stays under the point of its own prefix; the
-        // other presets keep their published level or the parent level.
-        assert!(c.iter().all(|c| c.gates.under_own_point));
-        let streaming =
-            preset_candidates(&p, Preset::Streaming, &preset_facts(Some(-7.0))).unwrap();
-        assert!(streaming.iter().all(|c| !c.gates.under_own_point));
     }
 
     #[test]
@@ -3162,11 +4699,6 @@ mod tests {
             medium_description(Preset::Mono, "Full", &mono),
             "Made from Full: −10.0 LUFS with peaks at −0.5 dBTP. On a single speaker, 120 Hz to 2 kHz is up to 0.7 dB louder, with the width of your mix."
         );
-        let club = json!({"lufs": -8.2, "peak_dbtp": -1.0, "loudness_lu": 1.8});
-        assert_eq!(
-            medium_description(Preset::Club, "Warm", &club),
-            "Made from Warm: −8.2 LUFS with peaks at −1.0 dBTP, 1.8 LU louder than Warm."
-        );
     }
 
     #[test]
@@ -3195,6 +4727,490 @@ mod tests {
     }
 
     #[test]
+    fn the_drive_change_follows_the_drive_response() {
+        let response = json!({"shift_db": 1.0, "up_lu": 0.86, "down_lu": -0.91, "loss_lu": 0.3});
+        assert!((drive_change_db(&response, 0.86) - 1.0).abs() < 1e-9);
+        assert!((drive_change_db(&response, -0.91) + 1.0).abs() < 1e-9);
+        assert_eq!(drive_change_db(&Value::Null, 0.7), 0.7);
+        let even = json!({"shift_db": 1.0, "up_lu": 1.0, "down_lu": -1.0, "loss_lu": 0.0});
+        assert!((drive_change_db(&even, 0.7) - 0.7).abs() < 1e-12);
+        assert!((drive_change_db(&even, -6.0) + 6.0).abs() < 1e-12);
+        // Past the top of the curve, the drive of the top.
+        let flat = json!({"shift_db": 1.0, "up_lu": 0.2, "down_lu": -0.9, "loss_lu": 0.3});
+        assert!((drive_change_db(&flat, 0.5) - 0.55 / 0.7).abs() < 1e-9);
+        // Under the drive 1 dB down, the loss of 0.21 LU left there falls
+        // away: the curve joins the quadratic, and a large fall gives back
+        // nearly the whole loss of 0.3 LU.
+        assert!((drive_change_db(&response, -0.91 - 1e-9) + 1.0).abs() < 1e-6);
+        let x = drive_change_db(&response, -10.0);
+        let rate = (1.0 - (0.885 + 0.05)) / 0.21;
+        let change = x + 0.3 - 0.21 * (rate * (x + 1.0)).exp();
+        assert!((change + 10.0).abs() < 1e-9, "{x}");
+        assert!(x < -10.28 && x > -10.3, "{x}");
+        // Over the change at the drive 1 dB up, the quadratic through the
+        // changes at 1 dB and at 3 dB up; past its top, the drive of the top.
+        let far = json!({"shift_db": 1.0, "up_lu": 0.86, "down_lu": -0.91, "loss_lu": 0.3,
+            "far_db": 3.0, "far_lu": 2.3});
+        assert!((drive_change_db(&far, 0.86) - 1.0).abs() < 1e-9);
+        assert!((drive_change_db(&far, 2.3) - 3.0).abs() < 1e-9);
+        assert_eq!(drive_change_db(&far, 0.5), drive_change_db(&response, 0.5));
+        assert_eq!(
+            drive_change_db(&far, -10.0),
+            drive_change_db(&response, -10.0)
+        );
+        let x = drive_change_db(&far, 1.6);
+        let (slope, curve) = through(1.0, 0.86, 3.0, 2.3);
+        assert!((slope * x + curve * x * x - 1.6).abs() < 1e-9, "{x}");
+        let falling = json!({"shift_db": 1.0, "up_lu": 0.86, "down_lu": -0.91, "loss_lu": 0.3,
+            "far_db": 3.0, "far_lu": 0.9});
+        assert!((drive_change_db(&falling, 1.5) - 1.14 / 0.56).abs() < 1e-9);
+    }
+
+    #[test]
+    fn the_preview_replays_the_restoration_passes_of_the_drive_change() {
+        let plan: Value = serde_json::from_str(include_str!("../tests/data/adjust-parent.json"))
+            .expect("parent spec");
+        let mut response = json!({"shift_db": 1.0, "up_lu": 0.86, "down_lu": -0.91,
+            "loss_lu": 0.3, "far_db": 3.0, "far_lu": 2.3,
+            "local_down_db": [0.3, 0.0, 0.0, 0.0, 0.0, 0.0],
+            "local_up_db": [-0.6, 0.0, 0.0, 0.0, 0.0, 0.0],
+            "local_far_db": [-1.4, 0.0, 0.0, 0.0, 0.0, 0.0],
+            "local_free_db": [0.8, 0.0, 0.0, 0.0, 0.0, 0.0],
+            "shelf_db": 1.0, "shelf_lu": 0.25,
+            "shelf_local_db": [0.4, -0.2, -0.2, -0.2, -0.2, -0.2]});
+        let record = |response: &Value| {
+            json!({"spec": plan, "render": {"drive_db": 3.0, "true_peak": {"trim_db": -0.1},
+                "deesser": deesser_stats(), "drive_response": response,
+                "restoration": {"delivered_change_db": [0.05, 0.0, 0.0, 0.0, 0.0, 0.0],
+                    "material": [true, false, false, false, false, false],
+                    "gains_db": [0.2, 0.0, 0.0, 0.0, 0.0, 0.0]}}})
+        };
+        let parent = record(&response);
+        let delivered = crate::excerpt::delivered_spec(&parent).unwrap();
+        assert_eq!(delivered.restoration_db[0], 0.2);
+        // At the drive, the change of the parent stays inside the dead zone.
+        assert_eq!(
+            predicted_restoration(&parent, &delivered, 0.0, 0.0, 48000),
+            Restored {
+                start: delivered.restoration_db,
+                passes: Vec::new()
+            }
+        );
+        // At 1 dB up, the first render loses 0.55 dB of 20–120 Hz. Each pass
+        // returns the change less the dead zone, and its step returns the
+        // change of the shelf model.
+        let r00 = crate::treatment_render::restoring_response_db(0, 0, 48000);
+        let first = (0.55 - 0.1) / r00;
+        let second = (0.55 - 0.4 * first - 0.1) / r00;
+        let restored = predicted_restoration(&parent, &delivered, 1.0, 0.0, 48000);
+        assert_eq!(restored.start, delivered.restoration_db);
+        assert_eq!(restored.passes.len(), 2);
+        assert!((restored.passes[0][0] - (0.2 + first)).abs() < 1e-9);
+        let gains = restored.gains();
+        assert!(
+            (gains[0] - (0.2 + first + second)).abs() < 1e-9,
+            "{gains:?}"
+        );
+        assert_eq!(gains[1..], [0.0; 5]);
+        // A version after Essential starts from the gains of its first
+        // render and the change that it measured; Essential starts from its
+        // delivered gains.
+        let mut after = parent.clone();
+        after["id"] = json!("master");
+        after["render"]["restoration"]["measured_gains_db"] = json!([0.1, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        after["render"]["restoration"]["measured_change_db"] =
+            json!([-0.02, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        assert_eq!(
+            predicted_restoration(&after, &delivered, 0.0, 0.0, 48000).gains(),
+            [0.1, 0.0, 0.0, 0.0, 0.0, 0.0]
+        );
+        let from_first = predicted_restoration(&after, &delivered, 1.0, 0.0, 48000).gains();
+        let first = (0.62 - 0.1) / r00;
+        let second = (0.62 - 0.4 * first - 0.1) / r00;
+        assert!(
+            (from_first[0] - (0.1 + first + second)).abs() < 1e-9,
+            "{from_first:?}"
+        );
+        after["id"] = json!("essential");
+        assert_eq!(
+            predicted_restoration(&after, &delivered, 1.0, 0.0, 48000),
+            restored
+        );
+        // A tone step that raises 40–120 Hz by four units of the shelf
+        // takes the change of peak control of the shelf model, 0.4 − 1.3 +
+        // 0.8 = −0.1 dB a unit, less the change of peak control when its
+        // input takes the 0.3 LU that the shelf adds, −0.6 × 0.3 (D287).
+        let mut shelved = response.clone();
+        shelved["shelf_free_local_db"] = json!([1.3, -0.1, -0.2, -0.2, -0.2, -0.2]);
+        shelved["shelf_free_lu"] = json!(0.3);
+        let change = 0.05 + 4.0 * (0.4 - 1.3 + 0.8 + 0.6 * 0.3);
+        let first = -(change - 0.1) / r00;
+        let second = -(change + 0.4 * first - 0.1) / r00;
+        let toned = predicted_restoration(&record(&shelved), &delivered, 0.0, 4.0, 48000).gains();
+        assert!(
+            (toned[0] - (0.2 + first + second)).abs() < 1e-9,
+            "{toned:?}"
+        );
+        // Without the shelf model without peak control, or without its
+        // loudness, the step keeps the gains of the parent.
+        shelved["shelf_free_lu"] = Value::Null;
+        assert_eq!(
+            predicted_restoration(&record(&shelved), &delivered, 0.0, 4.0, 48000).gains(),
+            delivered.restoration_db
+        );
+        assert_eq!(
+            predicted_restoration(&parent, &delivered, 0.0, 4.0, 48000).gains(),
+            delivered.restoration_db
+        );
+        // Without the local band changes, the gains of the parent.
+        response["local_up_db"] = Value::Null;
+        let old = record(&response);
+        assert_eq!(
+            predicted_restoration(&old, &delivered, 1.0, 0.0, 48000).gains(),
+            delivered.restoration_db
+        );
+    }
+
+    #[test]
+    fn the_hold_plans_each_step_with_the_shift_of_its_pass() {
+        let facts = preset_facts(None);
+        let spec = parent();
+        let span = crate::low_end::section_frames(48_000);
+        let low = crate::low_end::Sections {
+            starts: (0..4).map(|s| s * span).collect(),
+            ends: (1..=4).map(|s| s * span).collect(),
+            ..Default::default()
+        };
+        let changes = vec![[Some(-0.8), Some(-0.8)]; 4];
+        let shifted = |c: &[[Option<f64>; 2]], d: [f64; 2]| -> Vec<[Option<f64>; 2]> {
+            c.iter()
+                .map(|c| std::array::from_fn(|b| c[b].map(|x| x + d[b])))
+                .collect()
+        };
+        let passes = HoldPasses {
+            first: Vec::new(),
+            passes: vec![
+                ([0.3, 0.0], vec![[0.05, 0.0]; 4]),
+                ([0.1, 0.0], vec![[0.1, 0.0]; 4]),
+            ],
+        };
+        let held = hold_steps(&spec, &facts, &low, &changes, &passes, None, &[], 4 * span)
+            .expect("a hold");
+        // The first step plans with the shift of the first pass.
+        let planned = shifted(&changes, [0.3, 0.0]);
+        let shaped = shaped_spectrum(&facts.spectrum, &spec);
+        let (next, first) =
+            crate::low_end::next(&spec, &shaped, &low, &planned, None, 4 * span).expect("a step");
+        // The first pass gives less than its shift. The second step measures
+        // the change of the first step and of the first pass, and plans with
+        // the shift of the second pass.
+        let measured: Vec<[Option<f64>; 2]> = changes
+            .iter()
+            .enumerate()
+            .map(|(s, c)| {
+                std::array::from_fn(|b| {
+                    c[b].map(|x| x + [0.05, 0.0][b] + first.expected_db[s][b] + [0.1, 0.0][b])
+                })
+            })
+            .collect();
+        assert!(!crate::low_end::passes(&measured));
+        let (_, second) = crate::low_end::next(
+            &next,
+            &shaped_spectrum(&facts.spectrum, &next),
+            &low,
+            &measured,
+            Some((&first, &planned)),
+            4 * span,
+        )
+        .expect("a second step");
+        assert_eq!(held.changes_db, second.changes_db);
+        assert_eq!(held.hold_wet, second.hold_wet);
+        // The bells of the first step take the change of peak control of
+        // the shelf model in each section, per dB of their rise of 40–120 Hz
+        // (D290).
+        let take = vec![[0.0, -0.1]; 4];
+        let taken = hold_steps(
+            &spec,
+            &facts,
+            &low,
+            &changes,
+            &passes,
+            None,
+            &take,
+            4 * span,
+        )
+        .expect("a hold");
+        for (s, (a, b)) in taken.changes_db.iter().zip(&held.changes_db).enumerate() {
+            let rise = first.expected_db[s][0] + first.offset_db;
+            assert_eq!(a[0], b[0]);
+            if let (Some(a), Some(b)) = (a[1], b[1]) {
+                assert!((a - b + 0.1 * rise).abs() < 1e-12, "{s} {a} {b} {rise}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_hold_takes_the_shelf_model_for_the_restoring_gain_of_the_bass() {
+        let spectrum = spectrum().spectrum();
+        let delivered = parent();
+        let mut spec = delivered.clone();
+        spec.restoration_db[0] += 0.3;
+        spec.restoration_db[1] -= 0.1;
+        let response = json!({"shelf_db": 1.0,
+            "sections_shelf_db": [[0.2, -0.05], [0.1, -0.02]]});
+        let changes = restoration_hold_db(
+            &delivered.restoration_db,
+            &spec.restoration_db,
+            &response,
+            &spectrum,
+            2,
+        );
+        // The other bands take the change from the source spectrum.
+        let mut rest = spec.restoration_db;
+        rest[0] = delivered.restoration_db[0];
+        let other =
+            crate::low_end::restoration_shift_db(&spectrum, &delivered.restoration_db, &rest);
+        assert!(other[1] < 0.0, "{other:?}");
+        for (change, shelf) in changes.iter().zip([[0.2, -0.05], [0.1, -0.02]]) {
+            for b in 0..2 {
+                assert!((change[b] - (0.3 * shelf[b] + other[b])).abs() < 1e-12);
+            }
+        }
+        // Without the shelf model, each section takes the change from the
+        // source spectrum, and the same gains change nothing.
+        let source = crate::low_end::restoration_shift_db(
+            &spectrum,
+            &delivered.restoration_db,
+            &spec.restoration_db,
+        );
+        assert_eq!(
+            restoration_hold_db(
+                &delivered.restoration_db,
+                &spec.restoration_db,
+                &Value::Null,
+                &spectrum,
+                2
+            ),
+            vec![source; 2]
+        );
+        let gains = delivered.restoration_db;
+        assert!(restoration_hold_db(&gains, &gains, &response, &spectrum, 2).is_empty());
+    }
+
+    #[test]
+    fn a_tone_step_takes_the_change_of_peak_control_of_the_shelf_model() {
+        let facts = preset_facts(None);
+        let mut delivered = parent();
+        delivered.low_end_hold = None;
+        let mut spec = delivered.clone();
+        spec.tone.stereo.push(dsp::EqBand {
+            kind: dsp::Kind::LowShelf,
+            hz: BASS_SHELF_HZ,
+            q: std::f64::consts::FRAC_1_SQRT_2,
+            gain_db: 1.5,
+        });
+        let response = json!({"shift_db": 1.0, "up_lu": 0.86, "down_lu": -0.91,
+            "loss_lu": 0.3, "far_db": 3.0, "far_lu": 2.3, "shelf_db": 1.0,
+            "shelf_free_lu": 0.3,
+            "sections_down_db": [[0.1, 0.05], [0.05, 0.02]],
+            "sections_up_db": [[-0.1, -0.05], [-0.04, -0.02]],
+            "sections_shelf_db": [[0.3, -0.05], [0.5, -0.1]],
+            "sections_shelf_free_db": [[0.6, -0.1], [0.6, -0.12]],
+            "sections_free_db": [[0.1, 0.0], [0.05, 0.0]]});
+        let spectrum = shaped_spectrum(&facts.spectrum, &delivered);
+        let raise = shelf_raise_db(&response, &spectrum).expect("a raise");
+        assert!(raise > 0.6 && raise < 1.0, "{raise}");
+        // Each section takes the change of the shelf model less the rise of
+        // the shelf without peak control, and less the change of peak
+        // control at the 0.3 LU that the shelf adds to its input, per dB of
+        // 40–120 Hz.
+        let take = shelf_take_db(&response, &spectrum, 2);
+        let louder = peak_control_sections_db(&response, 0.3);
+        assert!(louder[0][0] < 0.0, "{louder:?}");
+        assert_eq!(take.len(), 2);
+        for ((t, l), raw) in take.iter().zip(&louder).zip([[-0.2, 0.05], [-0.05, 0.02]]) {
+            for b in 0..2 {
+                assert!((t[b] - (raw[b] - l[b]) / raise).abs() < 1e-12, "{take:?}");
+            }
+        }
+        // A record without the shelf model without peak control or its
+        // loudness, or with other sections, gives no take.
+        for key in ["sections_shelf_free_db", "shelf_free_lu"] {
+            let mut old = response.clone();
+            old[key] = Value::Null;
+            assert!(shelf_take_db(&old, &spectrum, 2).is_empty());
+        }
+        assert!(shelf_take_db(&response, &spectrum, 3).is_empty());
+        // The bass shelf of the request counts in units of the shelf.
+        let held = |s: &Spec| {
+            let h = held_power(&facts.spectrum, s).0[0];
+            h[0] + h[1]
+        };
+        let shelves = tone_shelves(&delivered, &spec, &response, &facts);
+        assert!(
+            (shelves - 10.0 * (held(&spec) / held(&delivered)).log10() / raise).abs() < 1e-12,
+            "{shelves}"
+        );
+        assert!(shelves > 1.0, "{shelves}");
+        assert_eq!(tone_shelves(&delivered, &delivered, &response, &facts), 0.0);
+        assert_eq!(tone_shelves(&delivered, &spec, &Value::Null, &facts), 0.0);
+    }
+
+    #[test]
+    fn the_tone_of_a_section_follows_its_own_spectrum() {
+        let delivered = parent();
+        let mut spec = delivered.clone();
+        spec.tone.stereo.push(dsp::EqBand {
+            kind: dsp::Kind::LowShelf,
+            hz: BASS_SHELF_HZ,
+            q: std::f64::consts::FRAC_1_SQRT_2,
+            gain_db: 1.5,
+        });
+        let gains = low_gains(&delivered, &spec, 48000);
+        let splits = crate::low_end::LOW_SPLITS;
+        assert_eq!(gains.len(), 2 * splits);
+        // The shelf lifts the bottom of 40–120 Hz more than its top.
+        assert!(gains[0][0] > gains[splits - 1][0] && gains[splits - 1][0] > 1.0);
+        // A section with its bass at the bottom of the band takes more of
+        // the shelf than a section with its bass at the top (D288).
+        let at = |k: usize| -> Vec<[f64; 2]> {
+            (0..2 * splits)
+                .map(|j| {
+                    if j == k || j == splits {
+                        [0.0, -10.0]
+                    } else {
+                        [-60.0, -70.0]
+                    }
+                })
+                .collect()
+        };
+        let (low, high) = (
+            section_tone_db(&at(0), &gains),
+            section_tone_db(&at(splits - 1), &gains),
+        );
+        assert!(low[0] > high[0] + 0.2, "{low:?} {high:?}");
+        assert!((low[1] - high[1]).abs() < 1e-9, "{low:?} {high:?}");
+        // The same tone changes nothing.
+        let same = section_tone_db(&at(0), &low_gains(&delivered, &delivered, 48000));
+        assert!(same.iter().all(|x| x.abs() < 1e-12), "{same:?}");
+    }
+
+    #[test]
+    fn the_restoring_gains_add_their_loudness_to_the_prefix() {
+        let spectrum = spectrum();
+        let delivered = parent();
+        assert_eq!(
+            restoration_loudness_db(&spectrum, &delivered, &delivered, None),
+            0.0
+        );
+        let mut spec = delivered.clone();
+        spec.restoration_db[0] += 0.4;
+        let raised = restoration_loudness_db(&spectrum, &spec, &delivered, None);
+        // The tone of the request with each set of restoring filters.
+        let loudness = |gains: &[f64; 6]| {
+            let mut tone = loudness_tone(&spec, None);
+            tone.stereo
+                .extend(crate::treatment_render::filters_of(gains));
+            predicted_loudness_db(&spectrum, &tone, spec.side_gain.as_ref())
+        };
+        let moved = loudness(&spec.restoration_db) - loudness(&delivered.restoration_db);
+        assert!(
+            raised > 0.0 && (raised - moved).abs() < 1e-12,
+            "{raised} {moved}"
+        );
+    }
+
+    #[test]
+    fn the_local_change_follows_the_drive_models() {
+        let curve = Response::of(&json!({"shift_db": 1.0, "up_lu": 0.86,
+            "down_lu": -0.91, "loss_lu": 0.3}))
+        .unwrap();
+        let local = |x| local_change_db(&curve, 0.3, -0.6, 0.8, -1.4, 3.0, x);
+        assert_eq!(local(0.0), 0.0);
+        assert!((local(1.0) + 0.6).abs() < 1e-12);
+        assert!((local(2.0) + 1.0).abs() < 1e-12);
+        assert!((local(3.0) + 1.4).abs() < 1e-12);
+        assert!((local(4.0) + 1.8).abs() < 1e-12);
+        assert!((local(0.5) + 0.3).abs() < 1e-12);
+        assert!((local(-0.5) - 0.15).abs() < 1e-12);
+        assert!((local(-1.0) - 0.3).abs() < 1e-12);
+        // Under the drive 1 dB down, the change approaches the change
+        // without peak control.
+        let rate: f64 = (1.0 - (0.885 + 0.05)) / 0.21;
+        assert!((local(-3.0) - (0.8 - 0.5 * (-2.0 * rate).exp())).abs() < 1e-12);
+        assert!((local(-40.0) - 0.8).abs() < 1e-3);
+    }
+
+    #[test]
+    fn the_preview_of_a_ceiling_step_solves_the_drive_from_the_response() {
+        let plan: Value = serde_json::from_str(include_str!("../tests/data/adjust-parent.json"))
+            .expect("parent spec");
+        let record = |response: Value| {
+            json!({"spec": plan, "render": {"drive_db": 3.0, "true_peak": {"trim_db": -0.1},
+                "deesser": deesser_stats(), "drive_response": response}})
+        };
+        let facts = preset_facts(Some(-7.0));
+        let steps = Steps {
+            ceiling: -2,
+            ..Steps::default()
+        };
+        // The lower ceiling takes 1 LU at the drive of the parent, and the
+        // drive gives it back on the curve of the response.
+        let response = json!({"shift_db": 1.0, "up_lu": 0.86, "down_lu": -0.91, "loss_lu": 0.3});
+        let (spec, fixed) = preview(&record(response.clone()), &steps, &facts).unwrap();
+        let ceiling = plan["ceiling_dbtp"].as_f64().unwrap();
+        assert!((spec.ceiling_dbtp - (ceiling - 1.0)).abs() < 1e-9);
+        let moved = fixed.drive_db - 3.0 + 1.0;
+        assert!(
+            (0.885 * moved - 0.025 * moved * moved - 1.0).abs() < 1e-9,
+            "{moved}"
+        );
+        // Without a response, the drive follows the target dB for dB.
+        let (_, fixed) = preview(&record(Value::Null), &steps, &facts).unwrap();
+        assert!((fixed.drive_db - 3.0).abs() < 1e-9, "{}", fixed.drive_db);
+        // Streaming lowers the level by more than the drive 1 dB down: the
+        // drive gives back more of the loss of peak control than the 0.09 LU
+        // of the drive 1 dB down, and less than the whole 0.3 LU.
+        let target = plan["target_lufs"].as_f64().unwrap();
+        let (spec, fixed) =
+            preview_preset(&record(response.clone()), Preset::Streaming, &facts).unwrap();
+        let (_, plain) = preview_preset(&record(Value::Null), Preset::Streaming, &facts).unwrap();
+        let moved = STREAMING_LUFS - target - (spec.ceiling_dbtp - ceiling);
+        let given_back = plain.drive_db - fixed.drive_db;
+        assert!(moved < -1.0, "{moved}");
+        assert!(
+            given_back > 0.09 && given_back < 0.3,
+            "{moved} {given_back}"
+        );
+    }
+
+    #[test]
+    fn the_drive_solve_starts_from_the_output_of_the_parent() {
+        let plan: Value = serde_json::from_str(include_str!("../tests/data/adjust-parent.json"))
+            .expect("parent spec");
+        let target = plan["target_lufs"].as_f64().unwrap();
+        let record = |search: Value| {
+            json!({"spec": plan, "render": {"drive_db": 3.0, "true_peak": {"trim_db": -0.1},
+                "deesser": deesser_stats(), "lufs": target - 0.03, "search": search}})
+        };
+        let facts = preset_facts(Some(-7.0));
+        let steps = Steps {
+            loudness: 2,
+            ..Steps::default()
+        };
+        let (_, plain) = preview(&record(Value::Null), &steps, &facts).unwrap();
+        // The parent ends 0.03 LU under its target, and the drive takes the
+        // 0.03 LU with the step.
+        let (_, missed) = preview(&record(json!({"target_lufs": target})), &steps, &facts).unwrap();
+        assert!(
+            (missed.drive_db - plain.drive_db - 0.03).abs() < 1e-9,
+            "{} {}",
+            missed.drive_db,
+            plain.drive_db
+        );
+    }
+
+    #[test]
     fn a_missing_band_refuses_its_control() {
         let (s, p) = (spectrum(), parent());
         let steps = Steps {
@@ -3214,20 +5230,23 @@ mod tests {
 
     #[test]
     fn loudness_stays_in_its_range() {
+        // From −7 LUFS, two steps up reach −6.5 LUFS only at half of the
+        // steps, and four steps up leave the range at each share.
         let (s, mut p) = (spectrum(), parent());
         p.target_lufs = -7.0;
-        let spec = spec_at(
-            &p,
-            &Steps {
-                loudness: 4,
-                ..Steps::default()
-            },
-            1.0,
-            &s,
-            ALL,
-        )
-        .unwrap();
+        let steps = |loudness| Steps {
+            loudness,
+            ..Steps::default()
+        };
+        let reasons: Vec<String> = candidates(&p, &steps(2), &s, ALL)
+            .unwrap()
+            .into_iter()
+            .map(|c| c.reason)
+            .collect();
+        assert_eq!(reasons, [share_reason(0.5)]);
+        let spec = spec_at(&p, &steps(2), 0.5, &s, ALL).unwrap();
         assert_eq!(spec.target_lufs, LOUDNESS_RANGE_LUFS.1);
+        assert!(candidates(&p, &steps(4), &s, ALL).is_err());
     }
 
     #[test]
@@ -3248,6 +5267,88 @@ mod tests {
         assert!((change - 1.5).abs() < 0.01, "{change}");
         assert!(widened(None, 0.0).is_none());
         assert_eq!(widened(None, -6.0).unwrap().bands_db[1], -6.0);
+    }
+
+    #[test]
+    fn a_share_under_the_detectable_increment_is_left_out() {
+        let (s, p) = (spectrum(), parent());
+        let reasons = |steps: Steps| -> Vec<String> {
+            candidates(&p, &steps, &s, ALL)
+                .unwrap()
+                .into_iter()
+                .map(|c| c.reason)
+                .collect()
+        };
+        // Three quarters of one step is 0.375 dB, under 0.41 dB.
+        let one = Steps {
+            air: 1,
+            ..Steps::default()
+        };
+        assert_eq!(reasons(one), [share_reason(1.0)]);
+        let two = Steps {
+            air: 2,
+            ..Steps::default()
+        };
+        assert_eq!(reasons(two).len(), SHARES.len());
+        // Each share keeps the ceiling.
+        let ceiling = Steps {
+            ceiling: -1,
+            ..Steps::default()
+        };
+        assert_eq!(reasons(ceiling).len(), SHARES.len());
+        assert!(one.detectable_at(1.0) && !one.detectable_at(0.75));
+    }
+
+    #[test]
+    fn a_compression_step_moves_the_mean_reduction_by_one_step() {
+        let p = parent();
+        let settings = p.compressor.unwrap();
+        // Levels from 8 dB under to 4 dB over the threshold: across the
+        // knee of 6 dB.
+        let over_db = std::array::from_fn(|i| -8.0 + 0.6 * i as f64);
+        let mean = |shift| crate::compressor::mean_reduction_over(&over_db, settings, shift);
+        let compression = Compression {
+            over_db,
+            mean_reduction_db: 1.5,
+        };
+        let offset = level_shift(&compression, settings, 1.5).unwrap();
+        assert!((mean(offset) - 1.5).abs() < 1e-9);
+        for steps in [-2, -1, 1, 2, 4] {
+            let change = steps as f64 * STEP_DB;
+            let shift = compression_shift(&compression, settings, change).unwrap();
+            assert!(
+                (mean(offset + shift) - 1.5 - change).abs() < 1e-9,
+                "{steps}"
+            );
+            // In the knee, a dB of threshold moves the reduction by less
+            // than half a dB.
+            assert!(shift.abs() > 2.0 * change.abs(), "{steps}: {shift}");
+        }
+        // The parent reduces by 1.5 dB, so three steps down are outside the
+        // range of the compressor.
+        assert!(compression_shift(&compression, settings, -1.5).is_none());
+        let available = Availability {
+            compressor: Some(compression),
+            ..ALL
+        };
+        let steps = Steps {
+            compression: 1,
+            ..Steps::default()
+        };
+        let c = candidates(&p, &steps, &spectrum(), available).unwrap();
+        let moved = settings.threshold_dbfs - c[0].spec.compressor.unwrap().threshold_dbfs;
+        let solved = compression_shift(&compression, settings, STEP_DB).unwrap();
+        assert!((moved - solved).abs() < 1e-12);
+        let down = Steps {
+            compression: -3,
+            ..Steps::default()
+        };
+        let range = candidates(&p, &down, &spectrum(), available);
+        assert_eq!(
+            range.map(|c| c.len()).map_err(|e| e.to_string()),
+            Ok(2),
+            "three quarters and half of three steps down are within the range"
+        );
     }
 
     #[test]
@@ -3346,19 +5447,47 @@ mod tests {
     #[test]
     fn each_requested_change_makes_an_adjusted_version_distinct() {
         let o = other("Forward");
-        assert!(sound(-9.1, 1.0).is_duplicate_of(&o.sound));
-        assert!(!sound(-8.0, 10f64.powf(0.1)).is_duplicate_of(&o.sound));
-        assert!(!sound(-9.0, 1.3).is_duplicate_of(&o.sound));
+        let none = Steps::default();
+        assert!(sound(-9.1, 1.0).is_duplicate_of(&o.sound, &none));
+        assert!(!sound(-8.0, 10f64.powf(0.1)).is_duplicate_of(&o.sound, &none));
+        assert!(!sound(-9.0, 1.3).is_duplicate_of(&o.sound, &none));
         // The air band is not material in the signature; its measure counts.
         let mut air = sound(-9.0, 1.0);
         air.measures.air_db -= 2.0;
-        assert!(!air.is_duplicate_of(&o.sound));
+        assert!(!air.is_duplicate_of(&o.sound, &none));
         let mut compressed = sound(-9.0, 1.0);
         compressed.compressor_db += 1.2;
-        assert!(!compressed.is_duplicate_of(&o.sound));
+        assert!(!compressed.is_duplicate_of(&o.sound, &none));
         let mut ceiling = sound(-9.0, 1.0);
         ceiling.ceiling_dbtp = -1.0;
-        assert!(!ceiling.is_duplicate_of(&o.sound));
+        assert!(!ceiling.is_duplicate_of(&o.sound, &none));
+    }
+
+    #[test]
+    fn a_requested_control_counts_from_the_detectable_increment() {
+        let o = other("Forward");
+        let one = |set: fn(&mut Steps)| {
+            let mut steps = Steps::default();
+            set(&mut steps);
+            steps
+        };
+        // One Air step measured 0.477 to 0.492 dB on the eight album mixes.
+        let mut air = sound(-9.0, 1.0);
+        air.measures.air_db += 0.48;
+        assert!(air.is_duplicate_of(&o.sound, &Steps::default()));
+        assert!(!air.is_duplicate_of(&o.sound, &one(|s| s.air = 1)));
+        assert!(air.is_duplicate_of(&o.sound, &one(|s| s.width = 1)));
+        air.measures.air_db = o.sound.measures.air_db + 0.40;
+        assert!(air.is_duplicate_of(&o.sound, &one(|s| s.air = 1)));
+        let quieter = sound(-9.45, 1.0);
+        assert!(quieter.is_duplicate_of(&o.sound, &Steps::default()));
+        assert!(!quieter.is_duplicate_of(&o.sound, &one(|s| s.loudness = -1)));
+        let mut compressed = sound(-9.0, 1.0);
+        compressed.compressor_db += 0.45;
+        assert!(!compressed.is_duplicate_of(&o.sound, &one(|s| s.compression = 1)));
+        let mut wider = sound(-9.0, 1.0);
+        wider.measures.width_db += 0.45;
+        assert!(!wider.is_duplicate_of(&o.sound, &one(|s| s.width = 1)));
     }
 
     #[test]

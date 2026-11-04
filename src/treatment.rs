@@ -8,7 +8,7 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Serialize, Deserialize, Debug)]
+#[derive(Clone, PartialEq, Serialize, Deserialize, Debug)]
 pub struct BlendPoint {
     pub sample: usize,
     pub wet: f64,
@@ -16,7 +16,7 @@ pub struct BlendPoint {
 
 /// Slow, source-derived focus movement. Filter state runs continuously, including
 /// dry passages. Mixing dry/filtered audio avoids changing recursive coefficients.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct FocusEnvelope {
     pub domain: Domain,
     pub filter_index: usize,
@@ -108,7 +108,7 @@ pub fn with_enveloped(
 /// Largest number of filters in one domain of a tone.
 pub const MAXIMUM_FILTERS: usize = 12;
 
-#[derive(Clone, Default, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Tone {
     pub stereo: Vec<EqBand>,
@@ -140,12 +140,30 @@ impl Tone {
         frames: usize,
         rate: u32,
     ) -> Result<()> {
+        let mut stream = self.stream(envelopes, offset, frames, rate)?;
+        if !envelopes.is_empty() && offset + audio.len() > frames {
+            return Err("Treatment span outside the recording".into());
+        }
+        stream.process(audio)
+    }
+
+    /// `apply_with_envelopes_from` in spans, from frame `offset` of a
+    /// recording of `frames` frames: each filter keeps its state, and each
+    /// envelope its segment, from one span to the next.
+    pub fn stream(
+        &self,
+        envelopes: &[FocusEnvelope],
+        offset: usize,
+        frames: usize,
+        rate: u32,
+    ) -> Result<ToneStream> {
         self.validate(rate)?;
         if envelopes.is_empty() {
-            return self.apply(audio, rate);
-        }
-        if offset + audio.len() > frames {
-            return Err("Treatment span outside the recording".into());
+            return Ok(ToneStream::Plain {
+                stereo: dsp::Eq::new(&self.stereo, rate),
+                mid: (!self.mid.is_empty()).then(|| finishing::MidEq::new(&self.mid, rate)),
+                side: dsp::SideEq::new(&self.side, rate),
+            });
         }
         for (i, envelope) in envelopes.iter().enumerate() {
             envelope.validate(self, frames)?;
@@ -156,9 +174,7 @@ impl Tone {
                 return Err("Repeated source focus envelope".into());
             }
         }
-        if audio.iter().flatten().any(|x| !x.is_finite()) {
-            return Err("Nonfinite treatment input".into());
-        }
+        let mut filters = Vec::new();
         for (domain, bands) in [
             (Domain::Stereo, &self.stereo),
             (Domain::Mid, &self.mid),
@@ -169,51 +185,18 @@ impl Tone {
                     std::mem::discriminant(&e.domain) == std::mem::discriminant(&domain)
                         && e.filter_index == index
                 });
-                let mut filters = [band.filter(rate), band.filter(rate)];
-                let mut segment = 0;
-                for (index, frame) in audio.iter_mut().enumerate() {
-                    let sample = offset + index;
-                    let wet = envelope.map_or(1.0, |e| {
-                        while segment + 2 < e.points.len() && sample > e.points[segment + 1].sample
-                        {
-                            segment += 1;
-                        }
-                        let a = &e.points[segment];
-                        let b = &e.points[segment + 1];
-                        let position = (sample - a.sample) as f64 / (b.sample - a.sample) as f64;
-                        let smooth = 0.5 - 0.5 * (std::f64::consts::PI * position).cos();
-                        a.wet + smooth * (b.wet - a.wet)
-                    });
-                    let [l, r] = frame.map(f64::from);
-                    let blend = |dry: f64, processed: f64| {
-                        if wet == 1.0 {
-                            processed
-                        } else {
-                            dry + wet * (processed - dry)
-                        }
-                    };
-                    let mid = (l + r) * 0.5;
-                    let side = (l - r) * 0.5;
-                    let output = match domain {
-                        Domain::Stereo => {
-                            [blend(l, filters[0].tick(l)), blend(r, filters[1].tick(r))]
-                        }
-                        Domain::Mid => {
-                            let m = blend(mid, filters[0].tick(mid));
-                            [m + side, m - side]
-                        }
-                        Domain::Side => {
-                            let s = blend(side, filters[0].tick(side));
-                            [mid + s, mid - s]
-                        }
-                    };
-                    if wet != 0.0 {
-                        *frame = output.map(|x| x as f32);
-                    }
-                }
+                filters.push(FocusFilter {
+                    domain,
+                    filters: [band.filter(rate), band.filter(rate)],
+                    envelope: envelope.cloned(),
+                    segment: 0,
+                });
             }
         }
-        Ok(())
+        Ok(ToneStream::Enveloped {
+            filters,
+            position: offset,
+        })
     }
 
     /// Check the filter count, each filter, and the response of each domain
@@ -250,15 +233,98 @@ impl Tone {
 
     /// Apply the tone to `audio` at `rate`.
     pub fn apply(&self, audio: &mut [Stereo], rate: u32) -> Result<()> {
-        self.validate(rate)?;
+        self.stream(&[], 0, audio.len(), rate)?.process(audio)
+    }
+}
+
+/// The tone of a recording in spans (`Tone::stream`).
+pub enum ToneStream {
+    Plain {
+        stereo: dsp::Eq,
+        mid: Option<finishing::MidEq>,
+        side: dsp::SideEq,
+    },
+    Enveloped {
+        filters: Vec<FocusFilter>,
+        /// The frame of the recording at the start of the next span.
+        position: usize,
+    },
+}
+
+/// One filter of a tone with focus envelopes, and its state.
+pub struct FocusFilter {
+    domain: Domain,
+    filters: [dsp::Biquad; 2],
+    envelope: Option<FocusEnvelope>,
+    segment: usize,
+}
+
+impl ToneStream {
+    /// Apply the tone to the next frames of the recording in place.
+    pub fn process(&mut self, audio: &mut [Stereo]) -> Result<()> {
         if audio.iter().flatten().any(|x| !x.is_finite()) {
             return Err("Nonfinite treatment input".into());
         }
-        dsp::eq(audio, &self.stereo, rate);
-        if !self.mid.is_empty() {
-            finishing::eq_domain(audio, &self.mid, Domain::Mid, rate);
+        match self {
+            ToneStream::Plain { stereo, mid, side } => {
+                stereo.process(audio);
+                if let Some(mid) = mid {
+                    mid.process(audio);
+                }
+                side.process(audio);
+            }
+            ToneStream::Enveloped { filters, position } => {
+                for focus in filters.iter_mut() {
+                    // In locals, the state of the filters stays in registers.
+                    let (domain, envelope) = (focus.domain, &focus.envelope);
+                    let (mut filters, mut segment) = (focus.filters, focus.segment);
+                    for (index, frame) in audio.iter_mut().enumerate() {
+                        let sample = *position + index;
+                        let wet = envelope.as_ref().map_or(1.0, |e| {
+                            while segment + 2 < e.points.len()
+                                && sample > e.points[segment + 1].sample
+                            {
+                                segment += 1;
+                            }
+                            let a = &e.points[segment];
+                            let b = &e.points[segment + 1];
+                            let position =
+                                (sample - a.sample) as f64 / (b.sample - a.sample) as f64;
+                            let smooth = 0.5 - 0.5 * (std::f64::consts::PI * position).cos();
+                            a.wet + smooth * (b.wet - a.wet)
+                        });
+                        let [l, r] = frame.map(f64::from);
+                        let blend = |dry: f64, processed: f64| {
+                            if wet == 1.0 {
+                                processed
+                            } else {
+                                dry + wet * (processed - dry)
+                            }
+                        };
+                        let mid = (l + r) * 0.5;
+                        let side = (l - r) * 0.5;
+                        let output = match domain {
+                            Domain::Stereo => {
+                                [blend(l, filters[0].tick(l)), blend(r, filters[1].tick(r))]
+                            }
+                            Domain::Mid => {
+                                let m = blend(mid, filters[0].tick(mid));
+                                [m + side, m - side]
+                            }
+                            Domain::Side => {
+                                let s = blend(side, filters[0].tick(side));
+                                [mid + s, mid - s]
+                            }
+                        };
+                        if wet != 0.0 {
+                            *frame = output.map(|x| x as f32);
+                        }
+                    }
+                    (focus.filters, focus.segment) = (filters, segment);
+                }
+                *position += audio.len();
+            }
         }
-        dsp::side_eq(audio, &self.side, rate);
         Ok(())
     }
 }

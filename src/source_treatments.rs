@@ -22,19 +22,23 @@ pub struct SourceIdentity<'a> {
     pub frames: usize,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProposalSet {
+    #[serde(deserialize_with = "crate::static_text::text")]
     pub schema: &'static str,
+    #[serde(deserialize_with = "crate::static_text::text")]
     pub rule: &'static str,
+    #[serde(deserialize_with = "crate::static_text::text")]
     pub validation_status: &'static str,
     pub source_file_sha256: String,
     pub analysis_sha256: String,
     pub policy: Policy,
     pub proposals: Vec<Proposal>,
+    #[serde(deserialize_with = "crate::static_text::texts")]
     pub notes: Vec<&'static str>,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct Policy {
     pub minimum_hz: f64,
     pub maximum_hz: f64,
@@ -61,17 +65,20 @@ impl Default for Policy {
     }
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct Proposal {
     pub id: String,
+    #[serde(deserialize_with = "crate::static_text::text")]
     pub rule: &'static str,
+    #[serde(deserialize_with = "crate::static_text::text")]
     pub rationale: &'static str,
     pub tone: Tone,
     pub basis: Vec<Region>,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct Region {
+    #[serde(deserialize_with = "crate::static_text::text")]
     pub domain: &'static str,
     pub first_band: usize,
     pub last_band: usize,

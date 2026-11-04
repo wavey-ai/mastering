@@ -64,11 +64,16 @@ impl Alignment {
         deg.to_radians()
     }
 
+    /// The kernel of the left channel and that of the right channel at
+    /// `rate`.
+    pub fn kernels(&self, rate: u32) -> [Vec<f64>; 2] {
+        [-0.5, 0.5].map(|turn| crate::fir::phase_kernel(TAPS, |hz| turn * self.radians(hz), rate))
+    }
+
     /// Turn the left channel of `audio`, at `rate`, by minus half and the
     /// right channel by plus half of the measured phase, by FFT convolution.
     pub fn apply(&self, audio: &mut [Stereo], rate: u32) {
-        let left = crate::fir::phase_kernel(TAPS, |hz| -0.5 * self.radians(hz), rate);
-        let right = crate::fir::phase_kernel(TAPS, |hz| 0.5 * self.radians(hz), rate);
+        let [left, right] = self.kernels(rate);
         // In place: each output sample is emitted before any later input
         // sample is read, and f64 copies of a 30-minute channel are 0.6 GB.
         let frames = std::cell::Cell::from_mut(audio).as_slice_of_cells();

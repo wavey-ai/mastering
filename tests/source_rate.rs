@@ -307,9 +307,10 @@ fn the_chain_gives_the_same_result_at_each_rate() {
     }
     // The band balance at matched loudness and the limiter work agree. The
     // 48 kHz render is measured at 44.1 kHz, on the same frequency grid.
-    let converted = resample::convert(&rendered[1].audio, 48_000, 44_100).unwrap();
-    let [a, b] = [&rendered[0].audio[..], &converted[..]]
-        .map(|audio| WindowBands::measure(audio, 44_100).total());
+    let first = rendered[0].audio.load().unwrap();
+    let converted = resample::convert(&rendered[1].audio.load().unwrap(), 48_000, 44_100).unwrap();
+    let [a, b] =
+        [&first[..], &converted[..]].map(|audio| WindowBands::measure(audio, 44_100).total());
     let level = |bands: &[f64; 6]| bands.iter().sum::<f64>();
     for band in 0..5 {
         let change = dsp::db((a[band] / level(&a)).sqrt()) - dsp::db((b[band] / level(&b)).sqrt());

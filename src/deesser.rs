@@ -23,7 +23,6 @@ use crate::{
     fir, masking, resample,
 };
 use serde::{Deserialize, Serialize};
-use std::borrow::Cow;
 
 /// The sibilant band and the vocal body band, in Hz.
 pub const SIBILANT_HZ: (f64, f64) = (5000.0, 10000.0);
@@ -85,7 +84,7 @@ pub struct Keyed {
 }
 
 /// The key of a vocal stem.
-#[derive(Clone, Serialize, Default, PartialEq, Debug)]
+#[derive(Clone, Serialize, Deserialize, Default, PartialEq, Debug)]
 pub struct Key {
     pub keyed: Vec<Keyed>,
     /// The 5 to 10 kHz power of the mid channels of the drum, bass and other
@@ -213,33 +212,87 @@ fn band_power(frame: &[f64; masking::BANDS], (low, high): (f64, f64)) -> f64 {
         .sum()
 }
 
-/// Frame powers of the mid channel of `audio` at `rate`. The frames read the
-/// mid of each frame as they need it: a copy of a 5-minute mix is 115 MB.
-fn mid_powers(audio: &[Stereo], rate: u32) -> Vec<[f64; masking::BANDS]> {
-    let mid = |n: usize| {
-        let f = audio[n];
-        [(0.5 * (f[0] as f64 + f[1] as f64)) as f32; 2]
-    };
-    masking::frames_of(audio.len(), mid, masking::Channels::Left, rate).powers
+/// The mid channel of `frame`.
+pub(crate) fn mid(frame: Stereo) -> f32 {
+    (0.5 * (frame[0] as f64 + frame[1] as f64)) as f32
 }
 
-/// The 5 to 10 kHz power of the mid channel of each frame of `audio` at
-/// `rate`.
-pub(crate) fn sibilant_powers(audio: &[Stereo], rate: u32) -> Vec<f64> {
-    mid_powers(audio, rate)
+/// Frame powers of the mid channel of `audio` at `rate`. The frames read the
+/// mid of each frame as they need it: a copy of a 5-minute mix is 115 MB.
+pub(crate) fn mid_powers(audio: &[Stereo], rate: u32) -> Vec<[f64; masking::BANDS]> {
+    let mid = |n: usize| [mid(audio[n]); 2];
+    masking::frames_of(
+        audio.len(),
+        mid,
+        masking::Channels::Left,
+        masking::Measures::Powers,
+        rate,
+    )
+    .powers
+}
+
+/// `mid_powers` of a signal whose frames arrive in spans.
+pub(crate) struct MidPowers {
+    rate: u32,
+    /// The frames from the start of the next masking frame.
+    pending: Vec<Stereo>,
+    frames: Vec<[f64; masking::BANDS]>,
+}
+
+impl MidPowers {
+    /// The hops of a masking frame after its first.
+    const WARM: usize = masking::FFT.div_ceil(masking::HOP) - 1;
+
+    /// The mid powers of a signal of `frames` frames at `rate`.
+    pub(crate) fn new(frames: usize, rate: u32) -> Self {
+        Self {
+            rate,
+            pending: Vec::new(),
+            frames: Vec::with_capacity((frames / masking::HOP).saturating_sub(Self::WARM)),
+        }
+    }
+
+    /// Add the next frames of the signal.
+    pub(crate) fn push(&mut self, audio: &[Stereo]) {
+        self.pending.extend_from_slice(audio);
+        if self.pending.len() >= 256 * masking::HOP {
+            self.measure();
+        }
+    }
+
+    /// The masking frames of the whole hops of `pending`. A masking frame
+    /// reads only its own samples, so these frames equal those frames of
+    /// the whole signal.
+    fn measure(&mut self) {
+        let hops = self.pending.len() / masking::HOP;
+        let measured = hops.saturating_sub(Self::WARM);
+        if measured == 0 {
+            return;
+        }
+        self.frames
+            .extend(mid_powers(&self.pending[..hops * masking::HOP], self.rate));
+        self.pending.drain(..measured * masking::HOP);
+    }
+
+    pub(crate) fn finish(mut self) -> Vec<[f64; masking::BANDS]> {
+        self.measure();
+        self.frames
+    }
+}
+
+/// The 5 to 10 kHz power of each frame of the band powers `mid_frames` of a
+/// mid channel.
+pub(crate) fn sibilant_of(mid_frames: &[[f64; masking::BANDS]]) -> Vec<f64> {
+    mid_frames
         .iter()
         .map(|f| band_power(f, SIBILANT_HZ))
         .collect()
 }
 
-/// `stem` at `stem_rate` at the rate `rate`. A stem at `rate` is read in
-/// place: a copy of a 30-minute stem is 0.7 GB.
-fn at_rate(stem: &[Stereo], stem_rate: u32, rate: u32) -> Result<Cow<'_, [Stereo]>> {
-    Ok(if stem_rate == rate {
-        stem.into()
-    } else {
-        resample::convert(stem, stem_rate, rate)?.into()
-    })
+/// The 5 to 10 kHz power of the mid channel of each frame of `audio` at
+/// `rate`.
+pub(crate) fn sibilant_powers(audio: &[Stereo], rate: u32) -> Vec<f64> {
+    sibilant_of(&mid_powers(audio, rate))
 }
 
 /// The key of `stems`, the drum, bass, other and vocal stems at
@@ -248,29 +301,40 @@ pub fn key(stems: [&[Stereo]; 4], stem_rate: u32, mix: &[Stereo], rate: u32) -> 
     // One stem at the render rate at a time.
     let mut others: [Vec<f64>; 3] = Default::default();
     for (role, stem) in stems[..3].iter().enumerate() {
-        others[role] = sibilant_powers(&at_rate(stem, stem_rate, rate)?, rate);
+        others[role] = sibilant_powers(&resample::at_rate(stem, stem_rate, rate)?, rate);
     }
-    let vocal = at_rate(stems[3], stem_rate, rate)?;
-    let frames = masking::frames(&vocal, masking::Channels::Both, rate).powers;
-    Ok(key_with_frames(&vocal, &frames, &others, mix, rate))
+    let vocal = resample::at_rate(stems[3], stem_rate, rate)?;
+    let frames = masking::frames(
+        &vocal,
+        masking::Channels::Both,
+        masking::Measures::Powers,
+        rate,
+    )
+    .powers;
+    Ok(key_with_frames(
+        &mid_powers(&vocal, rate),
+        &frames,
+        &others,
+        &mid_powers(mix, rate),
+    ))
 }
 
-/// `key` of a vocal stem at `rate`, the rate of `mix`, with its masking
-/// frames, and the mid 5 to 10 kHz power of each frame of the drum, bass and
-/// other stems at `rate` (`sibilant_powers`).
+/// `key` of a vocal stem at `rate` from the mid band powers `stem_mid` of
+/// the stem (`mid_powers`) and its masking frames, the mid 5 to 10 kHz
+/// power of each frame of the drum, bass and other stems at `rate`
+/// (`sibilant_powers`), and the mid band powers `mix_mid` of the mix at
+/// `rate`.
 pub(crate) fn key_with_frames(
-    vocal: &[Stereo],
+    stem_mid: &[[f64; masking::BANDS]],
     frames: &[[f64; masking::BANDS]],
     others: &[Vec<f64>; 3],
-    mix: &[Stereo],
-    rate: u32,
+    mix_mid: &[[f64; masking::BANDS]],
 ) -> Key {
     let other_band_power = others.iter().flatten().sum();
     let total: Vec<f64> = frames.iter().map(|f| f.iter().sum()).collect();
     let loudest = total.iter().copied().fold(0.0, f64::max);
     let sibilant: Vec<f64> = frames.iter().map(|f| band_power(f, SIBILANT_HZ)).collect();
     let loudest_sibilant = sibilant.iter().copied().fold(0.0, f64::max);
-    let (stem_mid, mix_mid) = (mid_powers(vocal, rate), mid_powers(mix, rate));
     // Power of the stem and of the mix in the stem's active frames.
     let active = |i: usize| total[i] > loudest * 10f64.powf(-VOCAL_ACTIVE_DB / 10.0);
     let (stem_power, mix_power) = (0..frames.len().min(mix_mid.len()))
@@ -463,7 +527,35 @@ impl Plan {
     pub fn apply_from(&self, audio: &mut [Stereo], offset: usize, rate: u32) -> Stats {
         let skip = ((masking::HOP - offset % masking::HOP) % masking::HOP).min(audio.len());
         let first_frame = (offset + skip) / masking::HOP;
-        let frames = mid_powers(&audio[skip..], rate);
+        let (cut, stats) = self.cuts(&mid_powers(&audio[skip..], rate), first_frame);
+        if stats.cut_frames == 0 {
+            return stats;
+        }
+        let band = BandCut::new(cut, skip, rate);
+        // In place: each output sample is emitted before any later input
+        // sample is read, and f64 copies of a 30-minute mid are 0.6 GB.
+        let frames = std::cell::Cell::from_mut(audio).as_slice_of_cells();
+        fir::filter_each(
+            frames.len(),
+            |i| mid_of(frames[i].get()),
+            &band.kernel,
+            |i, filtered| {
+                if let Some(frame) = band.after(i, frames[i].get(), filtered) {
+                    frames[i].set(frame);
+                }
+            },
+        );
+        stats
+    }
+
+    /// The cut of each frame of `frames`, the band powers of the mid frames
+    /// of a signal from masking frame `first_frame` of the recording, in dB,
+    /// and the stats of the stage.
+    pub(crate) fn cuts(
+        &self,
+        frames: &[[f64; masking::BANDS]],
+        first_frame: usize,
+    ) -> (Vec<f64>, Stats) {
         // The excess of each keyed frame of the span, and its frame in the
         // span.
         let mut measured = Vec::new();
@@ -482,14 +574,32 @@ impl Plan {
             at.push(k);
         }
         let (cuts, stats) = self.solve(&measured);
-        if stats.cut_frames == 0 {
-            return stats;
-        }
         // Cut of each frame, in dB.
         let mut cut = vec![0.0f64; frames.len()];
         for (k, c) in at.into_iter().zip(cuts) {
             cut[k] = c;
         }
+        (cut, stats)
+    }
+}
+
+/// The mid channel of `frame`, in f64.
+pub(crate) fn mid_of(frame: Stereo) -> f64 {
+    0.5 * (frame[0] as f64 + frame[1] as f64)
+}
+
+/// The cut of the sibilant band of the mid from the cut of each masking
+/// frame (`Plan::cuts`).
+pub(crate) struct BandCut {
+    cut: Vec<f64>,
+    /// The sample of the span at the start of the first masking frame.
+    skip: usize,
+    /// The band filter of the mid.
+    pub kernel: Vec<f64>,
+}
+
+impl BandCut {
+    pub(crate) fn new(cut: Vec<f64>, skip: usize, rate: u32) -> Self {
         let kernel = fir::kernel(
             TAPS,
             |hz| {
@@ -503,33 +613,29 @@ impl Plan {
             },
             rate,
         );
-        let centre = |k: usize| (skip + k * masking::HOP + masking::FFT / 2) as f64;
-        // In place: each output sample is emitted before any later input
-        // sample is read, and f64 copies of a 30-minute mid are 0.6 GB.
-        let frames = std::cell::Cell::from_mut(audio).as_slice_of_cells();
-        let mid = |i: usize| {
-            let f = frames[i].get();
-            0.5 * (f[0] as f64 + f[1] as f64)
-        };
-        fir::filter_each(frames.len(), mid, &kernel, |i, band| {
-            // The frame whose centre is at or before this sample.
-            let k = ((i as f64 - (skip + masking::FFT / 2) as f64) / masking::HOP as f64).floor();
-            let k = k.max(0.0) as usize;
-            let (a, b) = (
-                cut.get(k).copied().unwrap_or(0.0),
-                cut.get(k + 1).copied().unwrap_or(0.0),
-            );
-            if a == 0.0 && b == 0.0 {
-                return;
-            }
-            let t = ((i as f64 - centre(k)) / masking::HOP as f64).clamp(0.0, 1.0);
-            let gain = 10f64.powf(-(a + (b - a) * t) / 20.0);
-            let frame = frames[i].get();
-            let side = 0.5 * (frame[0] as f64 - frame[1] as f64);
-            let m = mid(i) + (gain - 1.0) * band;
-            frames[i].set([(m + side) as f32, (m - side) as f32]);
-        });
-        stats
+        Self { cut, skip, kernel }
+    }
+
+    /// Sample `i` of the span after the cut, from `frame`, the sample before
+    /// the cut, and `band`, the band filter of its mid. None for a sample
+    /// that the cut leaves as it is.
+    pub(crate) fn after(&self, i: usize, frame: Stereo, band: f64) -> Option<Stereo> {
+        let centre = |k: usize| (self.skip + k * masking::HOP + masking::FFT / 2) as f64;
+        // The frame whose centre is at or before this sample.
+        let k = ((i as f64 - (self.skip + masking::FFT / 2) as f64) / masking::HOP as f64).floor();
+        let k = k.max(0.0) as usize;
+        let (a, b) = (
+            self.cut.get(k).copied().unwrap_or(0.0),
+            self.cut.get(k + 1).copied().unwrap_or(0.0),
+        );
+        if a == 0.0 && b == 0.0 {
+            return None;
+        }
+        let t = ((i as f64 - centre(k)) / masking::HOP as f64).clamp(0.0, 1.0);
+        let gain = 10f64.powf(-(a + (b - a) * t) / 20.0);
+        let side = 0.5 * (frame[0] as f64 - frame[1] as f64);
+        let m = mid_of(frame) + (gain - 1.0) * band;
+        Some([(m + side) as f32, (m - side) as f32])
     }
 }
 
@@ -626,7 +732,15 @@ mod tests {
         };
         assert_eq!(
             bits(mid_powers(&audio, 48_000)),
-            bits(masking::frames(&mono, masking::Channels::Left, 48_000).powers)
+            bits(
+                masking::frames(
+                    &mono,
+                    masking::Channels::Left,
+                    masking::Measures::Powers,
+                    48_000
+                )
+                .powers
+            )
         );
     }
 
@@ -636,7 +750,13 @@ mod tests {
         let mut audio = vec![[0.0f32; 2]; 50 * masking::HOP];
         let k = 20;
         audio[k * masking::HOP + masking::FFT / 2] = [1.0, 1.0];
-        let frames = masking::frames(&audio, masking::Channels::Left, 48000).powers;
+        let frames = masking::frames(
+            &audio,
+            masking::Channels::Left,
+            masking::Measures::Powers,
+            48000,
+        )
+        .powers;
         let loudest = (0..frames.len())
             .max_by(|a, b| {
                 frames[*a]

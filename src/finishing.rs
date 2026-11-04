@@ -5,7 +5,7 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use std::f64::consts::PI;
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
 pub enum Domain {
     Stereo,
     Mid,
@@ -17,17 +17,30 @@ pub fn eq_domain(audio: &mut [Stereo], bands: &[EqBand], domain: Domain, rate: u
     match domain {
         Domain::Stereo => dsp::eq(audio, bands, rate),
         Domain::Side => dsp::side_eq(audio, bands, rate),
-        Domain::Mid => {
-            let mut filters: Vec<_> = bands.iter().map(|band| band.filter(rate)).collect();
-            for frame in audio {
-                let mut mid = (frame[0] as f64 + frame[1] as f64) * 0.5;
-                let side = (frame[0] as f64 - frame[1] as f64) * 0.5;
-                for filter in &mut filters {
-                    mid = filter.tick(mid);
-                }
-                *frame = [(mid + side) as f32, (mid - side) as f32];
+        Domain::Mid => MidEq::new(bands, rate).process(audio),
+    }
+}
+
+/// `eq_domain` of the mid in spans: each filter keeps its state from one
+/// span to the next.
+pub struct MidEq(Vec<Biquad>);
+
+impl MidEq {
+    pub fn new(bands: &[EqBand], rate: u32) -> Self {
+        Self(bands.iter().map(|band| band.filter(rate)).collect())
+    }
+    /// Filter the mid of the next frames of the signal in place.
+    pub fn process(&mut self, audio: &mut [Stereo]) {
+        let mut filters = std::mem::take(&mut self.0);
+        for frame in audio {
+            let mut mid = (frame[0] as f64 + frame[1] as f64) * 0.5;
+            let side = (frame[0] as f64 - frame[1] as f64) * 0.5;
+            for filter in &mut filters {
+                mid = filter.tick(mid);
             }
+            *frame = [(mid + side) as f32, (mid - side) as f32];
         }
+        self.0 = filters;
     }
 }
 
